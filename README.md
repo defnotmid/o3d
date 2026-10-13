@@ -165,13 +165,29 @@ ways to PNGs.
 
 ## Next
 
-1. Environment lighting: an equirectangular image as image-based light and
-   background (metals reflect something), as three.js's `scene.environment`.
-2. Textures: `map`, `normalMap`, `roughnessMap`, `emissiveMap` with uvs.
-3. glTF import: meshes, materials, node transforms, baked animation sampled
-   at a time.
-4. onimite: a `view3d{}` node drawing into its own texture, composited like
-   any layer; a group's 2D drawing as a texture on a surface; the Lua API in
-   three.js's names; inspect checks; the docs page mapping three.js terms.
-5. ShaderMaterial textures (`uniform sampler2D`, with item 2), and
-   `texelFetch` / `textureSize` once oksl has native size queries.
+Not released yet. In order, with the size of each next to shadows (one
+sizeable change):
+
+1. Textures (larger than shadows): `map`, `normalMap`, `roughnessMap`,
+   `emissiveMap` with uvs; image loading and mipmaps; a software sampler
+   choosing the level as the GPU does (from uv derivatives); per-pixel
+   tangents for normal maps as three.js derives them (screen derivatives).
+   First, because environment lighting samples the same way.
+2. Environment lighting (the largest): an equirectangular image as
+   image-based light and background (metals reflect something), as
+   three.js's `scene.environment`: prefiltered radiance by roughness and
+   diffuse irradiance, sampled alike by both renderers.
+3. glTF import (medium; `vendor:cgltf`): meshes, materials (glTF's
+   metallic-roughness is MeshStandardMaterial's), node transforms, baked
+   animation sampled at a time. Wants textures for fidelity.
+4. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing
+   into its own texture, composited like any layer; a group's 2D drawing as
+   a texture on a surface; the Lua API in three.js's names; inspect
+   checks; the docs page mapping three.js terms.
+5. ShaderMaterial textures (small here): `uniform sampler2D` bound to
+   item 1's textures; `texelFetch` / `textureSize` and CPU implicit-LOD
+   `texture()` wait on oksl (deferred there).
+
+Before onimite depends on o3d: run the tests on macOS. The Metal path
+(the committed MSL, the R32_FLOAT shadow map, oksl's MSL for
+ShaderMaterials) is generated but has only been run on Vulkan.
