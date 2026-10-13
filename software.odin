@@ -15,7 +15,8 @@ import "deps:oksl"
 // values, near-plane clipping. Samples hold sRGB premultiplied RGBA8, so the
 // resolve averages what the GPU's does.
 //
-// A frame is three phases, each spread over the caller's pool (nil: run on
+// A frame (and before it, the shadow map, shadow.odin: depth only, one
+// sample per texel) is three phases, each spread over the caller's pool (nil: run on
 // the caller): chunks of the drawing order (up to CHUNK_TRIS triangles)
 // run the vertex stage over the vertices they use, clip and keep screen
 // triangles with their corners' values, and count them per band of rows;
@@ -63,6 +64,8 @@ Software :: struct {
 	band_tris:     [dynamic]Tri_Ref,
 	// One per thread that runs a phase (the caller is 0).
 	workers:       [dynamic]Worker,
+	// The shadow light's depth per texel (shadow.size squared), drawn first.
+	shadow_map:    []f32,
 }
 
 software_destroy :: proc(s: ^Software) {
@@ -84,6 +87,7 @@ software_destroy :: proc(s: ^Software) {
 		worker_destroy(&w)
 	}
 	delete(s.workers)
+	delete(s.shadow_map)
 	s^ = {}
 }
 
@@ -168,9 +172,6 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	nl := shading_lights(scene.lights[:], &lights)
 	shading_materials(scene_materials(scene), &s.materials)
 	shader_blocks(scene, shaders, view, proj, &s.blocks)
-	draw_order(scene, geos, shaders, view, proj, &s.order)
-	make_chunks(s, scene, geos)
-	bands := (height + BAND_ROWS - 1) / BAND_ROWS
 	threads := 0
 	if pool != nil {
 		sync.guard(&pool.mutex)
@@ -179,23 +180,42 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	if len(s.workers) < threads + 1 {
 		resize(&s.workers, threads + 1)
 	}
-
 	job := Frame_Job {
-		s         = s,
-		scene     = scene,
-		geos      = geos,
-		shaders   = shaders,
-		view_proj = proj * view,
-		lights    = lights[:nl],
-		eye       = scene.camera.position,
-		bands     = bands,
+		s       = s,
+		scene   = scene,
+		geos    = geos,
+		shaders = shaders,
+		lights  = lights[:nl],
+		eye     = scene.camera.position,
+		shadow  = frame_shadow(scene),
 	}
-	resize(&s.chunk_bands, s.chunk_count * bands)
-	parallel(pool, s.chunk_count, &job, transform_chunk)
-	sum_bands(s, bands)
-	parallel(pool, s.chunk_count, &job, list_chunk)
-	parallel(pool, bands, &job, draw_band)
+	if job.shadow.light >= 0 {
+		size := job.shadow.size
+		if len(s.shadow_map) != size * size {
+			delete(s.shadow_map)
+			s.shadow_map = make([]f32, size * size)
+		}
+		shadow_casters(scene, geos, shaders, &job.shadow, &s.order)
+		job.view_proj, job.width, job.height, job.depth_only = job.shadow.view_proj, size, size, true
+		run_pass(s, scene, geos, &job, pool, draw_depth_band)
+	}
+	draw_order(scene, geos, shaders, view, proj, &s.order)
+	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
+	run_pass(s, scene, geos, &job, pool, draw_band)
 	return s.pixels
+}
+
+// The phases over the draws in `s.order` into a `job.width x job.height`
+// target, its bands drawn by `draw`.
+@(private = "file")
+run_pass :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, job: ^Frame_Job, pool: ^thread.Pool, draw: proc(data: rawptr, band, worker: int)) {
+	make_chunks(s, scene, geos)
+	job.bands = (job.height + BAND_ROWS - 1) / BAND_ROWS
+	resize(&s.chunk_bands, s.chunk_count * job.bands)
+	parallel(pool, s.chunk_count, job, transform_chunk)
+	sum_bands(s, job.bands)
+	parallel(pool, s.chunk_count, job, list_chunk)
+	parallel(pool, job.bands, job, draw)
 }
 
 // Splits the drawing order into chunks of at most CHUNK_TRIS triangles.
@@ -219,14 +239,19 @@ make_chunks :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries) {
 
 @(private = "file")
 Frame_Job :: struct {
-	s:         ^Software,
-	scene:     ^Scene,
-	geos:      ^Geometries,
-	shaders:   ^Shaders,
-	view_proj: Mat4,
-	lights:    []Shading_Light,
-	eye:       Vec3,
-	bands:     int,
+	s:             ^Software,
+	scene:         ^Scene,
+	geos:          ^Geometries,
+	shaders:       ^Shaders,
+	lights:        []Shading_Light,
+	eye:           Vec3,
+	shadow:        Shadow,
+	// The pass: its camera and target, and whether it draws only depth
+	// (the shadow map: positions only, the casters' other side).
+	view_proj:     Mat4,
+	width, height: int,
+	depth_only:    bool,
+	bands:         int,
 }
 
 @(private = "file")
@@ -260,12 +285,20 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		lo, hi = min(lo, i), max(hi, i)
 	}
 	count := int(hi - lo) + 1
-	sh := shader_get(job.shaders, s.materials[di].shader)
+	sh := shader_get(job.shaders, s.materials[di].shader) if !job.depth_only else nil
 	nf := sh.varying_floats if sh != nil else STANDARD_FLOATS
+	if job.depth_only {
+		nf = 0
+	}
 	flat := shader_flat(sh) if sh != nil else nil
 	resize(&w.positions, count)
 	resize(&w.values, count * nf)
-	if sh == nil {
+	if job.depth_only {
+		mvp := job.view_proj * d.model
+		for vtx, i in vertices[lo:][:count] {
+			w.positions[i] = mvp * Vec4{vtx.position.x, vtx.position.y, vtx.position.z, 1}
+		}
+	} else if sh == nil {
 		mvp := job.view_proj * d.model
 		nm := normal_matrix(d.model)
 		for vtx, i in vertices[lo:][:count] {
@@ -288,12 +321,13 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		}
 		oksl.run_vertex(&sh.pipeline.vertex.program, block(&s.blocks, di, .Vertex), attrs[:], count, w.positions[:], w.values[:], &w.vm)
 	}
-	side := d.material.side
+	side := shadow_side(d.material.side) if job.depth_only else d.material.side
+	values := raw_data(w.values) // nil with no floats (the shadow map): never read
 	for t := 0; t + 2 < len(indices); t += 3 {
 		v := [3]int{int(indices[t] - lo), int(indices[t + 1] - lo), int(indices[t + 2] - lo)}
 		clip := [3]Vec4{w.positions[v[0]], w.positions[v[1]], w.positions[v[2]]}
 		if clip[0].z >= 0 && clip[1].z >= 0 && clip[2].z >= 0 {
-			emit(c, clip, {&w.values[v[0] * nf], &w.values[v[1] * nf], &w.values[v[2] * nf]}, nf, flat, di, s.width, s.height, side)
+			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, job.width, job.height, side)
 			continue
 		}
 		corners: [3]Corner = ---
@@ -301,7 +335,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 			corners[k].c = clip[k]
 			copy(corners[k].v[:nf], w.values[v[k] * nf:][:nf])
 		}
-		clip_near(c, &corners, nf, flat, di, s.width, s.height, side)
+		clip_near(c, &corners, nf, flat, di, job.width, job.height, side)
 	}
 	counts := s.chunk_bands[ci * job.bands:][:job.bands]
 	slice.zero(counts)
@@ -517,6 +551,42 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	}
 }
 
+// A band of the shadow map: its rows cleared to the far plane, then each
+// triangle's depth at the texel centres it covers, nearest kept.
+@(private = "file")
+draw_depth_band :: proc(data: rawptr, band, _: int) {
+	job := (^Frame_Job)(data)
+	s := job.s
+	size := job.width
+	y0 := band * BAND_ROWS
+	y1 := min(y0 + BAND_ROWS, job.height)
+	slice.fill(s.shadow_map[y0 * size:y1 * size], 1)
+	for ref in s.band_tris[s.band_start[band]:s.band_start[band + 1]] {
+		t := s.chunks[ref.chunk].tris[ref.tri]
+		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+		if area == 0 {
+			continue
+		}
+		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
+		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
+		for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
+			for x in x_lo ..< x_hi {
+				c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
+				if !inside(t, c, area) {
+					continue
+				}
+				b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
+				b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
+				z := b0 * t.p[0].z + b1 * t.p[1].z + (1 - b0 - b1) * t.p[2].z
+				i := y * size + x
+				if z >= 0 && z <= 1 && z < s.shadow_map[i] {
+					s.shadow_map[i] = z
+				}
+			}
+		}
+	}
+}
+
 // A standard-material triangle's rows in the band, shaded per pixel.
 @(private = "file")
 draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0, y1: int) {
@@ -524,6 +594,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 	s := job.s
 	m := &s.materials[t.draw]
 	blend := .Blended in m.flags
+	receive := .Receive_Shadow in m.flags && job.shadow.light >= 0
 	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
@@ -559,7 +630,11 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			if .Flat_Shading not_in m.flags {
 				n = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
 			}
-			lit := shade(m, p, n, job.eye, job.lights) + m.emissive
+			shadow: f32 = 1
+			if receive {
+				shadow = shadow_factor(s.shadow_map, &job.shadow, p, n)
+			}
+			lit := shade(m, p, n, job.eye, job.lights, shadow) + m.emissive
 			write_samples(s, t, x, y, area, covered, pack(lit, m.opacity), blend)
 		}
 	}

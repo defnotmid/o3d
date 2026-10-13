@@ -311,3 +311,57 @@ test_software_shader_material :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
 }
+
+// A long box above two floors, seen from straight above and lit at a tilt
+// by a shadow-casting light: its shadow falls beside it (up the screen) on
+// the floor that receives (left), not on the one that does not (right),
+// with soft edges; a pool draws the same bytes.
+@(test)
+test_software_shadow :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 8, 0.01}, fov = 60, near = 0.1, far = 100}
+	append(&scene.lights, Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.3})
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 5, 5}, cast_shadow = true, shadow = {map_size = 256, height = 10, bias = -0.001}})
+	floor, other, block := MATERIAL_DEFAULT, MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	floor.flags = {.Receive_Shadow}
+	block.flags = {.Cast_Shadow}
+	append(&scene.draws, Draw{plane(&g, 3, 6), compose({-1.6, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	append(&scene.draws, Draw{plane(&g, 3, 6), compose({1.6, 0, 0}, {-math.PI / 2, 0, 0}), other})
+	append(&scene.draws, Draw{box(&g, 4.8, 0.3, 1.2), compose({0, 1.5, 0}), block})
+	W :: 128
+	s: Software
+	defer software_destroy(&s)
+	px := software_render(&s, &scene, &g, nil, W, W)
+	luma :: proc(px: []u8, x, y: int) -> int {
+		i := (y * W + x) * 4
+		return int(px[i]) + int(px[i + 1]) + int(px[i + 2])
+	}
+	SHADOW_Y, OPEN_Y :: 42, 24 // the shadow's band and open floor, above the box
+	LEFT, RIGHT :: 44, 88
+	shadowed, open := luma(px, LEFT, SHADOW_Y), luma(px, LEFT, OPEN_Y)
+	testing.expectf(t, open > 0 && shadowed * 2 < open, "receiving floor: shadow %d, open %d", shadowed, open)
+	testing.expect_value(t, luma(px, RIGHT, SHADOW_Y), luma(px, RIGHT, OPEN_Y))
+	// PCF: the band's edge is between the two.
+	edge := luma(px, LEFT, 32)
+	testing.expectf(t, edge > shadowed && edge < open, "edge %d between %d and %d", edge, shadowed, open)
+
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, 4)
+	thread.pool_start(&pool)
+	defer {
+		thread.pool_join(&pool)
+		thread.pool_destroy(&pool)
+	}
+	pooled: Software
+	defer software_destroy(&pooled)
+	got := software_render(&pooled, &scene, &g, nil, W, W, &pool)
+	differ := 0
+	for i in 0 ..< len(px) {
+		differ += 1 if got[i] != px[i] else 0
+	}
+	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
+}

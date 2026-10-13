@@ -209,3 +209,54 @@ test_custom_matches_software :: proc(t: ^testing.T) {
 		fmt.printf("custom materials: PSNR %.1f dB, worst %d\n", psnr, worst)
 	}
 }
+
+// The custom scene with the key light casting a shadow, every draw casting
+// and receiving (ShaderMaterials cast with their plain geometry and do not
+// receive).
+shadow_scene :: proc(t: ^testing.T, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders) {
+	custom_scene(t, scene, geos, shaders)
+	for &l in scene.lights {
+		if l.kind == .Directional {
+			l.cast_shadow = true
+			l.shadow = {map_size = 1024, height = 9, bias = -0.0005, normal_bias = 0.01}
+		}
+	}
+	for i in 0 ..< len(scene.draws) {
+		scene.draws.material[i].flags += {.Cast_Shadow, .Receive_Shadow}
+	}
+}
+
+// Shadows draw the same on the GPU as on the software renderer: the map,
+// the PCF filter and the shadowed light.
+@(test)
+test_shadow_matches_software :: proc(t: ^testing.T) {
+	g: GPU
+	if init(&g) != nil {
+		fmt.println("no GPU device: skipped")
+		return
+	}
+	defer destroy(&g)
+	geos: o3d.Geometries
+	defer o3d.geometries_destroy(&geos)
+	shaders: o3d.Shaders
+	defer o3d.shaders_destroy(&shaders)
+	scene: o3d.Scene
+	defer o3d.scene_destroy(&scene)
+	shadow_scene(t, &scene, &geos, &shaders)
+	W, H :: 240, 180
+	out := target(&g, W, H)
+	defer sdl.ReleaseGPUTexture(g.device, out)
+	testing.expect(t, render(&g, &scene, &geos, &shaders, out, W, H) == nil)
+	gpu, _ := read(&g, out, W, H)
+	defer delete(gpu)
+	sw: o3d.Software
+	defer o3d.software_destroy(&sw)
+	cpu := o3d.software_render(&sw, &scene, &geos, &shaders, W, H)
+	sum: f64
+	for i in 0 ..< len(cpu) {
+		d := f64(cpu[i]) - f64(gpu[i])
+		sum += d * d
+	}
+	psnr := 10 * math.log10(255 * 255 / max(sum / f64(len(cpu)), 1e-9))
+	testing.expectf(t, psnr > 32, "PSNR %.1f dB", psnr)
+}

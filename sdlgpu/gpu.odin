@@ -18,8 +18,12 @@ VERT_SPV :: #load("../shaders/o3d.vert.spv")
 FRAG_SPV :: #load("../shaders/o3d.frag.spv")
 VERT_MSL :: #load("../shaders/o3d.vert.msl")
 FRAG_MSL :: #load("../shaders/o3d.frag.msl")
+SHADOW_SPV :: #load("../shaders/o3d.shadow.spv")
+SHADOW_MSL :: #load("../shaders/o3d.shadow.msl")
 
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
+// The shadow map holds depth as a colour, so every backend can sample it.
+SHADOW_FORMAT :: sdl.GPUTextureFormat.R32_FLOAT
 
 // A GPU copy of one of `Geometries`' shared arrays: the first `uploaded`
 // bytes are on the GPU; growing past `capacity` makes a new buffer.
@@ -44,6 +48,16 @@ GPU :: struct {
 	// Per shader (its id - 1): ShaderMaterials' GPU shaders and pipelines,
 	// made the first time a frame draws with them.
 	custom:       [dynamic]Custom,
+	// The shadow pass (shadow.odin): its fragment shader (depth out), its
+	// pipelines by the casters' material side, the map (depth per texel,
+	// read by the main pass) and its depth buffer at `shadow_size` squared.
+	shadow_frag:      ^sdl.GPUShader,
+	shadow_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
+	shadow_map:       ^sdl.GPUTexture,
+	shadow_depth:     ^sdl.GPUTexture,
+	shadow_size:      u32,
+	shadow_sampler:   ^sdl.GPUSampler,
+	casters:          [dynamic]int,
 	// Scratch per frame.
 	order:        [dynamic]int,
 	materials:    [dynamic]o3d.Shading_Material, // per draw
@@ -76,14 +90,17 @@ Light_Uniforms :: struct {
 	color, ground, vector: [4]f32,
 	kind:                  u32, // o3d.Light_Kind
 	distance, decay:       f32,
-	_:                     f32,
+	shadowed:              u32,
 }
 #assert(size_of(Light_Uniforms) == 64)
 
 Lighting_Uniforms :: struct {
-	eye:    [4]f32,
-	count:  [4]i32,
-	lights: [o3d.MAX_LIGHTS]Light_Uniforms,
+	eye:           [4]f32,
+	count:         [4]i32,
+	shadow_matrix: o3d.Mat4,
+	// Map size (0: no shadow), bias, normal bias.
+	shadow_params: [4]f32,
+	lights:        [o3d.MAX_LIGHTS]Light_Uniforms,
 }
 
 init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
@@ -103,20 +120,23 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	// slangc names the SPIR-V entry points "main" and keeps the names for Metal.
 	formats := sdl.GetGPUShaderFormats(g.device)
-	vert_code, frag_code: []u8
+	vert_code, frag_code, shadow_code: []u8
 	format: sdl.GPUShaderFormat
-	vs_entry, fs_entry: cstring
+	vs_entry, fs_entry, shadow_entry: cstring
 	switch {
 	case .SPIRV in formats:
-		vert_code, frag_code, format, vs_entry, fs_entry = VERT_SPV, FRAG_SPV, {.SPIRV}, "main", "main"
+		vert_code, frag_code, shadow_code, format = VERT_SPV, FRAG_SPV, SHADOW_SPV, {.SPIRV}
+		vs_entry, fs_entry, shadow_entry = "main", "main", "main"
 	case .MSL in formats:
-		vert_code, frag_code, format, vs_entry, fs_entry = VERT_MSL, FRAG_MSL, {.MSL}, "vs_main", "fs_main"
+		vert_code, frag_code, shadow_code, format = VERT_MSL, FRAG_MSL, SHADOW_MSL, {.MSL}
+		vs_entry, fs_entry, shadow_entry = "vs_main", "fs_main", "fs_shadow"
 	case:
 		return .Device
 	}
 	g.vert = sdl.CreateGPUShader(g.device, {code_size = len(vert_code), code = raw_data(vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
-	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_uniform_buffers = 2})
-	if g.vert == nil || g.frag == nil {
+	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 2})
+	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT})
+	if g.vert == nil || g.frag == nil || g.shadow_frag == nil {
 		return .Shader
 	}
 	g.depth_format = .D32_FLOAT
@@ -134,6 +154,24 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 				return .Shader
 			}
 		}
+		g.shadow_pipelines[side] = make_shadow_pipeline(g, side)
+		if g.shadow_pipelines[side] == nil {
+			return .Shader
+		}
+	}
+	g.shadow_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .NEAREST, mag_filter = .NEAREST, mipmap_mode = .NEAREST, address_mode_u = .CLAMP_TO_EDGE, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE})
+	if g.shadow_sampler == nil {
+		return .Device
+	}
+	// A 1x1 map, cleared, bound while no light casts a shadow (never read).
+	cmd := sdl.AcquireGPUCommandBuffer(g.device)
+	if cmd == nil || !ensure_shadow(g, 1) {
+		return .Device
+	}
+	clear := sdl.GPUColorTargetInfo{texture = g.shadow_map, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
+	if !sdl.SubmitGPUCommandBuffer(cmd) {
+		return .Device
 	}
 	return nil
 }
@@ -162,6 +200,19 @@ destroy :: proc(g: ^GPU) {
 		}
 	}
 	release_targets(g)
+	for p in g.shadow_pipelines {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
+	}
+	release_shadow(g)
+	if g.shadow_sampler != nil {
+		sdl.ReleaseGPUSampler(g.device, g.shadow_sampler)
+	}
+	if g.shadow_frag != nil {
+		sdl.ReleaseGPUShader(g.device, g.shadow_frag)
+	}
+	delete(g.casters)
 	if g.vert != nil {
 		sdl.ReleaseGPUShader(g.device, g.vert)
 	}
@@ -301,6 +352,58 @@ release_custom :: proc(g: ^GPU, c: ^Custom) {
 	c^ = {}
 }
 
+// The shadow pass's pipeline for casters of a material side: depth into the
+// R32_FLOAT map (nearest kept by the depth test), the other side drawn.
+@(private = "file")
+make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side) -> ^sdl.GPUGraphicsPipeline {
+	buffer := sdl.GPUVertexBufferDescription{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX}
+	color := sdl.GPUColorTargetDescription{format = SHADOW_FORMAT}
+	cull: sdl.GPUCullMode
+	switch o3d.shadow_side(side) {
+	case .Front:
+		cull = .BACK
+	case .Back:
+		cull = .FRONT
+	case .Double:
+		cull = .NONE
+	}
+	info := sdl.GPUGraphicsPipelineCreateInfo {
+		vertex_shader = g.vert,
+		fragment_shader = g.shadow_frag,
+		vertex_input_state = {vertex_buffer_descriptions = &buffer, num_vertex_buffers = 1, vertex_attributes = &STANDARD_ATTRIBUTES[0], num_vertex_attributes = len(STANDARD_ATTRIBUTES)},
+		primitive_type = .TRIANGLELIST,
+		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
+		multisample_state = {sample_count = ._1},
+		depth_stencil_state = {compare_op = .LESS, enable_depth_test = true, enable_depth_write = true},
+		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
+	}
+	return sdl.CreateGPUGraphicsPipeline(g.device, info)
+}
+
+// The shadow map and its depth buffer at `size` squared.
+@(private = "file")
+ensure_shadow :: proc(g: ^GPU, size: u32) -> bool {
+	if g.shadow_size == size && g.shadow_map != nil {
+		return true
+	}
+	release_shadow(g)
+	g.shadow_map = sdl.CreateGPUTexture(g.device, {type = .D2, format = SHADOW_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
+	g.shadow_depth = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
+	g.shadow_size = size
+	return g.shadow_map != nil && g.shadow_depth != nil
+}
+
+@(private = "file")
+release_shadow :: proc(g: ^GPU) {
+	if g.shadow_map != nil {
+		sdl.ReleaseGPUTexture(g.device, g.shadow_map)
+	}
+	if g.shadow_depth != nil {
+		sdl.ReleaseGPUTexture(g.device, g.shadow_depth)
+	}
+	g.shadow_map, g.shadow_depth, g.shadow_size = nil, nil, 0
+}
+
 @(private = "file")
 release_targets :: proc(g: ^GPU) {
 	if g.color != nil {
@@ -378,6 +481,38 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 	return nil
 }
 
+// The shadow pass: the casters' depth from the shadow light into the map.
+@(private = "file")
+draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, shadow: ^o3d.Shadow, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
+	if !ensure_shadow(g, u32(shadow.size)) {
+		return .Out_Of_Memory
+	}
+	o3d.shadow_casters(scene, geos, shaders, shadow, &g.casters)
+	color := sdl.GPUColorTargetInfo{texture = g.shadow_map, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = g.shadow_depth, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
+	defer sdl.EndGPURenderPass(pass)
+	if g.vertices.buffer == nil {
+		return nil
+	}
+	sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
+	sdl.BindGPUIndexBuffer(pass, {buffer = g.indices.buffer}, ._32BIT)
+	bound: ^sdl.GPUGraphicsPipeline
+	for di in g.casters {
+		d := &scene.draws[di]
+		geo, _ := o3d.geometry_get(geos, d.geometry) // shadow_casters kept only draws with geometry
+		p := g.shadow_pipelines[d.material.side]
+		if p != bound {
+			sdl.BindGPUGraphicsPipeline(pass, p)
+			bound = p
+		}
+		du := Draw_Uniforms{shadow.view_proj * d.model, d.model, o3d.normal_matrix(d.model)}
+		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
+		sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
+	}
+	return nil
+}
+
 // Draws `scene` into `out` (made by `target`, `width x height`). With `cmd`
 // the work is recorded into it (the caller submits); else it is submitted
 // and waited for.
@@ -401,9 +536,17 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 	nl := o3d.shading_lights(scene.lights[:], &lights)
 	o3d.shading_materials(o3d.scene_materials(scene), &g.materials)
 	o3d.shader_blocks(scene, shaders, view, proj, &g.blocks)
+	shadow := o3d.frame_shadow(scene)
+	if shadow.light >= 0 {
+		draw_shadow(g, scene, geos, shaders, &shadow, cmd) or_return
+	}
 	lu: Lighting_Uniforms
 	lu.eye = {scene.camera.position.x, scene.camera.position.y, scene.camera.position.z, 0}
 	lu.count = {i32(nl), 0, 0, 0}
+	if shadow.light >= 0 {
+		lu.shadow_matrix = shadow.view_proj
+		lu.shadow_params = {f32(shadow.size), shadow.bias, shadow.normal_bias, 0}
+	}
 	for l, i in lights[:nl] {
 		lu.lights[i] = {
 			color    = {l.color.r, l.color.g, l.color.b, 0},
@@ -412,6 +555,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			kind     = u32(l.kind),
 			distance = l.distance,
 			decay    = l.decay,
+			shadowed = u32(l.shadowed),
 		}
 	}
 
@@ -470,6 +614,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		p := g.pipelines[d.material.side][1 if blend else 0]
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
+			sdl.BindGPUFragmentSamplers(pass, 0, &sdl.GPUTextureSamplerBinding{texture = g.shadow_map, sampler = g.shadow_sampler}, 1)
 			bound = p
 		}
 		du := Draw_Uniforms{view_proj * d.model, d.model, o3d.normal_matrix(d.model)}

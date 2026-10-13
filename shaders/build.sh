@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 FLAGS=(-matrix-layout-column-major -O2)
-for unit in vert:vs_main frag:fs_main; do
+for unit in vert:vs_main frag:fs_main shadow:fs_shadow; do
 	IFS=: read -r suffix entry <<<"$unit"
 	slangc o3d.slang "${FLAGS[@]}" -entry "$entry" -target spirv -o "o3d.$suffix.spv"
 	slangc o3d.slang "${FLAGS[@]}" -entry "$entry" -target metal -o "o3d.$suffix.msl"
@@ -19,3 +19,4 @@ for unit in vert:vs_main frag:fs_main; do
 done
 spirv-val --target-env vulkan1.2 o3d.vert.spv
 spirv-val --target-env vulkan1.2 o3d.frag.spv
+spirv-val --target-env vulkan1.2 o3d.shadow.spv

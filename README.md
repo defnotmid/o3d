@@ -35,6 +35,14 @@ What is known about three.js carries over:
   `position` toward `target`) and PointLight (`distance`, `decay`), in
   three.js's units: a white directional light of intensity 1 lights a white
   surface facing it to 1/pi of white, so scenes use intensities around 2 to 3.
+- Shadows are DirectionalLightShadow's with PCF: a directional light with
+  `cast_shadow` (the first) and its `shadow` settings (`map_size`,
+  `height` of its square orthographic view, `near`, `far`, `bias`,
+  `normal_bias`; zero takes three.js's 512, 10, 0.5, 500), draws with
+  `.Cast_Shadow` and `.Receive_Shadow` in their material's flags (three.js
+  has them on the mesh; a draw's material is its own). Casters draw their
+  other side (three.js's default shadowSide) and plain geometry;
+  ShaderMaterials cast but do not receive.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
   (radiusTop 0 is a cone), `torus`. The same parameters give the same id,
@@ -52,9 +60,11 @@ scene: o3d.Scene                           // filled every frame
 o3d.scene_clear(&scene)
 scene.camera = {position = {0, 2, 6}, target = {0, 0.5, 0}, fov = 40, near = 0.1, far = 100}
 append(&scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.2, 0.15, 0.2}, intensity = 1.5})
-append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {3, 5, 2}})
+append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {3, 5, 2},
+	cast_shadow = true, shadow = {map_size = 1024, bias = -0.0005}})
 m := o3d.MATERIAL_DEFAULT
 m.color, m.roughness = {1, 0.35, 0.3}, 0.4
+m.flags = {.Cast_Shadow, .Receive_Shadow}
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
 // ShaderMaterial: compiled once (same sources, same id), uniforms per frame
@@ -116,6 +126,16 @@ ways to PNGs.
   (tested). Triangles are a structure of arrays, as counting and listing
   read only their row spans. Vertices stay interleaved: the GPU reads them
   as one buffer and the rasterizer gathers whole vertices by index.
+- **Shadows** (shadow.odin) are drawn first: the casters' depth from the
+  light (`shadow_casters`, culled to its view), one sample per texel
+  centre, nearest kept; the software renderer runs the same phases in a
+  depth-only mode at the map's size, the GPU renders into an R32_FLOAT
+  colour target (sampleable on every backend) with a depth buffer. A
+  receiver's pixel scales the shadow light's direct light by
+  `shadow_factor`: a 3x3 grid of bilinear depth comparisons (a 4x4 block
+  of texels weighed 1 - f, 1, 1, f per axis), edges repeated, outside the
+  light's view lit. The shader has the same arithmetic (`shadow_factor` in
+  `shaders/o3d.slang`); `FLAG_RECEIVE_SHADOW` joins the shader contract.
 - **Order:** draws whose bounding sphere (the geometry's radius, scaled
   with the draw) is outside the view, or whose shader failed, are skipped;
   then opaque draws as listed, then blended ones (transparent with opacity
@@ -145,14 +165,13 @@ ways to PNGs.
 
 ## Next
 
-1. Shadows: a shadow map for one directional light (both renderers).
-2. Environment lighting: an equirectangular image as image-based light and
+1. Environment lighting: an equirectangular image as image-based light and
    background (metals reflect something), as three.js's `scene.environment`.
-3. Textures: `map`, `normalMap`, `roughnessMap`, `emissiveMap` with uvs.
-4. glTF import: meshes, materials, node transforms, baked animation sampled
+2. Textures: `map`, `normalMap`, `roughnessMap`, `emissiveMap` with uvs.
+3. glTF import: meshes, materials, node transforms, baked animation sampled
    at a time.
-5. onimite: a `view3d{}` node drawing into its own texture, composited like
+4. onimite: a `view3d{}` node drawing into its own texture, composited like
    any layer; a group's 2D drawing as a texture on a surface; the Lua API in
    three.js's names; inspect checks; the docs page mapping three.js terms.
-6. ShaderMaterial textures (`uniform sampler2D`, with item 3), and
+5. ShaderMaterial textures (`uniform sampler2D`, with item 2), and
    `texelFetch` / `textureSize` once oksl has native size queries.

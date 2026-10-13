@@ -40,8 +40,12 @@ Light :: struct {
 	target:    Vec3,
 	// Point lights: the range (0: none) and the falloff exponent (2 is
 	// physical, three.js's default).
-	distance:  f32,
-	decay:     f32,
+	distance:    f32,
+	decay:       f32,
+	// Directional lights: casts a shadow (three.js's castShadow; the first
+	// such light does, shadow.odin) with these settings.
+	cast_shadow: bool,
+	shadow:      Light_Shadow,
 }
 
 Side :: enum u8 {
@@ -58,6 +62,11 @@ Material_Flag :: enum u8 {
 	Flat_Shading,
 	// Blended over what is behind (opacity < 1 needs it, as in three.js).
 	Transparent,
+	// Drawn into the shadow map, and darkened where it is shadowed: three.js
+	// puts castShadow and receiveShadow on the mesh, and a draw's material
+	// is its own.
+	Cast_Shadow,
+	Receive_Shadow,
 }
 
 Material_Flags :: bit_set[Material_Flag; u8]
@@ -170,22 +179,14 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	models := scene.draws.model[:n]
 	geometries := scene.draws.geometry[:n]
 	view_proj := proj * view
-	seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4) -> bool {
-		geo := geometry_get(geos, id) or_return
-		if geo.index_count == 0 {
-			return false
-		}
-		scale := max(linalg.length(Vec3{model[0, 0], model[1, 0], model[2, 0]}), linalg.length(Vec3{model[0, 1], model[1, 1], model[2, 1]}), linalg.length(Vec3{model[0, 2], model[1, 2], model[2, 2]}))
-		return sphere_visible(view_proj, {model[0, 3], model[1, 3], model[2, 3]}, geo.radius * scale)
-	}
 	for m, i in materials {
-		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && seen(geos, geometries[i], models[i], view_proj) {
+		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj) {
 			append(order, i)
 		}
 	}
 	first := len(order)
 	for m, i in materials {
-		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && seen(geos, geometries[i], models[i], view_proj) {
+		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj) {
 			append(order, i)
 		}
 	}
@@ -234,17 +235,20 @@ Shading_Light :: struct {
 	vector:   Vec3,
 	distance: f32,
 	decay:    f32,
+	// The shadow light: its direct light is scaled by the shadow factor.
+	shadowed: bool,
 }
 
 MAX_LIGHTS :: 8
 
 shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int {
 	n := 0
-	for l in lights {
+	shadow := shadow_light(lights)
+	for l, i in lights {
 		if n == MAX_LIGHTS {
 			break
 		}
-		sl := Shading_Light{kind = l.kind, color = linear(l.color) * l.intensity, ground = linear(l.ground) * l.intensity, distance = l.distance, decay = l.decay}
+		sl := Shading_Light{kind = l.kind, color = linear(l.color) * l.intensity, ground = linear(l.ground) * l.intensity, distance = l.distance, decay = l.decay, shadowed = i == shadow}
 		switch l.kind {
 		case .Directional:
 			d := l.position - l.target
@@ -279,6 +283,7 @@ Shading_Flag :: enum u8 {
 	// Lit from both sides: the side is not .Front.
 	Two_Sided,
 	Blended,
+	Receive_Shadow,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -300,6 +305,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		if blended(m) {
 			f += {.Blended}
 		}
+		if .Receive_Shadow in m.flags {
+			f += {.Receive_Shadow}
+		}
 		out[i] = {
 			base      = linear(m.color),
 			emissive  = linear(m.emissive) * m.emissive_intensity,
@@ -315,8 +323,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 // The colour (linear) leaving a point of `m` at `world` with normal `n`
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
 // specular with Smith correlated visibility and Schlick Fresnel), direct
-// lights plus ambient and hemisphere light; no environment map.
-shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light) -> Vec3 {
+// lights plus ambient and hemisphere light; no environment map. `shadow`
+// scales the shadow light's direct light (shadow_factor; 1: lit).
+shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1) -> Vec3 {
 	base := m.base
 	if .Basic in m.flags {
 		return base
@@ -353,6 +362,9 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 					falloff *= t * t
 				}
 				light *= falloff
+			}
+			if l.shadowed {
+				light *= shadow
 			}
 			nl := clamp(linalg.dot(n, ldir), 0, 1)
 			if nl <= 0 {
