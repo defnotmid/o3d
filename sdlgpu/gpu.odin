@@ -324,7 +324,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	sdl.PushGPUFragmentUniformData(cmd, 1, &lu, size_of(lu))
-	o3d.draw_order(scene, view, &g.order)
+	o3d.draw_order(scene, geos, view, proj, &g.order)
 	if g.vertices.buffer != nil {
 		sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
 		sdl.BindGPUIndexBuffer(pass, {buffer = g.indices.buffer}, ._32BIT)
@@ -332,10 +332,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 	bound: ^sdl.GPUGraphicsPipeline
 	for di in g.order {
 		d := &scene.draws[di]
-		geo, ok := o3d.geometry_get(geos, d.geometry)
-		if !ok || geo.index_count == 0 {
-			continue
-		}
+		geo, _ := o3d.geometry_get(geos, d.geometry) // draw_order kept only draws with geometry
 		m := &g.materials[di]
 		p := g.pipelines[d.material.side][1 if .Blended in m.flags else 0]
 		if p != bound {

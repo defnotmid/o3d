@@ -120,20 +120,33 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 	return
 }
 
-// The order to draw in: the opaque draws as listed, then the blended ones
-// (transparent with opacity under 1) farthest from the camera first.
-draw_order :: proc(scene: ^Scene, view: Mat4, order: ^[dynamic]int) {
+// The order to draw in: the draws that can be seen (with geometry, its
+// bounding sphere at least partly in the view), the opaque ones as listed,
+// then the blended ones (transparent with opacity under 1) farthest from the
+// camera first.
+draw_order :: proc(scene: ^Scene, geos: ^Geometries, view, proj: Mat4, order: ^[dynamic]int) {
 	clear(order)
+	n := len(scene.draws)
 	materials := scene_materials(scene)
-	models := scene.draws.model[:len(scene.draws)]
+	models := scene.draws.model[:n]
+	geometries := scene.draws.geometry[:n]
+	view_proj := proj * view
+	seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4) -> bool {
+		geo := geometry_get(geos, id) or_return
+		if geo.index_count == 0 {
+			return false
+		}
+		scale := max(linalg.length(Vec3{model[0, 0], model[1, 0], model[2, 0]}), linalg.length(Vec3{model[0, 1], model[1, 1], model[2, 1]}), linalg.length(Vec3{model[0, 2], model[1, 2], model[2, 2]}))
+		return sphere_visible(view_proj, {model[0, 3], model[1, 3], model[2, 3]}, geo.radius * scale)
+	}
 	for m, i in materials {
-		if !blended(m) {
+		if !blended(m) && seen(geos, geometries[i], models[i], view_proj) {
 			append(order, i)
 		}
 	}
 	first := len(order)
 	for m, i in materials {
-		if blended(m) {
+		if blended(m) && seen(geos, geometries[i], models[i], view_proj) {
 			append(order, i)
 		}
 	}
@@ -146,6 +159,22 @@ draw_order :: proc(scene: ^Scene, view: Mat4, order: ^[dynamic]int) {
 			back[j], back[j - 1] = back[j - 1], back[j]
 		}
 	}
+}
+
+// Whether a sphere (world centre and radius) is at least partly inside the
+// view volume of `view_proj` (-w <= x, y <= w, 0 <= z <= w), tested against
+// its six planes.
+sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32) -> bool {
+	row :: #force_inline proc "contextless" (m: Mat4, r: int) -> Vec4 {
+		return {m[r, 0], m[r, 1], m[r, 2], m[r, 3]}
+	}
+	x, y, z, w := row(view_proj, 0), row(view_proj, 1), row(view_proj, 2), row(view_proj, 3)
+	for plane in ([6]Vec4{w + x, w - x, w + y, w - y, z, w - z}) {
+		if linalg.dot(plane.xyz, centre) + plane.w < -radius * linalg.length(plane.xyz) {
+			return false
+		}
+	}
+	return true
 }
 
 blended :: proc "contextless" (m: Material) -> bool {

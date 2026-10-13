@@ -5,6 +5,7 @@ import "core:math"
 import "core:math/linalg"
 import "core:strings"
 import "core:testing"
+import "core:thread"
 
 // Every primitive's triangles wind counter-clockwise seen from outside: the
 // face normal agrees with the vertex normals. They share one vertex and index
@@ -119,4 +120,89 @@ test_software_transparent :: proc(t: ^testing.T) {
 	px := software_render(&s, &scene, &g, 64, 64)
 	i := (32 * 64 + 32) * 4
 	testing.expectf(t, px[i] > 100 && px[i + 2] > 100 && px[i + 3] == 255, "%v", px[i:i + 4])
+}
+
+// Drawn on a pool, a frame is the same bytes as drawn on the caller: the
+// chunks (a sphere of more than CHUNK_TRIS triangles makes several) and the
+// bands keep the drawing order, blending included.
+@(test)
+test_software_pool :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 1, 5}, fov = 50, near = 0.1, far = 100}
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {2, 3, 2}})
+	append(&scene.lights, Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.3, 0.2, 0.2}, intensity = 1})
+	big := sphere(&g, 1.2, 128, 64)
+	vertices, indices, _ := geometry_mesh(&g, big)
+	testing.expect(t, len(indices) / 3 > CHUNK_TRIS && len(vertices) > 0)
+	solid, glass := MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	solid.color, solid.roughness = {0.9, 0.4, 0.3}, 0.4
+	glass.color, glass.opacity, glass.flags, glass.side = {0.3, 0.6, 1}, 0.5, {.Transparent}, .Double
+	append(&scene.draws, Draw{big, compose(), solid})
+	for i in 0 ..< 12 {
+		x := f32(i % 4) - 1.5
+		y := f32(i / 4) - 0.5
+		append(&scene.draws, Draw{box(&g, 0.5, 0.5, 0.5), compose({x, y, 1.5}, {0.3, f32(i), 0}), glass if i % 3 == 0 else solid})
+	}
+	W, H :: 200, 150
+	alone, pooled: Software
+	defer software_destroy(&alone)
+	defer software_destroy(&pooled)
+	want := software_render(&alone, &scene, &g, W, H)
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, 4)
+	thread.pool_start(&pool)
+	defer {
+		thread.pool_join(&pool)
+		thread.pool_destroy(&pool)
+	}
+	for _ in 0 ..< 2 { // the second frame reuses the chunks' lists
+		got := software_render(&pooled, &scene, &g, W, H, &pool)
+		differ := 0
+		for i in 0 ..< len(want) {
+			differ += 1 if got[i] != want[i] else 0
+		}
+		testing.expectf(t, differ == 0, "%d bytes differ", differ)
+	}
+}
+
+// draw_order keeps the draws that can be seen: with geometry, their bounding
+// sphere (scaled with the draw) reaching into the view.
+@(test)
+test_draw_order_culls :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene) // the camera at +5 Z looking at the origin
+	ball := sphere(&g, 1, 8, 4)
+	m, glass := MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	glass.opacity, glass.flags = 0.5, {.Transparent}
+	append(&scene.draws, Draw{ball, compose(), m}) // in view
+	append(&scene.draws, Draw{ball, compose({0, 0, 10}), m}) // behind the camera
+	append(&scene.draws, Draw{ball, compose({20, 0, 0}), m}) // far to the side
+	append(&scene.draws, Draw{99, compose(), m}) // no such geometry
+	append(&scene.draws, Draw{ball, compose({4, 0, 0}, {}, {3, 3, 3}), m}) // off centre, scaled into view
+	append(&scene.draws, Draw{ball, compose({0, 0, 1}), glass}) // in view, blended: last
+	view, proj := camera_matrices(scene.camera, 100, 100)
+	order: [dynamic]int
+	defer delete(order)
+	draw_order(&scene, &g, view, proj, &order)
+	testing.expectf(t, slice_equal(order[:], []int{0, 4, 5}), "order %v", order)
+}
+
+@(private = "file")
+slice_equal :: proc(a, b: []int) -> bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for x, i in a {
+		if x != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -66,8 +66,8 @@ ways to PNGs.
 
 - **Data:** the scene is flat tables (lights, draws: geometry id, model
   matrix, material) refilled each frame, the draws a structure of arrays
-  (`#soa`) since the per-frame passes read a column or two; geometry is the only retained
-  state: one array of interleaved position / normal / uv vertices and one
+  (`#soa`) since the per-frame passes read a column or two; geometry is
+  the only retained state: one array of interleaved position / normal / uv vertices and one
   of 32-bit indices shared by every geometry, a geometry being its ranges
   in them. The GPU mirrors the two arrays in two buffers, uploading what
   is new at the start of a frame.
@@ -87,17 +87,24 @@ ways to PNGs.
   means changing the other; the tests compare the two renderers.
 - **Anti-aliasing:** 4x MSAA on the GPU; the software renderer keeps four
   samples per pixel at the same positions, shades once per pixel per
-  triangle, and resolves the same way. It sorts triangles into bands of
-  32 rows (counted, then filled in drawing order) and draws each band from
-  its own list; the triangles are a structure of arrays, as binning reads
-  only their row spans. Vertices stay interleaved: the GPU reads them as
-  one buffer and the rasterizer gathers whole vertices by index.
-- **Order:** opaque draws as listed, then blended ones (transparent with
-  opacity under 1) farthest first, without writing depth (`draw_order`).
+  triangle, and resolves the same way.
+- **Software phases,** each spread over the caller's pool: chunks of the
+  drawing order (up to 8192 triangles, so one large mesh splits too) are
+  transformed, clipped and counted per band of 32 rows; after a prefix sum
+  each chunk lists its triangles in the bands, so a band's list keeps the
+  drawing order; then each band clears its rows, draws its list and
+  resolves its pixels. A frame is the same bytes with or without a pool
+  (tested). Triangles are a structure of arrays, as counting and listing
+  read only their row spans. Vertices stay interleaved: the GPU reads them
+  as one buffer and the rasterizer gathers whole vertices by index.
+- **Order:** draws whose bounding sphere (the geometry's radius, scaled
+  with the draw) is outside the view are skipped; then opaque draws as
+  listed, then blended ones (transparent with opacity under 1) farthest
+  first, without writing depth (`draw_order`, shared by both renderers).
 - **Shaders** are Slang compiled offline (`shaders/build.sh`) to committed
   SPIR-V and MSL, as ovg's are; o3d needs no shader compiler at run time.
 - Errors are values (`Error`); no threads of its own: the software
-  renderer bands rows on the caller's `thread.Pool`.
+  renderer runs its phases on the caller's `thread.Pool`.
 
 ## Next
 
