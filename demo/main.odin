@@ -1,0 +1,44 @@
+// Renders the test scene with the GPU and the software renderer to PNGs:
+//
+//     odin run demo -collection:deps=.. -- out_dir
+package o3d_demo
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import stbi "vendor:stb/image"
+
+import o3d ".."
+import gpu "../sdlgpu"
+
+main :: proc() {
+	dir := os.args[1] if len(os.args) > 1 else "."
+	W, H :: 960, 540
+	geos: o3d.Geometries
+	defer o3d.geometries_destroy(&geos)
+	scene: o3d.Scene
+	defer o3d.scene_destroy(&scene)
+	gpu.test_scene(&scene, &geos)
+
+	sw: o3d.Software
+	defer o3d.software_destroy(&sw)
+	cpu := o3d.software_render(&sw, &scene, &geos, W, H)
+	save(dir, "software.png", cpu, W, H)
+
+	g: gpu.GPU
+	if gpu.init(&g) != nil {
+		fmt.eprintln("no GPU device")
+		return
+	}
+	defer gpu.destroy(&g)
+	out := gpu.target(&g, W, H)
+	gpu.render(&g, &scene, &geos, out, W, H)
+	px, _ := gpu.read(&g, out, W, H)
+	save(dir, "gpu.png", px, W, H)
+}
+
+save :: proc(dir, name: string, px: []u8, w, h: int) {
+	path := strings.clone_to_cstring(fmt.tprintf("%s/%s", dir, name))
+	stbi.write_png(path, i32(w), i32(h), 4, raw_data(px), i32(w * 4))
+	fmt.println(path)
+}

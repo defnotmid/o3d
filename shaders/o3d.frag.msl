@@ -1,0 +1,388 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 25 "o3d.slang"
+struct Material_0
+{
+    float4 color_0;
+    float4 emissive_0;
+    float4 params_0;
+};
+
+
+
+struct Light_0
+{
+    float4 color_1;
+    float4 ground_0;
+    float4 vector_0;
+    float4 params_1;
+};
+
+
+#line 41
+struct Lighting_0
+{
+    float4 eye_0;
+    int4 count_0;
+    array<Light_0, int(8)> lights_0;
+};
+
+
+#line 41
+struct KernelContext_0
+{
+    Material_0 constant* material_0;
+    Lighting_0 constant* lighting_0;
+};
+
+
+#line 79
+float3 shade_0(float3 base_0, float3 world_0, float3 n_0, float3 eye_1, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 80
+    float metalness_0 = kernelContext_0->material_0->params_0.x;
+    float3 v_0 = normalize(eye_1 - world_0);
+    float3 _S1 = base_0 * float3((1.0f - metalness_0)) ;
+    float3 _S2 = mix(float3(0.03999999910593033f) , base_0, float3(metalness_0) );
+    float roughness_0 = clamp(kernelContext_0->material_0->params_0.y, 0.05249999836087227f, 1.0f);
+    float _S3 = roughness_0 * roughness_0;
+    float _S4 = clamp(dot(n_0, v_0), 0.00009999999747379f, 1.0f);
+    float3 _S5 = float3(int3(int(0)) );
+
+#line 87
+    int k_0 = int(0);
+
+#line 87
+    float3 o_0 = _S5;
+    for(;;)
+    {
+
+#line 88
+        if(k_0 < (kernelContext_0->lighting_0->count_0.x))
+        {
+        }
+        else
+        {
+
+#line 88
+            break;
+        }
+
+#line 89
+        Light_0 l_0 = kernelContext_0->lighting_0->lights_0[k_0];
+        int kind_0 = int(kernelContext_0->lighting_0->lights_0[k_0].params_1.x);
+        if(kind_0 == int(0))
+        {
+
+#line 91
+            o_0 = o_0 + l_0.color_1.xyz * _S1 / float3(3.14159274101257324f) ;
+
+            k_0 = k_0 + int(1);
+
+#line 88
+            continue;
+        }
+
+#line 95
+        if(kind_0 == int(1))
+        {
+
+#line 95
+            o_0 = o_0 + mix(l_0.ground_0.xyz, l_0.color_1.xyz, float3((0.5f * n_0.y + 0.5f)) ) * _S1 / float3(3.14159274101257324f) ;
+
+
+            k_0 = k_0 + int(1);
+
+#line 88
+            continue;
+        }
+
+#line 100
+        float3 _S6 = l_0.vector_0.xyz;
+        float3 light_0 = l_0.color_1.xyz;
+
+#line 101
+        float3 ldir_0;
+
+#line 101
+        float3 light_1;
+        if(kind_0 == int(3))
+        {
+
+#line 103
+            float3 d_0 = _S6 - world_0;
+            float dist_0 = length(d_0);
+            float3 _S7 = d_0 / float3(max(dist_0, 9.99999997475242708e-07f)) ;
+            float _S8 = l_0.params_1.z;
+
+#line 106
+            float decay_0;
+
+#line 106
+            if(_S8 > 0.0f)
+            {
+
+#line 106
+                decay_0 = _S8;
+
+#line 106
+            }
+            else
+            {
+
+#line 106
+                decay_0 = 2.0f;
+
+#line 106
+            }
+            float falloff_0 = 1.0f / max(pow(dist_0, decay_0), 0.00999999977648258f);
+            float _S9 = l_0.params_1.y;
+
+#line 108
+            float falloff_1;
+
+#line 108
+            if(_S9 > 0.0f)
+            {
+
+#line 109
+                float t_0 = saturate(1.0f - pow(dist_0 / _S9, 4.0f));
+
+#line 109
+                falloff_1 = falloff_0 * (t_0 * t_0);
+
+#line 108
+            }
+            else
+            {
+
+#line 108
+                falloff_1 = falloff_0;
+
+#line 108
+            }
+
+
+
+            float3 light_2 = light_0 * float3(falloff_1) ;
+
+#line 112
+            ldir_0 = _S7;
+
+#line 112
+            light_1 = light_2;
+
+#line 102
+        }
+        else
+        {
+
+#line 102
+            ldir_0 = _S6;
+
+#line 102
+            light_1 = light_0;
+
+#line 102
+        }
+
+#line 114
+        float nl_0 = saturate(dot(n_0, ldir_0));
+        if(nl_0 <= 0.0f)
+        {
+
+#line 116
+            k_0 = k_0 + int(1);
+
+#line 88
+            continue;
+        }
+
+#line 118
+        float3 h_0 = normalize(ldir_0 + v_0);
+        float nh_0 = saturate(dot(n_0, h_0));
+
+
+        float a2_0 = _S3 * _S3;
+        float _S10 = 1.0f - a2_0;
+
+
+        float dd_0 = nh_0 * nh_0 * (a2_0 - 1.0f) + 1.0f;
+
+#line 126
+        o_0 = o_0 + light_1 * float3(nl_0)  * (_S1 / float3(3.14159274101257324f)  + (_S2 + (float3(1.0f)  - _S2) * float3(pow(1.0f - saturate(dot(v_0, h_0)), 5.0f)) ) * float3((0.5f / max(nl_0 * sqrt(a2_0 + _S10 * _S4 * _S4) + _S4 * sqrt(a2_0 + _S10 * nl_0 * nl_0), 9.99999997475242708e-07f) * (a2_0 / (3.14159274101257324f * dd_0 * dd_0)))) );
+
+#line 88
+        k_0 = k_0 + int(1);
+
+#line 88
+    }
+
+#line 130
+    return o_0;
+}
+
+
+#line 74
+float linear_to_srgb_0(float c_0)
+{
+
+#line 75
+    float _S11 = saturate(c_0);
+
+#line 75
+    float _S12;
+    if(_S11 <= 0.00313080009073019f)
+    {
+
+#line 76
+        _S12 = _S11 * 12.92000007629394531f;
+
+#line 76
+    }
+    else
+    {
+
+#line 76
+        _S12 = 1.0549999475479126f * pow(_S11, 0.4166666567325592f) - 0.05499999970197678f;
+
+#line 76
+    }
+
+#line 76
+    return _S12;
+}
+
+
+#line 76
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 57
+struct pixelInput_0
+{
+    float3 world_1 [[user(TEXCOORD)]];
+    float3 normal_0 [[user(TEXCOORD_1)]];
+    float2 uv_0 [[user(TEXCOORD_2)]];
+};
+
+
+#line 134
+[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S13 [[stage_in]], bool front_0 [[front_facing]], float4 position_0 [[position]], Material_0 constant* material_1 [[buffer(0)]], Lighting_0 constant* lighting_1 [[buffer(1)]])
+{
+
+#line 134
+    thread KernelContext_0 kernelContext_1;
+
+#line 134
+    (&kernelContext_1)->material_0 = material_1;
+
+#line 134
+    (&kernelContext_1)->lighting_0 = lighting_1;
+    int flags_0 = int(material_1->params_0.z);
+    float3 base_1 = material_1->color_0.xyz;
+
+#line 136
+    float3 c_1;
+
+    if((flags_0 & int(1)) != int(0))
+    {
+
+#line 138
+        c_1 = base_1;
+
+#line 138
+    }
+    else
+    {
+        float3 _S14 = normalize(_S13.normal_0);
+        if((flags_0 & int(2)) != int(0))
+        {
+
+#line 143
+            float3 n_1 = normalize(cross(dfdx(_S13.world_1), dfdy(_S13.world_1)));
+
+            if((dot(n_1, (&kernelContext_1)->lighting_0->eye_0.xyz - _S13.world_1)) < 0.0f)
+            {
+
+#line 145
+                c_1 = - n_1;
+
+#line 145
+            }
+            else
+            {
+
+#line 145
+                c_1 = n_1;
+
+#line 145
+            }
+
+#line 142
+        }
+        else
+        {
+
+#line 142
+            c_1 = _S14;
+
+#line 142
+        }
+
+#line 142
+        bool _S15;
+
+#line 149
+        if((flags_0 & int(4)) != int(0))
+        {
+
+#line 149
+            _S15 = !front_0;
+
+#line 149
+        }
+        else
+        {
+
+#line 149
+            _S15 = false;
+
+#line 149
+        }
+
+#line 149
+        if(_S15)
+        {
+
+#line 149
+            c_1 = - c_1;
+
+#line 149
+        }
+
+#line 149
+        float3 _S16 = shade_0(base_1, _S13.world_1, c_1, (&kernelContext_1)->lighting_0->eye_0.xyz, &kernelContext_1);
+
+#line 149
+        c_1 = _S16;
+
+#line 138
+    }
+
+#line 154
+    float3 c_2 = c_1 + (&kernelContext_1)->material_0->emissive_0.xyz;
+    float a_0 = material_1->color_0.w;
+
+#line 155
+    pixelOutput_0 _S17 = { float4(linear_to_srgb_0(c_2.x) * a_0, linear_to_srgb_0(c_2.y) * a_0, linear_to_srgb_0(c_2.z) * a_0, a_0) };
+    return _S17;
+}
+
