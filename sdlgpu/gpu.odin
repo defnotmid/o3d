@@ -12,6 +12,7 @@ import "core:mem"
 import sdl "vendor:sdl3"
 
 import o3d ".."
+import "deps:oksl"
 
 VERT_SPV :: #load("../shaders/o3d.vert.spv")
 FRAG_SPV :: #load("../shaders/o3d.frag.spv")
@@ -40,9 +41,22 @@ GPU :: struct {
 	size:         [2]u32,
 	vertices:     Pool_Buffer,
 	indices:      Pool_Buffer,
+	// Per shader (its id - 1): ShaderMaterials' GPU shaders and pipelines,
+	// made the first time a frame draws with them.
+	custom:       [dynamic]Custom,
 	// Scratch per frame.
 	order:        [dynamic]int,
 	materials:    [dynamic]o3d.Shading_Material, // per draw
+	blocks:       o3d.Shader_Blocks,
+}
+
+// A ShaderMaterial's shaders and pipelines (as `GPU.pipelines`), or why
+// they could not be made.
+Custom :: struct {
+	vert, frag: ^sdl.GPUShader,
+	pipelines:  [o3d.Side][2]^sdl.GPUGraphicsPipeline,
+	made:       bool,
+	failed:     bool,
 }
 
 // The uniforms as the shader reads them (std140 / Metal layouts agree here).
@@ -115,7 +129,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	for side in o3d.Side {
 		for blend in 0 ..< 2 {
-			g.pipelines[side][blend] = make_pipeline(g, side, blend == 1)
+			g.pipelines[side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend == 1, false)
 			if g.pipelines[side][blend] == nil {
 				return .Shader
 			}
@@ -133,8 +147,13 @@ destroy :: proc(g: ^GPU) {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
 	}
+	for &c in g.custom {
+		release_custom(g, &c)
+	}
+	delete(g.custom)
 	delete(g.order)
 	delete(g.materials)
+	o3d.shader_blocks_destroy(&g.blocks)
 	for side in o3d.Side {
 		for p in g.pipelines[side] {
 			if p != nil {
@@ -160,19 +179,25 @@ target :: proc(g: ^GPU, width, height: u32) -> ^sdl.GPUTexture {
 	return sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 }
 
+// The standard material's vertex shader reads every attribute.
+@(private = "file", rodata)
+STANDARD_ATTRIBUTES := [3]sdl.GPUVertexAttribute {
+	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = 0},
+	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = 12},
+	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
+}
+
+// A pipeline drawing `Vertex`es (one buffer, slot 0) for a material side,
+// blended or not. The standard material's output is premultiplied; a
+// ShaderMaterial's (`raw`) is as written, premultiplied by the blend.
 @(private = "file")
-make_pipeline :: proc(g: ^GPU, side: o3d.Side, blend: bool) -> ^sdl.GPUGraphicsPipeline {
+make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend, raw: bool) -> ^sdl.GPUGraphicsPipeline {
 	buffer := sdl.GPUVertexBufferDescription{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX}
-	attrs := [3]sdl.GPUVertexAttribute {
-		{location = 0, buffer_slot = 0, format = .FLOAT3, offset = 0},
-		{location = 1, buffer_slot = 0, format = .FLOAT3, offset = 12},
-		{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
-	}
 	color := sdl.GPUColorTargetDescription {
 		format = COLOR_FORMAT,
 		blend_state = {
 			enable_blend = blend,
-			src_color_blendfactor = .ONE,
+			src_color_blendfactor = .SRC_ALPHA if raw else .ONE,
 			dst_color_blendfactor = .ONE_MINUS_SRC_ALPHA,
 			color_blend_op = .ADD,
 			src_alpha_blendfactor = .ONE,
@@ -190,9 +215,9 @@ make_pipeline :: proc(g: ^GPU, side: o3d.Side, blend: bool) -> ^sdl.GPUGraphicsP
 		cull = .NONE
 	}
 	info := sdl.GPUGraphicsPipelineCreateInfo {
-		vertex_shader = g.vert,
-		fragment_shader = g.frag,
-		vertex_input_state = {vertex_buffer_descriptions = &buffer, num_vertex_buffers = 1, vertex_attributes = &attrs[0], num_vertex_attributes = len(attrs)},
+		vertex_shader = vert,
+		fragment_shader = frag,
+		vertex_input_state = {vertex_buffer_descriptions = &buffer, num_vertex_buffers = 1, vertex_attributes = raw_data(attrs), num_vertex_attributes = u32(len(attrs))},
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = g.samples},
@@ -200,6 +225,80 @@ make_pipeline :: proc(g: ^GPU, side: o3d.Side, blend: bool) -> ^sdl.GPUGraphicsP
 		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
+}
+
+// A ShaderMaterial's pipeline, its shaders made from oksl's output the first
+// time (nil: they could not be).
+@(private = "file")
+custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: bool) -> ^sdl.GPUGraphicsPipeline {
+	sh := o3d.shader_get(shaders, id)
+	if sh == nil {
+		return nil
+	}
+	if len(g.custom) < int(id) {
+		resize(&g.custom, int(id))
+	}
+	c := &g.custom[id - 1]
+	if !c.made {
+		c.made = true
+		formats := sdl.GetGPUShaderFormats(g.device)
+		for stage in o3d.Shader_Stage {
+			m := o3d.shader_module(sh, stage)
+			info := sdl.GPUShaderCreateInfo {
+				stage               = .VERTEX if stage == .Vertex else .FRAGMENT,
+				num_uniform_buffers = 1 if m.block_size > 0 else 0,
+			}
+			if .SPIRV in formats {
+				info.code, info.code_size = ([^]u8)(raw_data(m.spirv)), len(m.spirv) * size_of(u32)
+				info.entrypoint, info.format = oksl.SPIRV_ENTRY, {.SPIRV}
+			} else {
+				info.code, info.code_size = raw_data(m.msl), len(m.msl)
+				info.entrypoint, info.format = oksl.MSL_ENTRY, {.MSL}
+			}
+			made := sdl.CreateGPUShader(g.device, info)
+			if stage == .Vertex {
+				c.vert = made
+			} else {
+				c.frag = made
+			}
+		}
+		c.failed = c.vert == nil || c.frag == nil
+	}
+	if c.failed {
+		return nil
+	}
+	p := &c.pipelines[side][1 if blend else 0]
+	if p^ == nil {
+		attrs: [len(o3d.Vertex_Attribute)]sdl.GPUVertexAttribute
+		n := 0
+		for a in o3d.Vertex_Attribute {
+			if loc := sh.attributes[a]; loc >= 0 {
+				row := o3d.VERTEX_ATTRIBUTES[a]
+				attrs[n] = {location = u32(loc), buffer_slot = 0, format = .FLOAT2 if row.components == 2 else .FLOAT3, offset = u32(row.offset)}
+				n += 1
+			}
+		}
+		p^ = make_pipeline(g, c.vert, c.frag, attrs[:n], side, blend, true)
+	}
+	return p^
+}
+
+@(private = "file")
+release_custom :: proc(g: ^GPU, c: ^Custom) {
+	for side in o3d.Side {
+		for p in c.pipelines[side] {
+			if p != nil {
+				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+			}
+		}
+	}
+	if c.vert != nil {
+		sdl.ReleaseGPUShader(g.device, c.vert)
+	}
+	if c.frag != nil {
+		sdl.ReleaseGPUShader(g.device, c.frag)
+	}
+	c^ = {}
 }
 
 @(private = "file")
@@ -282,7 +381,7 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 // Draws `scene` into `out` (made by `target`, `width x height`). With `cmd`
 // the work is recorded into it (the caller submits); else it is submitted
 // and waited for.
-render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUTexture, width, height: u32, cmd: ^sdl.GPUCommandBuffer = nil) -> o3d.Error {
+render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, out: ^sdl.GPUTexture, width, height: u32, cmd: ^sdl.GPUCommandBuffer = nil) -> o3d.Error {
 	if !ensure_targets(g, width, height) {
 		return .Out_Of_Memory
 	}
@@ -301,6 +400,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 	lights: [o3d.MAX_LIGHTS]o3d.Shading_Light
 	nl := o3d.shading_lights(scene.lights[:], &lights)
 	o3d.shading_materials(o3d.scene_materials(scene), &g.materials)
+	o3d.shader_blocks(scene, shaders, view, proj, &g.blocks)
 	lu: Lighting_Uniforms
 	lu.eye = {scene.camera.position.x, scene.camera.position.y, scene.camera.position.z, 0}
 	lu.count = {i32(nl), 0, 0, 0}
@@ -315,6 +415,15 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 		}
 	}
 
+	o3d.draw_order(scene, geos, shaders, view, proj, &g.order)
+	// ShaderMaterials' pipelines made before the pass, on first use.
+	for di in g.order {
+		m := &g.materials[di]
+		if m.shader != 0 {
+			custom_pipeline(g, shaders, m.shader, scene.draws[di].material.side, .Blended in m.flags)
+		}
+	}
+
 	color := sdl.GPUColorTargetInfo{clear_color = {0, 0, 0, 0}, load_op = .CLEAR}
 	if g.samples == ._1 {
 		color.texture, color.store_op = out, .STORE
@@ -324,7 +433,6 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	sdl.PushGPUFragmentUniformData(cmd, 1, &lu, size_of(lu))
-	o3d.draw_order(scene, geos, view, proj, &g.order)
 	if g.vertices.buffer != nil {
 		sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
 		sdl.BindGPUIndexBuffer(pass, {buffer = g.indices.buffer}, ._32BIT)
@@ -334,7 +442,32 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 		d := &scene.draws[di]
 		geo, _ := o3d.geometry_get(geos, d.geometry) // draw_order kept only draws with geometry
 		m := &g.materials[di]
-		p := g.pipelines[d.material.side][1 if .Blended in m.flags else 0]
+		blend := .Blended in m.flags
+		if m.shader != 0 {
+			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend)
+			if p == nil {
+				continue
+			}
+			if p != bound {
+				sdl.BindGPUGraphicsPipeline(pass, p)
+				bound = p
+			}
+			for stage in o3d.Shader_Stage {
+				at := g.blocks.at[di][stage]
+				if at < 0 {
+					continue
+				}
+				size := u32(o3d.shader_module(o3d.shader_get(shaders, m.shader), stage).block_size)
+				if stage == .Vertex {
+					sdl.PushGPUVertexUniformData(cmd, 0, &g.blocks.bytes[at], size)
+				} else {
+					sdl.PushGPUFragmentUniformData(cmd, 0, &g.blocks.bytes[at], size)
+				}
+			}
+			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
+			continue
+		}
+		p := g.pipelines[d.material.side][1 if blend else 0]
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p

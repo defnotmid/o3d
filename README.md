@@ -21,7 +21,16 @@ What is known about three.js carries over:
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
   `emissive`, `emissive_intensity`, `opacity`, `side`, and the booleans as
   a bit set: `flags = {.Transparent, .Flat_Shading}`) or MeshBasicMaterial
-  (`.Basic`).
+  (`.Basic`), or ShaderMaterial: your own vertex and fragment shaders in
+  GLSL ES (three.js's GLSL 1 style with `attribute`, `varying` and
+  `gl_FragColor`, or GLSL 3 with `glsl3 = true`), with three.js's built-in
+  uniforms (`modelMatrix`, `modelViewMatrix`, `projectionMatrix`,
+  `viewMatrix`, `normalMatrix`, `cameraPosition`, `isOrthographic`) and
+  attributes (`position`, `normal`, `uv`), compiled by
+  [oksl](../oksl) on both renderers. The output is written as the shader
+  leaves it; `.Transparent` blends it, `side` culls as for any material.
+  `projectionMatrix` maps depth to 0..1 (SDL_GPU's clip space) rather than
+  WebGL's -1..1, which matters only to shaders that build their own.
 - Lights are AmbientLight, HemisphereLight, DirectionalLight (from
   `position` toward `target`) and PointLight (`distance`, `decay`), in
   three.js's units: a white directional light of intensity 1 lights a white
@@ -48,17 +57,27 @@ m := o3d.MATERIAL_DEFAULT
 m.color, m.roughness = {1, 0.35, 0.3}, 0.4
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
+// ShaderMaterial: compiled once (same sources, same id), uniforms per frame
+shaders: o3d.Shaders                       // kept, like geometry
+wave, errors := o3d.shader(&shaders, vertex_glsl, fragment_glsl)   // errors: "Fragment:3:7: ..."
+w := o3d.MATERIAL_DEFAULT
+w.shader = wave
+w.uniforms = o3d.scene_uniforms(&scene, {"uTime", {t}}, {"uColor", {0.3, 0.8, 0.4}})
+append(&scene.draws, o3d.Draw{o3d.sphere(&geos, 1), o3d.compose(), w})
+
 // GPU (o3d/sdlgpu): borrows the host's SDL_GPU device, or makes a headless one
 g: o3d_sdlgpu.GPU
 o3d_sdlgpu.init(&g, device)
 out := o3d_sdlgpu.target(&g, 1920, 1080)
-o3d_sdlgpu.render(&g, &scene, &geos, out, 1920, 1080, cmd)   // or nil cmd: submit and wait
+o3d_sdlgpu.render(&g, &scene, &geos, &shaders, out, 1920, 1080, cmd)   // or nil cmd: submit and wait
 
 // CPU: the same pixels, rows banded on the caller's thread pool
 sw: o3d.Software
-pixels := o3d.software_render(&sw, &scene, &geos, 1920, 1080, pool)
+pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool)
 ```
 
+o3d imports oksl as `deps:oksl`, so builds pass `-collection:deps=..`
+(the directory holding both): `odin test . -collection:deps=..`, and
 `odin run demo -collection:deps=.. -- out_dir` renders a test scene both
 ways to PNGs.
 
@@ -98,11 +117,29 @@ ways to PNGs.
   read only their row spans. Vertices stay interleaved: the GPU reads them
   as one buffer and the rasterizer gathers whole vertices by index.
 - **Order:** draws whose bounding sphere (the geometry's radius, scaled
-  with the draw) is outside the view are skipped; then opaque draws as
-  listed, then blended ones (transparent with opacity under 1) farthest
-  first, without writing depth (`draw_order`, shared by both renderers).
-- **Shaders** are Slang compiled offline (`shaders/build.sh`) to committed
-  SPIR-V and MSL, as ovg's are; o3d needs no shader compiler at run time.
+  with the draw) is outside the view, or whose shader failed, are skipped;
+  then opaque draws as listed, then blended ones (transparent with opacity
+  under 1, or a transparent ShaderMaterial) farthest first, without writing
+  depth (`draw_order`, shared by both renderers).
+- **Shaders:** the standard material's are Slang compiled offline
+  (`shaders/build.sh`) to committed SPIR-V and MSL, as ovg's are.
+  ShaderMaterials are compiled at run time by oksl, which is plain Odin in
+  the binary (no external toolchain), to SPIR-V and MSL and to programs
+  its CPU interpreter runs. Their table (`Shaders`) keeps each compiled
+  pair by id with what it reads, found once: the built-ins' block offsets
+  per stage, the attributes' locations, the varyings' floats and the flat
+  ones as a list. `BUILTINS` and `VERTEX_ATTRIBUTES` make three.js's
+  prelude for each stage and say what to fill; `shader_blocks` writes every
+  custom draw's uniform bytes once a frame, which the GPU pushes and the
+  software renderer runs on. A shader that fails is kept with its errors
+  and its draws left out by both renderers.
+- **Software ShaderMaterials:** a chunk runs its draw's vertex stage once
+  over the vertices it uses (the standard material's too: world position
+  and normal), and a triangle's corners carry those floats, divided by w
+  except flat ones. A band shades a run of one custom draw's triangles as
+  2x2 quads (helper lanes for derivatives) in one oksl call, then writes
+  them through the same coverage, depth and blending as the standard
+  material, in triangle order.
 - Errors are values (`Error`); no threads of its own: the software
   renderer runs its phases on the caller's `thread.Pool`.
 
@@ -117,6 +154,5 @@ ways to PNGs.
 5. onimite: a `view3d{}` node drawing into its own texture, composited like
    any layer; a group's 2D drawing as a texture on a surface; the Lua API in
    three.js's names; inspect checks; the docs page mapping three.js terms.
-6. Custom materials in three.js's `ShaderMaterial` form (GLSL ES 3.00
-   vertex and fragment shaders with its built-in uniforms and attributes),
-   compiled by oksl once it has a vertex stage.
+6. ShaderMaterial textures (`uniform sampler2D`, with item 3), and
+   `texelFetch` / `textureSize` once oksl has native size queries.

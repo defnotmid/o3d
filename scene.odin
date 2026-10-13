@@ -62,7 +62,9 @@ Material_Flag :: enum u8 {
 
 Material_Flags :: bit_set[Material_Flag; u8]
 
-// MeshStandardMaterial (or MeshBasicMaterial with `.Basic`).
+// MeshStandardMaterial (or MeshBasicMaterial with `.Basic`), or a
+// ShaderMaterial with `shader` (shader.odin): then only `side`,
+// `.Transparent` and `uniforms` apply.
 Material :: struct {
 	color:              Vec3, // sRGB
 	metalness:          f32,
@@ -72,6 +74,22 @@ Material :: struct {
 	opacity:            f32,
 	side:               Side,
 	flags:              Material_Flags,
+	shader:             Shader_Id,
+	// The shader's uniforms, from `scene_uniforms`.
+	uniforms:           Uniform_Range,
+}
+
+// A ShaderMaterial uniform, three.js's `uniforms: { name: { value } }`: its
+// float components (vectors; matrices column by column; arrays element by
+// element; ints and bools converted). The name is borrowed until the frame
+// is drawn.
+Uniform :: struct {
+	name:  string,
+	value: []f32,
+}
+
+Uniform_Range :: struct {
+	first, count: u32,
 }
 
 MATERIAL_DEFAULT :: Material{color = {1, 1, 1}, metalness = 0, roughness = 1, emissive_intensity = 1, opacity = 1}
@@ -83,15 +101,34 @@ Draw :: struct {
 }
 
 Scene :: struct {
-	camera: Camera,
-	lights: [dynamic]Light,
-	draws:  #soa[dynamic]Draw,
+	camera:         Camera,
+	lights:         [dynamic]Light,
+	draws:          #soa[dynamic]Draw,
+	// ShaderMaterials' uniforms: each a name and its floats'
+	// uniform_floats[first:][:count].
+	uniforms:       [dynamic]struct {
+		name:         string,
+		first, count: u32,
+	},
+	uniform_floats: [dynamic]f32,
 }
 
 scene_clear :: proc(s: ^Scene) {
 	s.camera = CAMERA_DEFAULT
 	clear(&s.lights)
 	clear(&s.draws)
+	clear(&s.uniforms)
+	clear(&s.uniform_floats)
+}
+
+// Keeps uniforms for a material (`Material.uniforms`) this frame.
+scene_uniforms :: proc(s: ^Scene, values: ..Uniform) -> Uniform_Range {
+	r := Uniform_Range{u32(len(s.uniforms)), u32(len(values))}
+	for v in values {
+		append(&s.uniforms, type_of(s.uniforms[0]){v.name, u32(len(s.uniform_floats)), u32(len(v.value))})
+		append(&s.uniform_floats, ..v.value)
+	}
+	return r
 }
 
 // The draws' materials, one column of the table.
@@ -102,6 +139,8 @@ scene_materials :: proc "contextless" (s: ^Scene) -> []Material {
 scene_destroy :: proc(s: ^Scene) {
 	delete(s.lights)
 	delete(s.draws)
+	delete(s.uniforms)
+	delete(s.uniform_floats)
 	s^ = {}
 }
 
@@ -120,11 +159,11 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 	return
 }
 
-// The order to draw in: the draws that can be seen (with geometry, its
-// bounding sphere at least partly in the view), the opaque ones as listed,
-// then the blended ones (transparent with opacity under 1) farthest from the
-// camera first.
-draw_order :: proc(scene: ^Scene, geos: ^Geometries, view, proj: Mat4, order: ^[dynamic]int) {
+// The order to draw in: the draws that can be seen (with geometry, and a
+// compiled shader if they ask for one, the bounding sphere at least partly
+// in the view), the opaque ones as listed, then the blended ones farthest
+// from the camera first.
+draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, proj: Mat4, order: ^[dynamic]int) {
 	clear(order)
 	n := len(scene.draws)
 	materials := scene_materials(scene)
@@ -140,13 +179,13 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, view, proj: Mat4, order: ^[
 		return sphere_visible(view_proj, {model[0, 3], model[1, 3], model[2, 3]}, geo.radius * scale)
 	}
 	for m, i in materials {
-		if !blended(m) && seen(geos, geometries[i], models[i], view_proj) {
+		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && seen(geos, geometries[i], models[i], view_proj) {
 			append(order, i)
 		}
 	}
 	first := len(order)
 	for m, i in materials {
-		if blended(m) && seen(geos, geometries[i], models[i], view_proj) {
+		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && seen(geos, geometries[i], models[i], view_proj) {
 			append(order, i)
 		}
 	}
@@ -177,8 +216,10 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 	return true
 }
 
+// Blended over what is behind: transparent, with opacity under 1 (a
+// ShaderMaterial's alpha is its own).
 blended :: proc "contextless" (m: Material) -> bool {
-	return .Transparent in m.flags && m.opacity < 1
+	return .Transparent in m.flags && (m.opacity < 1 || m.shader != 0)
 }
 
 // ---- shading ----------------------------------------------------------------------------
@@ -228,6 +269,7 @@ Shading_Material :: struct {
 	metalness: f32,
 	roughness: f32,
 	flags:     Shading_Flags,
+	shader:    Shader_Id, // 0: the standard material
 }
 
 // Bit values are the shader's FLAG_* constants (o3d_test checks).
@@ -265,6 +307,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			metalness = m.metalness,
 			roughness = m.roughness,
 			flags     = f,
+			shader    = m.shader,
 		}
 	}
 }

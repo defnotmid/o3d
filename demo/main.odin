@@ -1,6 +1,6 @@
 // Renders the test scene with the GPU and the software renderer to PNGs:
 //
-//     odin run demo -collection:deps=.. -- out_dir
+//     odin run demo -collection:deps=.. -- out_dir   (deps: the directory holding o3d and oksl)
 package o3d_demo
 
 import "core:fmt"
@@ -22,7 +22,7 @@ main :: proc() {
 
 	sw: o3d.Software
 	defer o3d.software_destroy(&sw)
-	cpu := o3d.software_render(&sw, &scene, &geos, W, H)
+	cpu := o3d.software_render(&sw, &scene, &geos, nil, W, H)
 	save(dir, "software.png", cpu, W, H)
 
 	g: gpu.GPU
@@ -32,7 +32,7 @@ main :: proc() {
 	}
 	defer gpu.destroy(&g)
 	out := gpu.target(&g, W, H)
-	gpu.render(&g, &scene, &geos, out, W, H)
+	gpu.render(&g, &scene, &geos, nil, out, W, H)
 	px, _ := gpu.read(&g, out, W, H)
 	save(dir, "gpu.png", px, W, H)
 }

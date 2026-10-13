@@ -83,7 +83,7 @@ test_software_sphere :: proc(t: ^testing.T) {
 	s: Software
 	defer software_destroy(&s)
 	W :: 96
-	px := software_render(&s, &scene, &g, W, W)
+	px := software_render(&s, &scene, &g, nil, W, W)
 	at :: proc(px: []u8, x, y: int) -> [4]u8 {
 		i := (y * W + x) * 4
 		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
@@ -117,7 +117,7 @@ test_software_transparent :: proc(t: ^testing.T) {
 	append(&scene.draws, Draw{plane(&g, 1, 1), compose(), red})
 	s: Software
 	defer software_destroy(&s)
-	px := software_render(&s, &scene, &g, 64, 64)
+	px := software_render(&s, &scene, &g, nil, 64, 64)
 	i := (32 * 64 + 32) * 4
 	testing.expectf(t, px[i] > 100 && px[i + 2] > 100 && px[i + 3] == 255, "%v", px[i:i + 4])
 }
@@ -151,7 +151,7 @@ test_software_pool :: proc(t: ^testing.T) {
 	alone, pooled: Software
 	defer software_destroy(&alone)
 	defer software_destroy(&pooled)
-	want := software_render(&alone, &scene, &g, W, H)
+	want := software_render(&alone, &scene, &g, nil, W, H)
 	pool: thread.Pool
 	thread.pool_init(&pool, context.allocator, 4)
 	thread.pool_start(&pool)
@@ -160,7 +160,7 @@ test_software_pool :: proc(t: ^testing.T) {
 		thread.pool_destroy(&pool)
 	}
 	for _ in 0 ..< 2 { // the second frame reuses the chunks' lists
-		got := software_render(&pooled, &scene, &g, W, H, &pool)
+		got := software_render(&pooled, &scene, &g, nil, W, H, &pool)
 		differ := 0
 		for i in 0 ..< len(want) {
 			differ += 1 if got[i] != want[i] else 0
@@ -190,7 +190,7 @@ test_draw_order_culls :: proc(t: ^testing.T) {
 	view, proj := camera_matrices(scene.camera, 100, 100)
 	order: [dynamic]int
 	defer delete(order)
-	draw_order(&scene, &g, view, proj, &order)
+	draw_order(&scene, &g, nil, view, proj, &order)
 	testing.expectf(t, slice_equal(order[:], []int{0, 4, 5}), "order %v", order)
 }
 
@@ -205,4 +205,109 @@ slice_equal :: proc(a, b: []int) -> bool {
 		}
 	}
 	return true
+}
+
+// three.js-style ShaderMaterial sources (GLSL 1 style, the default).
+WAVE_VERT :: `varying vec3 vNormal;
+varying vec2 vUv;
+uniform float uTime;
+void main() {
+  vNormal = normalize(normalMatrix * normal);
+  vUv = uv;
+  vec3 p = position + normal * 0.08 * sin(uTime + position.y * 6.0);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+}`
+
+WAVE_FRAG :: `varying vec3 vNormal;
+varying vec2 vUv;
+uniform vec3 uColor;
+void main() {
+  float l = 0.35 + 0.65 * max(dot(normalize(vNormal), normalize(vec3(0.4, 0.8, 1.0))), 0.0);
+  gl_FragColor = vec4(uColor * l + vec3(vUv * 0.15, 0.0), 1.0);
+}`
+
+// Shaders compile once per source, report errors with their place, and
+// reject what o3d does not provide.
+@(test)
+test_shader_table :: proc(t: ^testing.T) {
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	id, errors := shader(&shaders, WAVE_VERT, WAVE_FRAG)
+	testing.expectf(t, id != 0 && errors == "", "errors: %s", errors)
+	again, _ := shader(&shaders, WAVE_VERT, WAVE_FRAG)
+	testing.expect_value(t, again, id)
+	sh := shader_get(&shaders, id)
+	// modelMatrix is declared by the prelude but unused: absent; the
+	// vertex stage reads every attribute.
+	testing.expect_value(t, sh.builtins[.Vertex][.Model_Matrix], -1)
+	testing.expect(t, sh.builtins[.Vertex][.Normal_Matrix] >= 0 && sh.builtins[.Vertex][.Model_View_Matrix] >= 0)
+	testing.expect(t, sh.attributes[.Position] >= 0 && sh.attributes[.Uv] >= 0)
+	testing.expect_value(t, sh.varying_floats, 5)
+
+	cases := []struct {
+		vertex, fragment, want: string,
+	} {
+		{WAVE_VERT, "void main() { gl_FragColor = vec4(undefinedThing); }", "Fragment:1:"},
+		{"attribute vec3 color; void main() { gl_Position = vec4(color, 1.0); }", "void main() { gl_FragColor = vec4(1.0); }", "attribute color"},
+		{WAVE_VERT, "uniform sampler2D map; varying vec2 vUv; void main() { gl_FragColor = texture2D(map, vUv); }", "textures"},
+	}
+	for c in cases {
+		bad, errs := shader(&shaders, c.vertex, c.fragment)
+		testing.expectf(t, bad != 0 && shader_get(&shaders, bad) == nil && strings.contains(errs, c.want), "want %q in %q", c.want, errs)
+		// A failure is kept: asked again, the same errors without compiling.
+		_, errs2 := shader(&shaders, c.vertex, c.fragment)
+		testing.expect_value(t, errs2, errs)
+	}
+}
+
+// A ShaderMaterial on the software renderer: drawn where the geometry is,
+// with its uniforms; the same bytes on a pool; a draw whose shader failed
+// is left out.
+@(test)
+test_software_shader_material :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 40, near = 0.1, far = 100}
+	wave, errors := shader(&shaders, WAVE_VERT, WAVE_FRAG)
+	testing.expectf(t, wave != 0, "%s", errors)
+	broken, _ := shader(&shaders, WAVE_VERT, "void main() { nope; }")
+	m := MATERIAL_DEFAULT
+	m.shader = wave
+	m.uniforms = scene_uniforms(&scene, {"uTime", {0.5}}, {"uColor", {0.2, 0.9, 0.3}}, {"notInTheShader", {1}})
+	append(&scene.draws, Draw{sphere(&g, 1, 96, 48), compose(), m}) // > CHUNK_TRIS triangles
+	m.shader = broken
+	append(&scene.draws, Draw{box(&g, 4, 4, 0.1), compose({0, 0, -1}), m})
+	W :: 96
+	s: Software
+	defer software_destroy(&s)
+	px := software_render(&s, &scene, &g, &shaders, W, W)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	// Green from uColor in the middle; nothing drawn in the corner (the
+	// broken shader's box behind would cover it).
+	c := at(px, W / 2, W / 2)
+	testing.expectf(t, c[3] == 255 && c[1] > 150 && c[0] < 120, "centre %v", c)
+	testing.expect_value(t, at(px, 2, 2), [4]u8{0, 0, 0, 0})
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, 4)
+	thread.pool_start(&pool)
+	defer {
+		thread.pool_join(&pool)
+		thread.pool_destroy(&pool)
+	}
+	pooled: Software
+	defer software_destroy(&pooled)
+	got := software_render(&pooled, &scene, &g, &shaders, W, W, &pool)
+	differ := 0
+	for i in 0 ..< len(px) {
+		differ += 1 if got[i] != px[i] else 0
+	}
+	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
 }
