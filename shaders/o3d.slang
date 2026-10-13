@@ -8,10 +8,15 @@
 
 static const float PI = 3.14159265358979323846;
 static const int MAX_LIGHTS = 8;
-static const int AMBIENT = 0;
-static const int HEMISPHERE = 1;
-static const int DIRECTIONAL = 2;
-static const int POINT = 3;
+// Light_Kind's values and Shading_Flag's bits (o3d_test checks).
+static const uint LIGHT_AMBIENT = 0;
+static const uint LIGHT_HEMISPHERE = 1;
+static const uint LIGHT_DIRECTIONAL = 2;
+static const uint LIGHT_POINT = 3;
+static const uint FLAG_BASIC = 1;
+static const uint FLAG_FLAT_SHADING = 2;
+static const uint FLAG_TWO_SIDED = 4;
+static const uint FLAG_BLENDED = 8;
 
 struct Draw_VS {
     float4x4 mvp;
@@ -19,23 +24,27 @@ struct Draw_VS {
     float4x4 normal;
 };
 
-// color: linear rgb, a = opacity (1 when not blended); emissive: linear
-// rgb times intensity; params: metalness, roughness, flags (1 basic,
-// 2 flat shading, 4 lit from both sides).
+// Shading_Material: color is linear rgb, a = opacity (1 when not blended);
+// emissive is linear rgb times intensity; flags are FLAG_* bits.
 struct Material {
     float4 color;
     float4 emissive;
-    float4 params;
+    float metalness;
+    float roughness;
+    uint flags;
+    uint pad;
 };
 
-// color, ground: linear times intensity; vector: the direction toward a
-// directional light or a point light's position; params: kind, distance,
-// decay.
+// Shading_Light: color, ground linear times intensity; vector the direction
+// toward a directional light or a point light's position; kind a LIGHT_*.
 struct Light {
     float4 color;
     float4 ground;
     float4 vector;
-    float4 params;
+    uint kind;
+    float distance;
+    float decay;
+    float pad;
 };
 
 struct Lighting {
@@ -77,36 +86,35 @@ float linear_to_srgb(float c) {
 }
 
 float3 shade(float3 base, float3 world, float3 n, float3 eye) {
-    float metalness = material.params.x;
+    float metalness = material.metalness;
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
     float3 f0 = lerp(float3(0.04), base, metalness);
-    float roughness = clamp(material.params.y, 0.0525, 1);
+    float roughness = clamp(material.roughness, 0.0525, 1);
     float alpha = roughness * roughness;
     float nv = clamp(dot(n, v), 1e-4, 1);
     float3 o = float3(0);
     for (int k = 0; k < lighting.count.x; k++) {
         Light l = lighting.lights[k];
-        int kind = int(l.params.x);
-        if (kind == AMBIENT) {
+        if (l.kind == LIGHT_AMBIENT) {
             o += l.color.rgb * diffuse / PI;
             continue;
         }
-        if (kind == HEMISPHERE) {
+        if (l.kind == LIGHT_HEMISPHERE) {
             float w = 0.5 * n.y + 0.5;
             o += lerp(l.ground.rgb, l.color.rgb, w) * diffuse / PI;
             continue;
         }
         float3 ldir = l.vector.xyz;
         float3 light = l.color.rgb;
-        if (kind == POINT) {
+        if (l.kind == LIGHT_POINT) {
             float3 d = l.vector.xyz - world;
             float dist = length(d);
             ldir = d / max(dist, 1e-6);
-            float decay = l.params.z > 0 ? l.params.z : 2;
+            float decay = l.decay > 0 ? l.decay : 2;
             float falloff = 1 / max(pow(dist, decay), 0.01);
-            if (l.params.y > 0) {
-                float t = saturate(1 - pow(dist / l.params.y, 4));
+            if (l.distance > 0) {
+                float t = saturate(1 - pow(dist / l.distance, 4));
                 falloff *= t * t;
             }
             light *= falloff;
@@ -132,21 +140,21 @@ float3 shade(float3 base, float3 world, float3 n, float3 eye) {
 
 [shader("fragment")]
 float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
-    int flags = int(material.params.z);
+    uint flags = material.flags;
     float3 base = material.color.rgb;
     float3 c;
-    if ((flags & 1) != 0) {
+    if ((flags & FLAG_BASIC) != 0) {
         c = base;
     } else {
         float3 n = normalize(i.normal);
-        if ((flags & 2) != 0) {
+        if ((flags & FLAG_FLAT_SHADING) != 0) {
             n = normalize(cross(ddx(i.world), ddy(i.world)));
             // Screen derivatives run with y down: face the eye.
             if (dot(n, lighting.eye.xyz - i.world) < 0) {
                 n = -n;
             }
         }
-        if ((flags & 4) != 0 && !front) {
+        if ((flags & FLAG_TWO_SIDED) != 0 && !front) {
             n = -n;
         }
         c = shade(base, i.world, n, lighting.eye.xyz);

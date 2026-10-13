@@ -4,7 +4,8 @@
 //
 // `init` creates a headless device, or borrows the host's (the one its
 // window or 2D canvas uses, so the result composites without a copy).
-// Geometry uploads once, the first time a frame draws it.
+// Geometry lives in one vertex and one index buffer, mirroring
+// `Geometries`' shared arrays: what is new uploads at the start of a frame.
 package o3d_sdlgpu
 
 import "core:mem"
@@ -19,9 +20,11 @@ FRAG_MSL :: #load("../shaders/o3d.frag.msl")
 
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
 
-Mesh_Buffers :: struct {
-	vertex, index: ^sdl.GPUBuffer,
-	count:         u32,
+// A GPU copy of one of `Geometries`' shared arrays: the first `uploaded`
+// bytes are on the GPU; growing past `capacity` makes a new buffer.
+Pool_Buffer :: struct {
+	buffer:             ^sdl.GPUBuffer,
+	capacity, uploaded: u32,
 }
 
 GPU :: struct {
@@ -35,9 +38,11 @@ GPU :: struct {
 	// The multisampled colour and depth targets, at `size`.
 	color, depth: ^sdl.GPUTexture,
 	size:         [2]u32,
-	// Per geometry (its id - 1), uploaded on first use.
-	meshes:       [dynamic]Mesh_Buffers,
+	vertices:     Pool_Buffer,
+	indices:      Pool_Buffer,
+	// Scratch per frame.
 	order:        [dynamic]int,
+	materials:    [dynamic]o3d.Shading_Material, // per draw
 }
 
 // The uniforms as the shader reads them (std140 / Metal layouts agree here).
@@ -46,12 +51,20 @@ Draw_Uniforms :: struct {
 }
 
 Material_Uniforms :: struct {
-	color, emissive, params: [4]f32,
+	color, emissive:     [4]f32,
+	metalness, roughness: f32,
+	flags:               o3d.Shading_Flags,
+	_:                   u32,
 }
+#assert(size_of(Material_Uniforms) == 48)
 
 Light_Uniforms :: struct {
-	color, ground, vector, params: [4]f32,
+	color, ground, vector: [4]f32,
+	kind:                  u32, // o3d.Light_Kind
+	distance, decay:       f32,
+	_:                     f32,
 }
+#assert(size_of(Light_Uniforms) == 64)
 
 Lighting_Uniforms :: struct {
 	eye:    [4]f32,
@@ -115,12 +128,13 @@ destroy :: proc(g: ^GPU) {
 	if g.device == nil {
 		return
 	}
-	for m in g.meshes {
-		sdl.ReleaseGPUBuffer(g.device, m.vertex)
-		sdl.ReleaseGPUBuffer(g.device, m.index)
+	for b in ([]^Pool_Buffer{&g.vertices, &g.indices}) {
+		if b.buffer != nil {
+			sdl.ReleaseGPUBuffer(g.device, b.buffer)
+		}
 	}
-	delete(g.meshes)
 	delete(g.order)
+	delete(g.materials)
 	for side in o3d.Side {
 		for p in g.pipelines[side] {
 			if p != nil {
@@ -216,37 +230,52 @@ ensure_targets :: proc(g: ^GPU, w, h: u32) -> bool {
 	return g.depth != nil
 }
 
-// Uploads the geometry not on the GPU yet (in a copy pass of `cmd`).
+// Uploads what `geos` added since the last frame (in a copy pass of `cmd`).
 @(private = "file")
-upload_meshes :: proc(g: ^GPU, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
-	if len(g.meshes) >= len(geos.list) {
+upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
+	vertices := mem.slice_to_bytes(geos.vertices[:])
+	indices := mem.slice_to_bytes(geos.indices[:])
+	if u32(len(vertices)) == g.vertices.uploaded && u32(len(indices)) == g.indices.uploaded {
 		return nil
 	}
 	pass := sdl.BeginGPUCopyPass(cmd)
 	defer sdl.EndGPUCopyPass(pass)
-	for len(g.meshes) < len(geos.list) {
-		geo := geos.list[len(g.meshes)]
-		vbytes := u32(len(geo.vertices) * size_of(o3d.Vertex))
-		ibytes := u32(len(geo.indices) * size_of(u32))
-		m := Mesh_Buffers{count = u32(len(geo.indices))}
-		m.vertex = sdl.CreateGPUBuffer(g.device, {usage = {.VERTEX}, size = max(vbytes, 4)})
-		m.index = sdl.CreateGPUBuffer(g.device, {usage = {.INDEX}, size = max(ibytes, 4)})
-		if m.vertex == nil || m.index == nil {
-			return .Out_Of_Memory
-		}
-		transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = max(vbytes + ibytes, 4)})
-		if transfer == nil {
-			return .Out_Of_Memory
-		}
-		mapped := ([^]u8)(sdl.MapGPUTransferBuffer(g.device, transfer, false))
-		mem.copy(mapped, raw_data(geo.vertices), int(vbytes))
-		mem.copy(mapped[vbytes:], raw_data(geo.indices), int(ibytes))
-		sdl.UnmapGPUTransferBuffer(g.device, transfer)
-		sdl.UploadToGPUBuffer(pass, {transfer_buffer = transfer, offset = 0}, {buffer = m.vertex, offset = 0, size = vbytes}, false)
-		sdl.UploadToGPUBuffer(pass, {transfer_buffer = transfer, offset = vbytes}, {buffer = m.index, offset = 0, size = ibytes}, false)
-		sdl.ReleaseGPUTransferBuffer(g.device, transfer)
-		append(&g.meshes, m)
+	upload_pool(g, &g.vertices, {.VERTEX}, vertices, pass) or_return
+	upload_pool(g, &g.indices, {.INDEX}, indices, pass) or_return
+	return nil
+}
+
+// Uploads `data` past what `b` holds, into a buffer twice as large when it
+// no longer fits (the old one is released once the GPU is done with it).
+@(private = "file")
+upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, data: []u8, pass: ^sdl.GPUCopyPass) -> o3d.Error {
+	size := u32(len(data))
+	if size == b.uploaded {
+		return nil
 	}
+	if size > b.capacity {
+		if b.buffer != nil {
+			sdl.ReleaseGPUBuffer(g.device, b.buffer)
+		}
+		b.capacity = max(size, b.capacity * 2, 64 << 10)
+		b.uploaded = 0
+		b.buffer = sdl.CreateGPUBuffer(g.device, {usage = usage, size = b.capacity})
+		if b.buffer == nil {
+			b^ = {}
+			return .Out_Of_Memory
+		}
+	}
+	new := data[b.uploaded:]
+	transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = u32(len(new))})
+	if transfer == nil {
+		return .Out_Of_Memory
+	}
+	defer sdl.ReleaseGPUTransferBuffer(g.device, transfer)
+	mapped := sdl.MapGPUTransferBuffer(g.device, transfer, false)
+	mem.copy(mapped, raw_data(new), len(new))
+	sdl.UnmapGPUTransferBuffer(g.device, transfer)
+	sdl.UploadToGPUBuffer(pass, {transfer_buffer = transfer}, {buffer = b.buffer, offset = b.uploaded, size = u32(len(new))}, false)
+	b.uploaded = size
 	return nil
 }
 
@@ -265,21 +294,24 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 			return .Device
 		}
 	}
-	upload_meshes(g, geos, cmd) or_return
+	upload_geometry(g, geos, cmd) or_return
 
 	view, proj := o3d.camera_matrices(scene.camera, int(width), int(height))
 	view_proj := proj * view
 	lights: [o3d.MAX_LIGHTS]o3d.Shading_Light
 	nl := o3d.shading_lights(scene.lights[:], &lights)
+	o3d.shading_materials(o3d.scene_materials(scene), &g.materials)
 	lu: Lighting_Uniforms
 	lu.eye = {scene.camera.position.x, scene.camera.position.y, scene.camera.position.z, 0}
 	lu.count = {i32(nl), 0, 0, 0}
 	for l, i in lights[:nl] {
 		lu.lights[i] = {
-			color  = {l.color.r, l.color.g, l.color.b, 0},
-			ground = {l.ground.r, l.ground.g, l.ground.b, 0},
-			vector = {l.vector.x, l.vector.y, l.vector.z, 0},
-			params = {f32(l.kind), l.distance, l.decay, 0},
+			color    = {l.color.r, l.color.g, l.color.b, 0},
+			ground   = {l.ground.r, l.ground.g, l.ground.b, 0},
+			vector   = {l.vector.x, l.vector.y, l.vector.z, 0},
+			kind     = u32(l.kind),
+			distance = l.distance,
+			decay    = l.decay,
 		}
 	}
 
@@ -293,37 +325,34 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^sdl.GPUT
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	sdl.PushGPUFragmentUniformData(cmd, 1, &lu, size_of(lu))
 	o3d.draw_order(scene, view, &g.order)
+	if g.vertices.buffer != nil {
+		sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
+		sdl.BindGPUIndexBuffer(pass, {buffer = g.indices.buffer}, ._32BIT)
+	}
 	bound: ^sdl.GPUGraphicsPipeline
 	for di in g.order {
 		d := &scene.draws[di]
-		if d.geometry == 0 || int(d.geometry) > len(g.meshes) {
+		geo, ok := o3d.geometry_get(geos, d.geometry)
+		if !ok || geo.index_count == 0 {
 			continue
 		}
-		m := d.material
-		blend := o3d.blended(m)
-		p := g.pipelines[m.side][1 if blend else 0]
+		m := &g.materials[di]
+		p := g.pipelines[d.material.side][1 if .Blended in m.flags else 0]
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
 		}
-		mesh := g.meshes[d.geometry - 1]
-		sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = mesh.vertex}, 1)
-		sdl.BindGPUIndexBuffer(pass, {buffer = mesh.index}, ._32BIT)
 		du := Draw_Uniforms{view_proj * d.model, d.model, o3d.normal_matrix(d.model)}
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
-		base := o3d.linear(m.color)
-		emissive := o3d.linear(m.emissive) * m.emissive_intensity
-		flags: f32 = 0
-		if m.basic {flags += 1}
-		if m.flat_shading {flags += 2}
-		if m.side != .Front {flags += 4}
 		mu := Material_Uniforms {
-			color    = {base.r, base.g, base.b, clamp(m.opacity, 0, 1) if blend else 1},
-			emissive = {emissive.r, emissive.g, emissive.b, 0},
-			params   = {m.metalness, m.roughness, flags, 0},
+			color     = {m.base.r, m.base.g, m.base.b, m.opacity},
+			emissive  = {m.emissive.r, m.emissive.g, m.emissive.b, 0},
+			metalness = m.metalness,
+			roughness = m.roughness,
+			flags     = m.flags,
 		}
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
-		sdl.DrawGPUIndexedPrimitives(pass, mesh.count, 1, 0, 0, 0)
+		sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 	}
 	sdl.EndGPURenderPass(pass)
 	if own {

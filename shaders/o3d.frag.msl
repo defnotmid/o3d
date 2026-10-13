@@ -3,14 +3,16 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 25 "o3d.slang"
+#line 29 "o3d.slang"
 struct Material_0
 {
     float4 color_0;
     float4 emissive_0;
-    float4 params_0;
+    float metalness_0;
+    float roughness_0;
+    uint flags_0;
+    uint pad_0;
 };
-
 
 
 struct Light_0
@@ -18,11 +20,14 @@ struct Light_0
     float4 color_1;
     float4 ground_0;
     float4 vector_0;
-    float4 params_1;
+    uint kind_0;
+    float distance_0;
+    float decay_0;
+    float pad_1;
 };
 
 
-#line 41
+#line 50
 struct Lighting_0
 {
     float4 eye_0;
@@ -31,7 +36,7 @@ struct Lighting_0
 };
 
 
-#line 41
+#line 50
 struct KernelContext_0
 {
     Material_0 constant* material_0;
@@ -39,233 +44,223 @@ struct KernelContext_0
 };
 
 
-#line 79
+#line 88
 float3 shade_0(float3 base_0, float3 world_0, float3 n_0, float3 eye_1, KernelContext_0 thread* kernelContext_0)
 {
-
-#line 80
-    float metalness_0 = kernelContext_0->material_0->params_0.x;
     float3 v_0 = normalize(eye_1 - world_0);
-    float3 _S1 = base_0 * float3((1.0f - metalness_0)) ;
-    float3 _S2 = mix(float3(0.03999999910593033f) , base_0, float3(metalness_0) );
-    float roughness_0 = clamp(kernelContext_0->material_0->params_0.y, 0.05249999836087227f, 1.0f);
-    float _S3 = roughness_0 * roughness_0;
+    float3 _S1 = base_0 * float3((1.0f - kernelContext_0->material_0->metalness_0)) ;
+    float3 _S2 = mix(float3(0.03999999910593033f) , base_0, float3(kernelContext_0->material_0->metalness_0) );
+    float roughness_1 = clamp(kernelContext_0->material_0->roughness_0, 0.05249999836087227f, 1.0f);
+    float _S3 = roughness_1 * roughness_1;
     float _S4 = clamp(dot(n_0, v_0), 0.00009999999747379f, 1.0f);
     float3 _S5 = float3(int3(int(0)) );
 
-#line 87
+#line 96
     int k_0 = int(0);
 
-#line 87
+#line 96
     float3 o_0 = _S5;
     for(;;)
     {
 
-#line 88
+#line 97
         if(k_0 < (kernelContext_0->lighting_0->count_0.x))
         {
         }
         else
         {
 
-#line 88
+#line 97
             break;
         }
 
-#line 89
+#line 98
         Light_0 l_0 = kernelContext_0->lighting_0->lights_0[k_0];
-        int kind_0 = int(kernelContext_0->lighting_0->lights_0[k_0].params_1.x);
-        if(kind_0 == int(0))
+        if((kernelContext_0->lighting_0->lights_0[k_0].kind_0) == 0U)
         {
 
-#line 91
+#line 99
             o_0 = o_0 + l_0.color_1.xyz * _S1 / float3(3.14159274101257324f) ;
 
             k_0 = k_0 + int(1);
 
-#line 88
+#line 97
             continue;
         }
 
-#line 95
-        if(kind_0 == int(1))
+#line 103
+        if((l_0.kind_0) == 1U)
         {
 
-#line 95
+#line 103
             o_0 = o_0 + mix(l_0.ground_0.xyz, l_0.color_1.xyz, float3((0.5f * n_0.y + 0.5f)) ) * _S1 / float3(3.14159274101257324f) ;
 
 
             k_0 = k_0 + int(1);
 
-#line 88
+#line 97
             continue;
         }
 
-#line 100
+#line 108
         float3 _S6 = l_0.vector_0.xyz;
         float3 light_0 = l_0.color_1.xyz;
 
-#line 101
+#line 109
         float3 ldir_0;
 
-#line 101
+#line 109
         float3 light_1;
-        if(kind_0 == int(3))
+        if((l_0.kind_0) == 3U)
         {
 
-#line 103
+#line 111
             float3 d_0 = _S6 - world_0;
             float dist_0 = length(d_0);
             float3 _S7 = d_0 / float3(max(dist_0, 9.99999997475242708e-07f)) ;
-            float _S8 = l_0.params_1.z;
 
-#line 106
-            float decay_0;
-
-#line 106
-            if(_S8 > 0.0f)
+#line 113
+            float decay_1;
+            if((l_0.decay_0) > 0.0f)
             {
 
-#line 106
-                decay_0 = _S8;
+#line 114
+                decay_1 = l_0.decay_0;
 
-#line 106
+#line 114
             }
             else
             {
 
-#line 106
-                decay_0 = 2.0f;
+#line 114
+                decay_1 = 2.0f;
 
-#line 106
+#line 114
             }
-            float falloff_0 = 1.0f / max(pow(dist_0, decay_0), 0.00999999977648258f);
-            float _S9 = l_0.params_1.y;
+            float falloff_0 = 1.0f / max(pow(dist_0, decay_1), 0.00999999977648258f);
 
-#line 108
+#line 115
             float falloff_1;
-
-#line 108
-            if(_S9 > 0.0f)
+            if((l_0.distance_0) > 0.0f)
             {
 
-#line 109
-                float t_0 = saturate(1.0f - pow(dist_0 / _S9, 4.0f));
+#line 117
+                float t_0 = saturate(1.0f - pow(dist_0 / l_0.distance_0, 4.0f));
 
-#line 109
+#line 117
                 falloff_1 = falloff_0 * (t_0 * t_0);
 
-#line 108
+#line 116
             }
             else
             {
 
-#line 108
+#line 116
                 falloff_1 = falloff_0;
 
-#line 108
+#line 116
             }
 
 
 
             float3 light_2 = light_0 * float3(falloff_1) ;
 
-#line 112
+#line 120
             ldir_0 = _S7;
 
-#line 112
+#line 120
             light_1 = light_2;
 
-#line 102
+#line 110
         }
         else
         {
 
-#line 102
+#line 110
             ldir_0 = _S6;
 
-#line 102
+#line 110
             light_1 = light_0;
 
-#line 102
+#line 110
         }
 
-#line 114
+#line 122
         float nl_0 = saturate(dot(n_0, ldir_0));
         if(nl_0 <= 0.0f)
         {
 
-#line 116
+#line 124
             k_0 = k_0 + int(1);
 
-#line 88
+#line 97
             continue;
         }
 
-#line 118
+#line 126
         float3 h_0 = normalize(ldir_0 + v_0);
         float nh_0 = saturate(dot(n_0, h_0));
 
 
         float a2_0 = _S3 * _S3;
-        float _S10 = 1.0f - a2_0;
+        float _S8 = 1.0f - a2_0;
 
 
         float dd_0 = nh_0 * nh_0 * (a2_0 - 1.0f) + 1.0f;
 
-#line 126
-        o_0 = o_0 + light_1 * float3(nl_0)  * (_S1 / float3(3.14159274101257324f)  + (_S2 + (float3(1.0f)  - _S2) * float3(pow(1.0f - saturate(dot(v_0, h_0)), 5.0f)) ) * float3((0.5f / max(nl_0 * sqrt(a2_0 + _S10 * _S4 * _S4) + _S4 * sqrt(a2_0 + _S10 * nl_0 * nl_0), 9.99999997475242708e-07f) * (a2_0 / (3.14159274101257324f * dd_0 * dd_0)))) );
+#line 134
+        o_0 = o_0 + light_1 * float3(nl_0)  * (_S1 / float3(3.14159274101257324f)  + (_S2 + (float3(1.0f)  - _S2) * float3(pow(1.0f - saturate(dot(v_0, h_0)), 5.0f)) ) * float3((0.5f / max(nl_0 * sqrt(a2_0 + _S8 * _S4 * _S4) + _S4 * sqrt(a2_0 + _S8 * nl_0 * nl_0), 9.99999997475242708e-07f) * (a2_0 / (3.14159274101257324f * dd_0 * dd_0)))) );
 
-#line 88
+#line 97
         k_0 = k_0 + int(1);
 
-#line 88
+#line 97
     }
 
-#line 130
+#line 138
     return o_0;
 }
 
 
-#line 74
+#line 83
 float linear_to_srgb_0(float c_0)
 {
 
-#line 75
-    float _S11 = saturate(c_0);
+#line 84
+    float _S9 = saturate(c_0);
 
-#line 75
-    float _S12;
-    if(_S11 <= 0.00313080009073019f)
+#line 84
+    float _S10;
+    if(_S9 <= 0.00313080009073019f)
     {
 
-#line 76
-        _S12 = _S11 * 12.92000007629394531f;
+#line 85
+        _S10 = _S9 * 12.92000007629394531f;
 
-#line 76
+#line 85
     }
     else
     {
 
-#line 76
-        _S12 = 1.0549999475479126f * pow(_S11, 0.4166666567325592f) - 0.05499999970197678f;
+#line 85
+        _S10 = 1.0549999475479126f * pow(_S9, 0.4166666567325592f) - 0.05499999970197678f;
 
-#line 76
+#line 85
     }
 
-#line 76
-    return _S12;
+#line 85
+    return _S10;
 }
 
 
-#line 76
+#line 85
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 57
+#line 66
 struct pixelInput_0
 {
     float3 world_1 [[user(TEXCOORD)]];
@@ -274,115 +269,115 @@ struct pixelInput_0
 };
 
 
-#line 134
-[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S13 [[stage_in]], bool front_0 [[front_facing]], float4 position_0 [[position]], Material_0 constant* material_1 [[buffer(0)]], Lighting_0 constant* lighting_1 [[buffer(1)]])
+#line 142
+[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S11 [[stage_in]], bool front_0 [[front_facing]], float4 position_0 [[position]], Material_0 constant* material_1 [[buffer(0)]], Lighting_0 constant* lighting_1 [[buffer(1)]])
 {
 
-#line 134
+#line 142
     thread KernelContext_0 kernelContext_1;
 
-#line 134
+#line 142
     (&kernelContext_1)->material_0 = material_1;
 
-#line 134
+#line 142
     (&kernelContext_1)->lighting_0 = lighting_1;
-    int flags_0 = int(material_1->params_0.z);
+    uint flags_1 = material_1->flags_0;
     float3 base_1 = material_1->color_0.xyz;
 
-#line 136
+#line 144
     float3 c_1;
 
-    if((flags_0 & int(1)) != int(0))
+    if(((material_1->flags_0) & 1U) != 0U)
     {
 
-#line 138
+#line 146
         c_1 = base_1;
 
-#line 138
+#line 146
     }
     else
     {
-        float3 _S14 = normalize(_S13.normal_0);
-        if((flags_0 & int(2)) != int(0))
+        float3 _S12 = normalize(_S11.normal_0);
+        if((flags_1 & 2U) != 0U)
         {
 
-#line 143
-            float3 n_1 = normalize(cross(dfdx(_S13.world_1), dfdy(_S13.world_1)));
+#line 151
+            float3 n_1 = normalize(cross(dfdx(_S11.world_1), dfdy(_S11.world_1)));
 
-            if((dot(n_1, (&kernelContext_1)->lighting_0->eye_0.xyz - _S13.world_1)) < 0.0f)
+            if((dot(n_1, (&kernelContext_1)->lighting_0->eye_0.xyz - _S11.world_1)) < 0.0f)
             {
 
-#line 145
+#line 153
                 c_1 = - n_1;
 
-#line 145
+#line 153
             }
             else
             {
 
-#line 145
+#line 153
                 c_1 = n_1;
 
-#line 145
+#line 153
             }
 
-#line 142
+#line 150
         }
         else
         {
 
-#line 142
-            c_1 = _S14;
+#line 150
+            c_1 = _S12;
 
-#line 142
+#line 150
         }
 
-#line 142
-        bool _S15;
+#line 150
+        bool _S13;
 
-#line 149
-        if((flags_0 & int(4)) != int(0))
+#line 157
+        if((flags_1 & 4U) != 0U)
         {
 
-#line 149
-            _S15 = !front_0;
+#line 157
+            _S13 = !front_0;
 
-#line 149
+#line 157
         }
         else
         {
 
-#line 149
-            _S15 = false;
+#line 157
+            _S13 = false;
 
-#line 149
+#line 157
         }
 
-#line 149
-        if(_S15)
+#line 157
+        if(_S13)
         {
 
-#line 149
+#line 157
             c_1 = - c_1;
 
-#line 149
+#line 157
         }
 
-#line 149
-        float3 _S16 = shade_0(base_1, _S13.world_1, c_1, (&kernelContext_1)->lighting_0->eye_0.xyz, &kernelContext_1);
+#line 157
+        float3 _S14 = shade_0(base_1, _S11.world_1, c_1, (&kernelContext_1)->lighting_0->eye_0.xyz, &kernelContext_1);
 
-#line 149
-        c_1 = _S16;
+#line 157
+        c_1 = _S14;
 
-#line 138
+#line 146
     }
 
-#line 154
+#line 162
     float3 c_2 = c_1 + (&kernelContext_1)->material_0->emissive_0.xyz;
     float a_0 = material_1->color_0.w;
 
-#line 155
-    pixelOutput_0 _S17 = { float4(linear_to_srgb_0(c_2.x) * a_0, linear_to_srgb_0(c_2.y) * a_0, linear_to_srgb_0(c_2.z) * a_0, a_0) };
-    return _S17;
+#line 163
+    pixelOutput_0 _S15 = { float4(linear_to_srgb_0(c_2.x) * a_0, linear_to_srgb_0(c_2.y) * a_0, linear_to_srgb_0(c_2.z) * a_0, a_0) };
+    return _S15;
 }
 

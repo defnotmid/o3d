@@ -21,9 +21,9 @@ test_scene :: proc(scene: ^o3d.Scene, geos: ^o3d.Geometries) {
 	floor := o3d.MATERIAL_DEFAULT
 	floor.color, floor.roughness = {0.4, 0.42, 0.5}, 0.9
 	glass := o3d.MATERIAL_DEFAULT
-	glass.color, glass.opacity, glass.transparent, glass.side = {0.4, 0.8, 1}, 0.45, true, .Double
+	glass.color, glass.opacity, glass.flags, glass.side = {0.4, 0.8, 1}, 0.45, {.Transparent}, .Double
 	glow := o3d.MATERIAL_DEFAULT
-	glow.color, glow.emissive, glow.emissive_intensity, glow.flat_shading = {0.1, 0.1, 0.1}, {1, 0.6, 0.1}, 1.5, true
+	glow.color, glow.emissive, glow.emissive_intensity, glow.flags = {0.1, 0.1, 0.1}, {1, 0.6, 0.1}, 1.5, {.Flat_Shading}
 	append(&scene.draws, o3d.Draw{o3d.plane(geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
 	append(&scene.draws, o3d.Draw{o3d.sphere(geos, 0.7, 48, 24), o3d.compose({-0.6, 0.7, 0}), red})
 	append(&scene.draws, o3d.Draw{o3d.box(geos, 0.8, 0.8, 0.8), o3d.compose({1, 0.4, -0.4}, {0, 0.6, 0}), metal})

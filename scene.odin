@@ -6,7 +6,8 @@ import "core:math/linalg"
 // A frame's scene: one camera, the lights, and draws (geometry, its world
 // transform, its material). Filled from scratch every frame; the draws keep
 // their order (transparent ones are drawn after the opaque ones, farthest
-// first).
+// first). The draws are a structure of arrays: the per-frame passes
+// (`draw_order`, `shading_materials`) read one or two of its columns.
 
 Camera :: struct {
 	position:     Vec3,
@@ -22,11 +23,12 @@ Camera :: struct {
 
 CAMERA_DEFAULT :: Camera{position = {0, 0, 5}, fov = 50, near = 0.1, far = 2000}
 
+// The values are the shader's LIGHT_* constants (o3d_test checks).
 Light_Kind :: enum u8 {
-	Ambient, // AmbientLight(color, intensity)
-	Hemisphere, // HemisphereLight(skyColor, groundColor, intensity)
-	Directional, // DirectionalLight(color, intensity): from `position` toward `target`
-	Point, // PointLight(color, intensity, distance, decay)
+	Ambient     = 0, // AmbientLight(color, intensity)
+	Hemisphere  = 1, // HemisphereLight(skyColor, groundColor, intensity)
+	Directional = 2, // DirectionalLight(color, intensity): from `position` toward `target`
+	Point       = 3, // PointLight(color, intensity, distance, decay)
 }
 
 Light :: struct {
@@ -48,7 +50,19 @@ Side :: enum u8 {
 	Double,
 }
 
-// MeshStandardMaterial (or MeshBasicMaterial with `basic`).
+// three.js's boolean material properties.
+Material_Flag :: enum u8 {
+	// Unlit: the colour as is (MeshBasicMaterial).
+	Basic,
+	// One normal per triangle (flatShading).
+	Flat_Shading,
+	// Blended over what is behind (opacity < 1 needs it, as in three.js).
+	Transparent,
+}
+
+Material_Flags :: bit_set[Material_Flag; u8]
+
+// MeshStandardMaterial (or MeshBasicMaterial with `.Basic`).
 Material :: struct {
 	color:              Vec3, // sRGB
 	metalness:          f32,
@@ -56,12 +70,8 @@ Material :: struct {
 	emissive:           Vec3, // sRGB
 	emissive_intensity: f32,
 	opacity:            f32,
-	// Blended over what is behind (opacity < 1 needs it, as in three.js).
-	transparent:        bool,
-	// Unlit: the colour as is.
-	basic:              bool,
 	side:               Side,
-	flat_shading:       bool,
+	flags:              Material_Flags,
 }
 
 MATERIAL_DEFAULT :: Material{color = {1, 1, 1}, metalness = 0, roughness = 1, emissive_intensity = 1, opacity = 1}
@@ -75,13 +85,18 @@ Draw :: struct {
 Scene :: struct {
 	camera: Camera,
 	lights: [dynamic]Light,
-	draws:  [dynamic]Draw,
+	draws:  #soa[dynamic]Draw,
 }
 
 scene_clear :: proc(s: ^Scene) {
 	s.camera = CAMERA_DEFAULT
 	clear(&s.lights)
 	clear(&s.draws)
+}
+
+// The draws' materials, one column of the table.
+scene_materials :: proc "contextless" (s: ^Scene) -> []Material {
+	return s.draws.material[:len(s.draws)]
 }
 
 scene_destroy :: proc(s: ^Scene) {
@@ -109,30 +124,32 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 // (transparent with opacity under 1) farthest from the camera first.
 draw_order :: proc(scene: ^Scene, view: Mat4, order: ^[dynamic]int) {
 	clear(order)
-	for d, i in scene.draws {
-		if !blended(d.material) {
+	materials := scene_materials(scene)
+	models := scene.draws.model[:len(scene.draws)]
+	for m, i in materials {
+		if !blended(m) {
 			append(order, i)
 		}
 	}
 	first := len(order)
-	for d, i in scene.draws {
-		if blended(d.material) {
+	for m, i in materials {
+		if blended(m) {
 			append(order, i)
 		}
 	}
-	depth :: proc(d: Draw, view: Mat4) -> f32 {
-		return (view * d.model * Vec4{0, 0, 0, 1}).z
+	depth :: proc(model, view: Mat4) -> f32 {
+		return (view * model * Vec4{0, 0, 0, 1}).z
 	}
 	back := order[first:]
 	for i in 1 ..< len(back) {
-		for j := i; j > 0 && depth(scene.draws[back[j]], view) < depth(scene.draws[back[j - 1]], view); j -= 1 {
+		for j := i; j > 0 && depth(models[back[j]], view) < depth(models[back[j - 1]], view); j -= 1 {
 			back[j], back[j - 1] = back[j - 1], back[j]
 		}
 	}
 }
 
 blended :: proc "contextless" (m: Material) -> bool {
-	return m.transparent && m.opacity < 1
+	return .Transparent in m.flags && m.opacity < 1
 }
 
 // ---- shading ----------------------------------------------------------------------------
@@ -172,17 +189,69 @@ shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int 
 	return n
 }
 
+// The materials in shading form, one per draw: linear colours, the opacity
+// that is drawn and the flags both renderers' shading reads. Both build it
+// once per frame (the GPU's uniforms are these, packed).
+Shading_Material :: struct {
+	base:      Vec3, // linear
+	emissive:  Vec3, // linear, times intensity
+	opacity:   f32, // 1 unless blended
+	metalness: f32,
+	roughness: f32,
+	flags:     Shading_Flags,
+}
+
+// Bit values are the shader's FLAG_* constants (o3d_test checks).
+Shading_Flag :: enum u8 {
+	Basic,
+	Flat_Shading,
+	// Lit from both sides: the side is not .Front.
+	Two_Sided,
+	Blended,
+}
+
+Shading_Flags :: bit_set[Shading_Flag; u32]
+
+// From the draws' material column: `scene_materials(scene)`.
+shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material) {
+	resize(out, len(materials))
+	for m, i in materials {
+		f: Shading_Flags
+		if .Basic in m.flags {
+			f += {.Basic}
+		}
+		if .Flat_Shading in m.flags {
+			f += {.Flat_Shading}
+		}
+		if m.side != .Front {
+			f += {.Two_Sided}
+		}
+		if blended(m) {
+			f += {.Blended}
+		}
+		out[i] = {
+			base      = linear(m.color),
+			emissive  = linear(m.emissive) * m.emissive_intensity,
+			opacity   = clamp(m.opacity, 0, 1) if .Blended in f else 1,
+			metalness = m.metalness,
+			roughness = m.roughness,
+			flags     = f,
+		}
+	}
+}
+
 // The colour (linear) leaving a point of `m` at `world` with normal `n`
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
 // specular with Smith correlated visibility and Schlick Fresnel), direct
 // lights plus ambient and hemisphere light; no environment map.
-shade :: proc "contextless" (m: ^Material, base: Vec3, world, n_in, eye: Vec3, lights: []Shading_Light) -> Vec3 {
-	if m.basic {
+shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light) -> Vec3 {
+	base := m.base
+	if .Basic in m.flags {
 		return base
 	}
 	n := n_in
 	v := linalg.normalize(eye - world)
-	if linalg.dot(n, v) < 0 && m.side != .Front {
+	if linalg.dot(n, v) < 0 && .Two_Sided in m.flags {
 		n = -n
 	}
 	diffuse := base * (1 - m.metalness)

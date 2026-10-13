@@ -19,8 +19,9 @@ What is known about three.js carries over:
 - Colours are sRGB; lighting is linear; the output is sRGB with no tone
   mapping.
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
-  `emissive`, `emissive_intensity`, `opacity`, `transparent`, `side`,
-  `flat_shading`) or MeshBasicMaterial (`basic`).
+  `emissive`, `emissive_intensity`, `opacity`, `side`, and the booleans as
+  a bit set: `flags = {.Transparent, .Flat_Shading}`) or MeshBasicMaterial
+  (`.Basic`).
 - Lights are AmbientLight, HemisphereLight, DirectionalLight (from
   `position` toward `target`) and PointLight (`distance`, `decay`), in
   three.js's units: a white directional light of intensity 1 lights a white
@@ -28,7 +29,8 @@ What is known about three.js carries over:
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
   (radiusTop 0 is a cone), `torus`. The same parameters give the same id,
-  so a frame may ask for `box(1, 1, 1)` every time.
+  so a frame may ask for `box(1, 1, 1)` every time; `primitive(key)` makes
+  one from its `Geometry_Key` alone.
 
 The output is premultiplied RGBA, transparent where nothing was drawn, to
 composite over anything.
@@ -63,9 +65,21 @@ ways to PNGs.
 ## Design
 
 - **Data:** the scene is flat tables (lights, draws: geometry id, model
-  matrix, material) refilled each frame; geometry is the only retained
-  state, interleaved position / normal / uv vertices with 32-bit indices,
-  uploaded to the GPU on first use.
+  matrix, material) refilled each frame, the draws a structure of arrays
+  (`#soa`) since the per-frame passes read a column or two; geometry is the only retained
+  state: one array of interleaved position / normal / uv vertices and one
+  of 32-bit indices shared by every geometry, a geometry being its ranges
+  in them. The GPU mirrors the two arrays in two buffers, uploading what
+  is new at the start of a frame.
+- **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
+  Each frame, `shading_lights` and `shading_materials` turn the lights and
+  the draws' materials into their shading form (linear colours, the
+  opacity drawn, `Shading_Flags`) once; both renderers read those, and the
+  GPU's uniforms are them, packed. Boolean sets are bit sets
+  (`Material_Flags`, `Shading_Flags`, a pixel's covered samples).
+- **Shader contract:** `Light_Kind`'s values and `Shading_Flag`'s bits are
+  the shader's `LIGHT_*` and `FLAG_*` constants; a test reads
+  `shaders/o3d.slang` and checks them.
 - **Shading** is one model in two places, `shade` in scene.odin and
   `shaders/o3d.slang`: Lambert diffuse plus GGX specular with Smith
   correlated visibility and Schlick Fresnel, as three.js's
@@ -73,7 +87,11 @@ ways to PNGs.
   means changing the other; the tests compare the two renderers.
 - **Anti-aliasing:** 4x MSAA on the GPU; the software renderer keeps four
   samples per pixel at the same positions, shades once per pixel per
-  triangle, and resolves the same way.
+  triangle, and resolves the same way. It sorts triangles into bands of
+  32 rows (counted, then filled in drawing order) and draws each band from
+  its own list; the triangles are a structure of arrays, as binning reads
+  only their row spans. Vertices stay interleaved: the GPU reads them as
+  one buffer and the rasterizer gathers whole vertices by index.
 - **Order:** opaque draws as listed, then blended ones (transparent with
   opacity under 1) farthest first, without writing depth (`draw_order`).
 - **Shaders** are Slang compiled offline (`shaders/build.sh`) to committed

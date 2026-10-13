@@ -10,13 +10,16 @@ import "core:thread"
 // The CPU renderer: the pixel reference for the GPU's and the path without
 // one. Four samples per pixel (the GPU path's 4x MSAA), a depth per sample,
 // shading once per pixel per triangle at its centre with perspective-correct
-// position and normal, near-plane clipping. Rows are split into bands, drawn
-// as tasks on the caller's pool (nil: on the caller). Samples hold sRGB
+// position and normal, near-plane clipping. Rows are split into bands, each
+// with the list of triangles touching it (in drawing order), drawn as tasks
+// on the caller's pool (nil: on the caller). Samples hold sRGB
 // premultiplied RGBA8, so the resolve averages what the GPU's does.
 
 SAMPLES :: 4
 // Sample positions in a pixel (the standard 4x MSAA pattern).
 SAMPLE_OFFSETS := [SAMPLES]Vec2{{0.375, 0.125}, {0.875, 0.375}, {0.125, 0.625}, {0.625, 0.875}}
+// The samples of a pixel a triangle covers.
+Sample_Mask :: bit_set[0 ..< SAMPLES; u8]
 BAND_ROWS :: 32
 
 Software :: struct {
@@ -25,8 +28,13 @@ Software :: struct {
 	depth:         []f32, // per sample, 0 near .. 1 far
 	pixels:        []u8, // the resolved frame, RGBA8 premultiplied
 	// Scratch per frame.
-	tris:          [dynamic]Tri,
+	// Structure of arrays: binning reads only the row spans.
+	tris:          #soa[dynamic]Tri,
 	order:         [dynamic]int,
+	materials:     [dynamic]Shading_Material, // per draw
+	// Band b's triangles are band_tris[band_start[b]:band_start[b + 1]].
+	band_start:    [dynamic]int,
+	band_tris:     [dynamic]u32,
 }
 
 software_destroy :: proc(s: ^Software) {
@@ -35,6 +43,9 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.pixels)
 	delete(s.tris)
 	delete(s.order)
+	delete(s.materials)
+	delete(s.band_start)
+	delete(s.band_tris)
 	s^ = {}
 }
 
@@ -70,20 +81,21 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, width, h
 	view_proj := proj * view
 	lights: [MAX_LIGHTS]Shading_Light
 	nl := shading_lights(scene.lights[:], &lights)
+	shading_materials(scene_materials(scene), &s.materials)
 
 	draw_order(scene, view, &s.order)
 	for di in s.order {
 		d := &scene.draws[di]
-		geo, ok := geometry_get(geos, d.geometry)
+		vertices, indices, ok := geometry_mesh(geos, d.geometry)
 		if !ok {
 			continue
 		}
 		mvp := view_proj * d.model
 		nm := normal_matrix(d.model)
-		for t := 0; t + 2 < len(geo.indices); t += 3 {
+		for t := 0; t + 2 < len(indices); t += 3 {
 			clip, world, normal: [3]Vec4
 			for k in 0 ..< 3 {
-				vtx := geo.vertices[geo.indices[t + k]]
+				vtx := vertices[indices[t + k]]
 				p := Vec4{vtx.position.x, vtx.position.y, vtx.position.z, 1}
 				clip[k] = mvp * p
 				world[k] = d.model * p
@@ -93,13 +105,14 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, width, h
 		}
 	}
 
+	bands := (height + BAND_ROWS - 1) / BAND_ROWS
+	bin_bands(s, bands)
 	job := Band_Job {
-		s       = s,
-		scene   = scene,
-		lights  = lights[:nl],
-		eye     = scene.camera.position,
-		bands   = (height + BAND_ROWS - 1) / BAND_ROWS,
-		ctx     = context,
+		s      = s,
+		lights = lights[:nl],
+		eye    = scene.camera.position,
+		bands  = bands,
+		ctx    = context,
 	}
 	run_bands(&job, pool)
 
@@ -179,10 +192,43 @@ emit :: proc(s: ^Software, clip, world, normal: [3]Vec4, draw, width, height: in
 	append(&s.tris, t)
 }
 
+// Lists each band's triangles: counted, offsets summed, then filled in
+// triangle order (the drawing order).
+@(private = "file")
+bin_bands :: proc(s: ^Software, bands: int) {
+	band_range :: #force_inline proc "contextless" (min_y, max_y: int) -> (first, last: int) {
+		return min_y / BAND_ROWS, (max_y - 1) / BAND_ROWS
+	}
+	resize(&s.band_start, bands + 1)
+	slice.zero(s.band_start[:])
+	min_ys, max_ys := s.tris.min_y[:len(s.tris)], s.tris.max_y[:len(s.tris)]
+	for min_y, i in min_ys {
+		first, last := band_range(min_y, max_ys[i])
+		for b in first ..= last {
+			s.band_start[b + 1] += 1
+		}
+	}
+	for b in 0 ..< bands {
+		s.band_start[b + 1] += s.band_start[b]
+	}
+	resize(&s.band_tris, s.band_start[bands])
+	// band_start[b] advances as band b fills, then is put back.
+	for min_y, i in min_ys {
+		first, last := band_range(min_y, max_ys[i])
+		for b in first ..= last {
+			s.band_tris[s.band_start[b]] = u32(i)
+			s.band_start[b] += 1
+		}
+	}
+	for b := bands; b > 0; b -= 1 {
+		s.band_start[b] = s.band_start[b - 1]
+	}
+	s.band_start[0] = 0
+}
+
 @(private = "file")
 Band_Job :: struct {
 	s:       ^Software,
-	scene:   ^Scene,
 	lights:  []Shading_Light,
 	eye:     Vec3,
 	bands:   int,
@@ -226,24 +272,19 @@ bands_claim :: proc(job: ^Band_Job) {
 		if b >= job.bands {
 			return
 		}
-		y0 := b * BAND_ROWS
-		draw_band(job, y0, min(y0 + BAND_ROWS, job.s.height))
+		draw_band(job, b)
 	}
 }
 
 @(private = "file")
-draw_band :: proc(job: ^Band_Job, y0, y1: int) {
+draw_band :: proc(job: ^Band_Job, band: int) {
 	s := job.s
-	for &t in s.tris {
-		if t.max_y <= y0 || t.min_y >= y1 {
-			continue
-		}
-		draw := &job.scene.draws[t.draw]
-		m := &draw.material
-		base := linear(m.color)
-		emissive := linear(m.emissive) * m.emissive_intensity
-		opacity := clamp(m.opacity, 0, 1)
-		blend := blended(m^)
+	y0 := band * BAND_ROWS
+	y1 := min(y0 + BAND_ROWS, s.height)
+	for ti in s.band_tris[s.band_start[band]:s.band_start[band + 1]] {
+		t := s.tris[ti] // gathered from the columns once
+		m := &s.materials[t.draw]
+		blend := .Blended in m.flags
 		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
@@ -251,21 +292,20 @@ draw_band :: proc(job: ^Band_Job, y0, y1: int) {
 			continue
 		}
 		flat_n: Vec3
-		if m.flat_shading {
+		if .Flat_Shading in m.flags {
 			w0 := t.world[0] / t.inv_w[0]
 			flat_n = linalg.normalize(linalg.cross(t.world[1] / t.inv_w[1] - w0, t.world[2] / t.inv_w[2] - w0))
 		}
 		for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
 			for x in x_lo ..< x_hi {
-				covered: [SAMPLES]bool
-				any := false
+				covered: Sample_Mask
 				for k in 0 ..< SAMPLES {
 					p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
 					if inside(t, p, area) {
-						covered[k], any = true, true
+						covered += {k}
 					}
 				}
-				if !any {
+				if covered == {} {
 					continue
 				}
 				// Shade once, at the pixel centre (clamped into the triangle by
@@ -277,15 +317,12 @@ draw_band :: proc(job: ^Band_Job, y0, y1: int) {
 				iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
 				world := (t.world[0] * b0 + t.world[1] * b1 + t.world[2] * b2) / iw
 				n := flat_n
-				if !m.flat_shading {
+				if .Flat_Shading not_in m.flags {
 					n = linalg.normalize((t.normal[0] * b0 + t.normal[1] * b1 + t.normal[2] * b2) / iw)
 				}
-				lit := shade(m, base, world, n, job.eye, job.lights) + emissive
-				col := pack(lit, opacity if blend else 1)
-				for k in 0 ..< SAMPLES {
-					if !covered[k] {
-						continue
-					}
+				lit := shade(m, world, n, job.eye, job.lights) + m.emissive
+				col := pack(lit, m.opacity)
+				for k in covered {
 					p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
 					s0 := edge(t.p[1].xy, t.p[2].xy, p) / area
 					s1 := edge(t.p[2].xy, t.p[0].xy, p) / area
