@@ -647,3 +647,20 @@ test_environment_prefilter :: proc(t: ^testing.T) {
 	_ = software_render(&s, &scene, &g, nil, 32, 32, nil, &textures)
 	testing.expect(t, len(textures.texels) == texels && len(textures.list) == count, "a render after prefiltering derives nothing")
 }
+
+// A table's generation is taken with its first entry, and a table made
+// after one was destroyed (same address, same ids) gets a new one.
+@(test)
+test_generations :: proc(t: ^testing.T) {
+	g: Geometries
+	testing.expect_value(t, g.generation, Generation(0))
+	_ = box(&g)
+	first := g.generation
+	testing.expect(t, first != 0)
+	_ = sphere(&g)
+	testing.expect_value(t, g.generation, first)
+	geometries_destroy(&g)
+	_ = box(&g)
+	defer geometries_destroy(&g)
+	testing.expect(t, g.generation != 0 && g.generation != first, "a new table, a new generation")
+}

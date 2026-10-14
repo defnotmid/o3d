@@ -101,10 +101,19 @@ pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &t
 ```
 
 o3d imports oksl as `deps:oksl`, so builds pass `-collection:deps=..`
-(the directory holding both): `odin test . -collection:deps=..`,
-`odin run bench -collection:deps=.. -o:speed` runs the zero-allocation
-software benchmark, and `odin run demo -collection:deps=.. -- out_dir`
-renders a test scene both ways to PNGs.
+(the directory holding both). `vendor:cgltf` needs its library built once
+per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
+
+- `odin test . -collection:deps=..` and `odin test sdlgpu
+  -collection:deps=..`: the CPU and GPU tests. A GPU test fails without a
+  device unless `O3D_NO_GPU=1` (CI without a GPU; macOS, below).
+- `odin run tools/gpu_check -collection:deps=.. [-- out_dir]`: every
+  GPU-vs-software parity case (`PARITY_CASES`) on the main thread, by PSNR,
+  optionally saving both frames. On macOS this is the GPU check: SDL's
+  Metal driver needs the main thread, which `odin test` does not give.
+- `odin run bench -collection:deps=.. -o:speed`: the zero-allocation
+  software benchmark; `odin run demo -collection:deps=.. -- out_dir`: a
+  test scene both ways to PNGs.
 
 ## Design
 
@@ -214,6 +223,7 @@ sizeable change):
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
 
-Before onimite depends on o3d: run the tests on macOS. The Metal path
-(the committed MSL, the R32_FLOAT shadow map, oksl's MSL for
-ShaderMaterials) is generated but has only been run on Vulkan.
+Metal: v0.0.1's standard shader did not compile there (a texel `Load` on
+a combined texture-sampler, which Slang emits wrongly for MSL; the shadow
+map is now sampled at texel centres). Run `tools/gpu_check` on macOS to
+confirm every case before relying on it.

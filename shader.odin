@@ -92,6 +92,7 @@ Shader :: struct {
 }
 
 Shaders :: struct {
+	generation: Generation, // of these contents, for the GPU's pipelines
 	list: [dynamic]Shader,
 	keys: map[string]Shader_Id,
 }
@@ -120,6 +121,7 @@ shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Sh
 	if found, ok := s.keys[key]; ok {
 		return found, s.list[found - 1].errors
 	}
+	generation_take(&s.generation)
 	append(&s.list, make_shader(vertex, fragment, glsl3))
 	id = Shader_Id(len(s.list))
 	s.keys[strings.clone(key)] = id

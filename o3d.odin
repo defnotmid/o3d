@@ -17,6 +17,7 @@ package o3d
 
 import "core:math"
 import "core:math/linalg"
+import "core:sync"
 
 Vec2 :: [2]f32
 Vec3 :: [3]f32
@@ -150,3 +151,22 @@ table_grow_non_zero :: #force_inline proc(table: ^[dynamic]$T, length: int) {
 	non_zero_resize(table, length)
 }
 
+
+// ---- generations ------------------------------------------------------------------------
+
+// Which contents a retained table (Geometries, Textures, Shaders) holds, for
+// what mirrors it (the GPU's buffers, textures and pipelines): taken when
+// the table gets its first entry, and new for a table made after one was
+// destroyed, though it reuses ids and even its address. 0: empty.
+Generation :: distinct u64
+
+@(private = "file")
+generations: u64 // atomic: the last one handed out
+
+// Gives a table a generation if it has none.
+@(private)
+generation_take :: proc "contextless" (g: ^Generation) {
+	if g^ == 0 {
+		g^ = Generation(sync.atomic_add(&generations, 1) + 1)
+	}
+}

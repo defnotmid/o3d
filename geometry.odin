@@ -68,6 +68,7 @@ PRIMITIVES := [Primitive]Builder {
 }
 
 Geometries :: struct {
+	generation: Generation, // of these contents, for the GPU's mirror
 	vertices: [dynamic]Vertex,
 	indices:  [dynamic]u32,
 	list:     [dynamic]Geometry,
@@ -110,6 +111,7 @@ geometries_made :: proc "contextless" (g: ^Geometries) -> int {
 }
 
 geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32) -> Geometry_Id {
+	generation_take(&g.generation)
 	r: f32
 	for v in vertices {
 		r = max(r, linalg.length(v.position))

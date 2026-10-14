@@ -27,6 +27,7 @@ Texture :: struct {
 }
 
 Textures :: struct {
+	generation: Generation, // of these contents, for the GPU's mirror
 	texels: [dynamic][4]u8,
 	list:   [dynamic]Texture,
 }
@@ -81,6 +82,7 @@ texture_add :: proc(t: ^Textures, pixels: []u8, width, height: int) -> Texture_I
 		downsample_mip(src, sw, sh, dst, dw, dh)
 		sw, sh = dw, dh
 	}
+	generation_take(&t.generation)
 	append(&t.list, tex)
 	return Texture_Id(len(t.list))
 }

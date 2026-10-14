@@ -139,7 +139,10 @@ float shadow_factor(float3 world, float3 normal) {
         float acc = 0;
         for (int i = 0; i < 4; i++) {
             int col = clamp(int(x0) - 1 + i, 0, size - 1);
-            acc += wx[i] * (z <= shadowMap.Load(int3(col, row, 0)) ? 1.0 : 0.0);
+            // The texel itself: its centre through the nearest sampler (Load
+            // on a combined texture-sampler miscompiles to MSL).
+            float depth = shadowMap.SampleLevel((float2(col, row) + 0.5) / float(size), 0);
+            acc += wx[i] * (z <= depth ? 1.0 : 0.0);
         }
         lit += wy[j] * acc;
     }

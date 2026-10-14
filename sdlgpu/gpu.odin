@@ -52,6 +52,11 @@ GPU :: struct {
 	size:             [2]u32,
 	vertices:         Pool_Buffer,
 	indices:          Pool_Buffer,
+	// The generations of the tables mirrored (geometry, textures, shaders'
+	// pipelines): a different one (new contents, ids reused) starts over.
+	mirrored:         struct {
+		geometry, textures, shaders: o3d.Generation,
+	},
 	// Per texture (its id - 1): `Textures.list` mirrored on the GPU.
 	textures:         [dynamic]^sdl.GPUTexture,
 	dummy_texture:    ^sdl.GPUTexture,
@@ -412,7 +417,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 	return p^
 }
 
-@(private = "file")
+@(private)
 release_custom :: proc(g: ^GPU, c: ^Custom) {
 	for side in o3d.Side {
 		for p in c.pipelines[side] {

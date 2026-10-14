@@ -6,6 +6,32 @@ import sdl "vendor:sdl3"
 
 import o3d ".."
 
+// Starts the mirror of a table over when it holds other contents than the
+// GPU mirrors (a new table reuses ids, positions, even its address): the
+// geometry re-uploads, textures and ShaderMaterials' pipelines are made
+// again (what was made is released once the GPU is done with it).
+@(private = "file")
+sync_mirrors :: proc(g: ^GPU, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, textures: ^o3d.Textures) {
+	if geos != nil && geos.generation != g.mirrored.geometry {
+		g.vertices.uploaded, g.indices.uploaded = 0, 0
+		g.mirrored.geometry = geos.generation
+	}
+	if textures != nil && textures.generation != g.mirrored.textures {
+		for tex in g.textures {
+			sdl.ReleaseGPUTexture(g.device, tex)
+		}
+		clear(&g.textures)
+		g.mirrored.textures = textures.generation
+	}
+	if shaders != nil && shaders.generation != g.mirrored.shaders {
+		for &c in g.custom {
+			release_custom(g, &c)
+		}
+		clear(&g.custom)
+		g.mirrored.shaders = shaders.generation
+	}
+}
+
 // Uploads what `geos` added since the last frame (in a copy pass of `cmd`).
 @(private)
 upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
@@ -155,6 +181,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			return .Device
 		}
 	}
+	sync_mirrors(g, geos, shaders, textures)
 	env := o3d.shading_environment(scene, textures)
 	bg_tex, bg_intensity, bg_lod := o3d.shading_background(scene, textures)
 	upload_geometry(g, geos, cmd) or_return
