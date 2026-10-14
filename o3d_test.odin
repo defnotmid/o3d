@@ -591,3 +591,59 @@ test_software_environment :: proc(t: ^testing.T) {
 }
 
 
+
+// The same parameters every frame make nothing new; a parameter that varies
+// makes a mesh per value, which geometries_made shows (scale instead).
+@(test)
+test_geometries_made :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	for frame in 0 ..< 3 {
+		_ = sphere(&g, 1, 16, 8)
+		_ = box(&g, 1, 2, 3)
+		_ = frame
+	}
+	testing.expect_value(t, geometries_made(&g), 2)
+	for frame in 0 ..< 3 {
+		_ = sphere(&g, 1 + f32(frame) * 0.1, 16, 8) // a radius animated the wrong way
+	}
+	testing.expect_value(t, geometries_made(&g), 4) // 1.0 was made already; 1.1, 1.2 are new
+}
+
+// An environment's derived maps are made by environment_prefilter, once, at
+// load: a render after it adds nothing to the textures (no work in frame
+// time); one without it derives them on first use.
+@(test)
+test_environment_prefilter :: proc(t: ^testing.T) {
+	textures: Textures
+	defer textures_destroy(&textures)
+	W, H :: 64, 32
+	pixels: [W * H * 4]u8
+	for i in 0 ..< W * H {
+		pixels[i * 4 + 0], pixels[i * 4 + 1], pixels[i * 4 + 2], pixels[i * 4 + 3] = u8(i % W * 4), 120, u8(i / W * 8), 255
+	}
+	env := texture_add(&textures, pixels[:], W, H)
+	_, _, before := texture_environment(&textures, env)
+	testing.expect(t, !before, "not derived until asked")
+	rad, irr, ok := environment_prefilter(&textures, env)
+	testing.expect(t, ok && rad != 0 && irr != 0)
+	r2, i2, found := texture_environment(&textures, env)
+	testing.expect(t, found && r2 == rad && i2 == irr, "looked up as derived")
+	again, _, _ := environment_prefilter(&textures, env)
+	testing.expect_value(t, again, rad) // once
+
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.environment = env
+	m := MATERIAL_DEFAULT
+	m.metalness, m.roughness = 1, 0.3
+	append(&scene.draws, Draw{sphere(&g, 1, 16, 8), compose(), m})
+	texels, count := len(textures.texels), len(textures.list)
+	s: Software
+	defer software_destroy(&s)
+	_ = software_render(&s, &scene, &g, nil, 32, 32, nil, &textures)
+	testing.expect(t, len(textures.texels) == texels && len(textures.list) == count, "a render after prefiltering derives nothing")
+}

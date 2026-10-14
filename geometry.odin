@@ -12,6 +12,14 @@ import "core:math/linalg"
 // by the `PRIMITIVES` table from their `Geometry_Key`, and the same key gives
 // the same id, so a frame may ask for `box(1, 1, 1)` every time without
 // making it again.
+//
+// Geometry is kept for the life of `Geometries` (never freed, so ids stay
+// valid and the GPU uploads each mesh once). A shape that changes over time
+// changes through the draw's transform, as three.js animates mesh.scale
+// rather than geometry parameters: `sphere(geos, 1)` scaled by `compose`,
+// not `sphere(geos, radius(t))`, which makes a new mesh every frame it
+// differs. `geometries_made` lets a host notice that: it should stop
+// growing once every shape has been seen.
 
 Vertex :: struct {
 	position: Vec3,
@@ -95,6 +103,12 @@ geometry_mesh :: proc "contextless" (g: ^Geometries, id: Geometry_Id) -> (vertic
 }
 
 // Adds geometry made by the caller (copied; indices count from 0).
+// How many geometries have been made (each kept): a host compares it across
+// frames to find a scene that makes geometry every frame.
+geometries_made :: proc "contextless" (g: ^Geometries) -> int {
+	return len(g.list)
+}
+
 geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32) -> Geometry_Id {
 	r: f32
 	for v in vertices {

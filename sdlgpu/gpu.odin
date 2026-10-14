@@ -9,6 +9,7 @@
 // `Geometries`' shared arrays: what is new uploads at the start of a frame.
 package o3d_sdlgpu
 
+import "core:sync"
 import sdl "vendor:sdl3"
 
 import o3d ".."
@@ -116,9 +117,16 @@ Lighting_Uniforms :: struct {
 	lights:        [o3d.MAX_LIGHTS]Light_Uniforms,
 }
 
+// SDL_Init and making or destroying a device are not safe from several
+// threads at once (tests run in parallel; a host may init from workers):
+// they take turns.
+@(private = "file")
+device_mutex: sync.Mutex
+
 init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	g^ = {device = device}
 	if g.device == nil {
+		sync.guard(&device_mutex)
 		if .VIDEO not_in sdl.WasInit({.VIDEO}) && !sdl.Init({.VIDEO}) {
 			sdl.SetHint(sdl.HINT_VIDEO_DRIVER, "offscreen")
 			if !sdl.Init({.VIDEO}) {
@@ -272,6 +280,7 @@ destroy :: proc(g: ^GPU) {
 		sdl.ReleaseGPUShader(g.device, g.frag)
 	}
 	if g.owns_device {
+		sync.guard(&device_mutex)
 		sdl.DestroyGPUDevice(g.device)
 	}
 	g^ = {}

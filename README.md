@@ -5,7 +5,9 @@ frame is described from scratch (a camera, lights, geometry with materials),
 so a frame is a pure function of whatever drives it. Drawn on the GPU
 through SDL_GPU (Vulkan, Metal), with a software renderer that draws the
 same pixels on the CPU and is the reference the GPU is tested against.
-MIT licensed ([LICENSE](LICENSE)).
+MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, cgltf,
+stb_image, SDL 3, three.js's models, Odin's packages) is in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Conventions (three.js's)
 
@@ -49,7 +51,11 @@ What is known about three.js carries over:
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
   (radiusTop 0 is a cone), `torus`. The same parameters give the same id,
   so a frame may ask for `box(1, 1, 1)` every time; `primitive(key)` makes
-  one from its `Geometry_Key` alone.
+  one from its `Geometry_Key` alone. Geometry is kept (never freed), so a
+  shape changes over time through the draw's transform, as three.js
+  animates `mesh.scale`: `sphere(geos, 1)` scaled by `compose`, not
+  `sphere(geos, radius(t))`, which makes a new mesh every frame it differs.
+  `geometries_made` lets a host check that it stops growing.
 
 The output is premultiplied RGBA, transparent where nothing was drawn, to
 composite over anything.
@@ -137,9 +143,12 @@ renders a test scene both ways to PNGs.
   and background (`scene.background`, `scene.background_intensity`,
   `scene.background_blurriness`), as three.js's MeshStandardMaterial
   computes it. When a texture is used as `scene.environment` (or blurred
-  `scene.background`), `texture_environment` builds once and caches in
-  `Textures` its GGX-prefiltered radiance mip chain (roughness 0..1) and
-  cosine-convolved diffuse irradiance map, sampled alike by both renderers.
+  `scene.background`), the texture has derived maps, as it has mipmaps: a
+  GGX-prefiltered radiance mip chain (roughness 0..1) and a
+  cosine-convolved diffuse irradiance map in `Textures`, sampled alike by
+  both renderers. `environment_prefilter(textures, id)` makes them; it is
+  heavy, so a host calls it at load (a render that meets a texture without
+  them makes them then, in frame time); `texture_environment` looks them up.
   Changing one means changing the other; the tests compare the two
   renderers.
 - **Anti-aliasing:** 4x MSAA on the GPU; the software renderer keeps four
@@ -193,7 +202,8 @@ renders a test scene both ways to PNGs.
 
 ## Next
 
-Not released yet. In order, with the size of each next to shadows (one
+v0.0.1 is the first tag, for onimite's integration (the repository is
+private for now). In order, with the size of each next to shadows (one
 sizeable change):
 
 1. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing

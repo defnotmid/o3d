@@ -2,12 +2,29 @@ package o3d_sdlgpu
 
 import "core:encoding/base64"
 import "core:fmt"
+import "core:log"
 import "core:math"
+import "core:os"
 import "core:testing"
 
 import sdl "vendor:sdl3"
 
 import o3d ".."
+
+// A device for a GPU test. Without one the test fails, so the GPU is never
+// silently left unchecked, unless O3D_NO_GPU is set (CI without a GPU),
+// which skips it.
+test_gpu :: proc(t: ^testing.T, g: ^GPU) -> bool {
+	if init(g) == nil {
+		return true
+	}
+	buf: [16]u8
+	if os.get_env(buf[:], "O3D_NO_GPU") != "" {
+		log.warn("no GPU device: skipped (O3D_NO_GPU)")
+		return false
+	}
+	testing.fail_now(t, "no GPU device (set O3D_NO_GPU=1 to skip the GPU tests)")
+}
 
 // A scene with every kind of light and material the shading covers.
 test_scene :: proc(scene: ^o3d.Scene, geos: ^o3d.Geometries) {
@@ -39,8 +56,7 @@ test_scene :: proc(scene: ^o3d.Scene, geos: ^o3d.Geometries) {
 @(test)
 test_gpu_matches_software :: proc(t: ^testing.T) {
 	g: GPU
-	if init(&g) != nil {
-		fmt.println("no GPU device: skipped")
+	if !test_gpu(t, &g) {
 		return
 	}
 	defer destroy(&g)
@@ -175,8 +191,7 @@ custom_scene :: proc(t: ^testing.T, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 @(test)
 test_custom_matches_software :: proc(t: ^testing.T) {
 	g: GPU
-	if init(&g) != nil {
-		fmt.println("no GPU device: skipped")
+	if !test_gpu(t, &g) {
 		return
 	}
 	defer destroy(&g)
@@ -232,8 +247,7 @@ shadow_scene :: proc(t: ^testing.T, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 @(test)
 test_shadow_matches_software :: proc(t: ^testing.T) {
 	g: GPU
-	if init(&g) != nil {
-		fmt.println("no GPU device: skipped")
+	if !test_gpu(t, &g) {
 		return
 	}
 	defer destroy(&g)
@@ -267,8 +281,7 @@ test_shadow_matches_software :: proc(t: ^testing.T) {
 @(test)
 test_textures_match_software :: proc(t: ^testing.T) {
 	g: GPU
-	if init(&g) != nil {
-		fmt.println("no GPU device: skipped")
+	if !test_gpu(t, &g) {
 		return
 	}
 	defer destroy(&g)
@@ -357,8 +370,7 @@ test_textures_match_software :: proc(t: ^testing.T) {
 @(test)
 test_environment_matches_software :: proc(t: ^testing.T) {
 	g: GPU
-	if init(&g) != nil {
-		fmt.println("no GPU device: skipped")
+	if !test_gpu(t, &g) {
 		return
 	}
 	defer destroy(&g)
@@ -425,8 +437,7 @@ test_environment_matches_software :: proc(t: ^testing.T) {
 @(test)
 test_gltf_matches_software :: proc(t: ^testing.T) {
 	g: GPU
-	if init(&g) != nil {
-		fmt.println("no GPU device: skipped")
+	if !test_gpu(t, &g) {
 		return
 	}
 	defer destroy(&g)

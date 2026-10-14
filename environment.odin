@@ -4,10 +4,13 @@ import "core:math"
 import "core:math/linalg"
 import "core:mem"
 
-// Equirectangular environment lighting and background: `scene.environment` is
-// prefiltered once into a GGX radiance mip pyramid and a cosine-convolved
-// diffuse irradiance texture in `Textures`, sampled identically by the
-// software renderer (`shade`) and the SDL_GPU renderer (`shaders/o3d.slang`).
+// Equirectangular environment lighting and background: `scene.environment`'s
+// texture has derived maps, as a texture has mipmaps: a GGX radiance mip
+// pyramid and a cosine-convolved diffuse irradiance texture in `Textures`,
+// made by `environment_prefilter` (heavy: a host calls it at load, with the
+// texture), sampled identically by the software renderer (`shade`) and the
+// SDL_GPU renderer (`shaders/o3d.slang`). A render that meets a texture
+// without them derives them then, in frame time.
 // `scene.background` is sampled along each pixel's unprojected camera ray,
 // from its sharp mip (blurriness = 0) or the prefiltered radiance pyramid.
 
@@ -29,6 +32,9 @@ Shading_Environment :: struct {
 shading_environment :: proc(scene: ^Scene, textures: ^Textures) -> Shading_Environment {
 	rad, irr, ok := texture_environment(textures, scene.environment)
 	if !ok {
+		rad, irr, ok = environment_prefilter(textures, scene.environment)
+	}
+	if !ok {
 		return {}
 	}
 	rad_tex, _ := texture_get(textures, rad)
@@ -47,7 +53,11 @@ shading_background :: proc(scene: ^Scene, textures: ^Textures) -> (tex: Texture_
 	}
 	intensity = scene.background_intensity if scene.background_intensity > 0 else 1
 	if scene.background_blurriness > 0 {
-		if rad, _, ok := texture_environment(textures, scene.background); ok {
+		rad, _, ok := texture_environment(textures, scene.background)
+		if !ok {
+			rad, _, ok = environment_prefilter(textures, scene.background)
+		}
+		if ok {
 			rad_tex, _ := texture_get(textures, rad)
 			return rad, intensity, clamp(scene.background_blurriness, 0, 1) * f32(max(int(rad_tex.levels) - 1, 0))
 		}
@@ -79,11 +89,23 @@ orthonormal_basis :: #force_inline proc "contextless" (n: Vec3) -> (t, b: Vec3) 
 	return
 }
 
-// Builds (once per equirectangular texture `id`) a GGX-prefiltered radiance
-// mip pyramid (`radiance`, mip 0..levels-1 for roughness 0..1) and a cosine-
-// convolved diffuse irradiance texture (`irradiance`), both stored in `t` so
-// the CPU and GPU sample them identically.
-texture_environment :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradiance: Texture_Id, ok: bool) {
+// An equirectangular texture's derived environment maps, if
+// `environment_prefilter` has made them.
+texture_environment :: proc "contextless" (t: ^Textures, id: Texture_Id) -> (radiance, irradiance: Texture_Id, ok: bool) {
+	tex := texture_get(t, id) or_return
+	if tex.env_radiance == 0 || tex.env_irradiance == 0 {
+		return 0, 0, false
+	}
+	return tex.env_radiance, tex.env_irradiance, true
+}
+
+// Derives an equirectangular texture's environment maps, once (as loading
+// a texture derives its mipmaps): a GGX-prefiltered radiance mip pyramid
+// (`radiance`, mip 0..levels-1 for roughness 0..1) and a cosine-convolved
+// diffuse irradiance texture (`irradiance`), both stored in `t` so the CPU
+// and GPU sample them identically. Heavy: call it at load for every texture
+// used as `scene.environment` or a blurred `scene.background`.
+environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradiance: Texture_Id, ok: bool) {
 	src_tex, found := texture_get(t, id)
 	if !found {
 		return 0, 0, false
