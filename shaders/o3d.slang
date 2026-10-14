@@ -22,6 +22,7 @@ static const uint FLAG_COLOR_MAP = 32;
 static const uint FLAG_NORMAL_MAP = 64;
 static const uint FLAG_ROUGHNESS_MAP = 128;
 static const uint FLAG_EMISSIVE_MAP = 256;
+static const uint FLAG_METALNESS_MAP = 512;
 
 struct Draw_VS {
     float4x4 mvp;
@@ -76,6 +77,7 @@ struct Lighting {
 [[vk::binding(4, 2)]] Sampler2D<float4> emissiveMap : register(t4, space2);
 [[vk::binding(5, 2)]] Sampler2D<float4> envRadianceMap : register(t5, space2);
 [[vk::binding(6, 2)]] Sampler2D<float4> envIrradianceMap : register(t6, space2);
+[[vk::binding(7, 2)]] Sampler2D<float4> metalnessMap : register(t7, space2);
 
 struct VS_In {
     float3 position : TEXCOORD0;
@@ -144,8 +146,7 @@ float shadow_factor(float3 world, float3 normal) {
     return lit / 9;
 }
 
-float3 shade(float3 base, float roughness_in, float3 world, float3 n, float3 eye, float shadow) {
-    float metalness = material.metalness;
+float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float shadow) {
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
     float3 f0 = lerp(float3(0.04), base, metalness);
@@ -233,6 +234,10 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
         if ((flags & FLAG_ROUGHNESS_MAP) != 0) {
             roughness *= roughnessMap.Sample(uv).g;
         }
+        float metalness = material.metalness;
+        if ((flags & FLAG_METALNESS_MAP) != 0) {
+            metalness *= metalnessMap.Sample(uv).b;
+        }
         float3 n = normalize(i.normal);
         if ((flags & FLAG_FLAT_SHADING) != 0) {
             n = normalize(cross(ddx(i.world), ddy(i.world)));
@@ -252,7 +257,7 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
             float3 map_n = normalMap.Sample(uv).rgb * 2 - 1;
             n = perturb_normal(n, ddx(i.world), ddy(i.world), ddx(i.uv), ddy(i.uv), map_n);
         }
-        c = shade(base, roughness, i.world, n, lighting.eye.xyz, shadow);
+        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadow);
     }
     float3 emissive = material.emissive.rgb;
     if ((flags & FLAG_EMISSIVE_MAP) != 0) {

@@ -151,7 +151,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 		return .Device
 	}
 	g.vert = sdl.CreateGPUShader(g.device, {code_size = len(vert_code), code = raw_data(vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
-	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 7, num_uniform_buffers = 2})
+	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 8, num_uniform_buffers = 2})
 	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT})
 	g.bg_vert = sdl.CreateGPUShader(g.device, {code_size = len(bg_vert_code), code = raw_data(bg_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
 	g.bg_frag = sdl.CreateGPUShader(g.device, {code_size = len(bg_frag_code), code = raw_data(bg_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})

@@ -1,5 +1,6 @@
 package o3d_sdlgpu
 
+import "core:encoding/base64"
 import "core:fmt"
 import "core:math"
 import "core:testing"
@@ -419,4 +420,74 @@ test_environment_matches_software :: proc(t: ^testing.T) {
 		fmt.printf("environment lighting + background: PSNR %.1f dB\n", psnr)
 	}
 }
+
+// An animated glTF 2.0 model rendered at t = 0.5 matches between GPU and software.
+@(test)
+test_gltf_matches_software :: proc(t: ^testing.T) {
+	g: GPU
+	if init(&g) != nil {
+		fmt.println("no GPU device: skipped")
+		return
+	}
+	defer destroy(&g)
+
+	Bin :: struct #packed {
+		pos:   [4][3]f32,
+		norm:  [4][3]f32,
+		uv:    [4][2]f32,
+		idx:   [6]u16,
+		_pad:  [2]u16,
+		times: [2]f32,
+		rot:   [2][4]f32,
+	}
+	s45 := math.sqrt_f32(0.5)
+	b := Bin {
+		pos   = {{-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}},
+		norm  = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}},
+		uv    = {{0, 1}, {1, 1}, {1, 0}, {0, 0}},
+		idx   = {0, 1, 2, 0, 2, 3},
+		times = {0, 1},
+		rot   = {{0, 0, 0, 1}, {0, s45, 0, s45}},
+	}
+	encoded := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	src := fmt.tprintf(
+		`{{"asset":{{"version":"2.0"}},"buffers":[{{"uri":"data:application/octet-stream;base64,%s","byteLength":%d}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":48}},{{"buffer":0,"byteOffset":96,"byteLength":32}},{{"buffer":0,"byteOffset":128,"byteLength":12}},{{"buffer":0,"byteOffset":144,"byteLength":8}},{{"buffer":0,"byteOffset":152,"byteLength":32}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3"}},{{"bufferView":1,"componentType":5126,"count":4,"type":"VEC3"}},{{"bufferView":2,"componentType":5126,"count":4,"type":"VEC2"}},{{"bufferView":3,"componentType":5123,"count":6,"type":"SCALAR"}},{{"bufferView":4,"componentType":5126,"count":2,"type":"SCALAR"}},{{"bufferView":5,"componentType":5126,"count":2,"type":"VEC4"}}],"materials":[{{"pbrMetallicRoughness":{{"baseColorFactor":[0.3,0.7,0.9,1],"metallicFactor":0.2,"roughnessFactor":0.4}},"doubleSided":true}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},"indices":3,"material":0}}]}}],"nodes":[{{"mesh":0}}],"scenes":[{{"nodes":[0]}}],"scene":0,"animations":[{{"name":"turn","samplers":[{{"input":4,"output":5,"interpolation":"LINEAR"}}],"channels":[{{"sampler":0,"target":{{"node":0,"path":"rotation"}}}}]}}]}}`,
+		encoded,
+		size_of(Bin),
+	)
+
+	geos: o3d.Geometries
+	defer o3d.geometries_destroy(&geos)
+	textures: o3d.Textures
+	defer o3d.textures_destroy(&textures)
+	model, ok := o3d.gltf_parse(transmute([]u8)src, &geos, &textures)
+	defer o3d.model_destroy(&model)
+	testing.expect(t, ok)
+
+	scene: o3d.Scene
+	defer o3d.scene_destroy(&scene)
+	o3d.scene_clear(&scene)
+	scene.camera.position = {0, 0, 3.5}
+	append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.85}, intensity = 2.5, position = {2, 3, 4}})
+	append(&scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
+	o3d.gltf_draw(&scene, &model, anim = 0, time = 0.35)
+
+	W, H :: 160, 120
+	out := target(&g, W, H)
+	defer sdl.ReleaseGPUTexture(g.device, out)
+	testing.expect(t, render(&g, &scene, &geos, nil, out, W, H, textures = &textures) == nil)
+	gpu, _ := read(&g, out, W, H)
+	defer delete(gpu)
+	sw: o3d.Software
+	defer o3d.software_destroy(&sw)
+	cpu := o3d.software_render(&sw, &scene, &geos, nil, W, H, nil, &textures)
+	sum: f64
+	for i in 0 ..< len(cpu) {
+		d := f64(cpu[i]) - f64(gpu[i])
+		sum += d * d
+	}
+	psnr := 10 * math.log10(255 * 255 / max(sum / f64(len(cpu)), 1e-9))
+	testing.expectf(t, psnr > 32, "PSNR %.1f dB", psnr)
+}
+
 

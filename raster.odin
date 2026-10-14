@@ -231,6 +231,9 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				if .Roughness_Map in m.flags {
 					pm.roughness *= sample(job.textures, m.roughness_map, uvs[l], duv_dx, duv_dy).g
 				}
+				if .Metalness_Map in m.flags {
+					pm.metalness *= sample(job.textures, m.metalness_map, uvs[l], duv_dx, duv_dy).b
+				}
 				if .Emissive_Map in m.flags {
 					emissive *= linear(sample(job.textures, m.emissive_map, uvs[l], duv_dx, duv_dy).rgb)
 				}

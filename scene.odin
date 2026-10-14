@@ -85,8 +85,9 @@ Material :: struct {
 	flags:              Material_Flags,
 	color_map:          Texture_Id,
 	normal_map:         Texture_Id,
-	roughness_map:      Texture_Id,
+	roughness_map:      Texture_Id, // its green channel (three.js's roughnessMap)
 	emissive_map:       Texture_Id,
+	metalness_map:      Texture_Id, // its blue channel (metalnessMap; glTF packs both in one)
 	shader:             Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
 	uniforms:           Uniform_Range,
@@ -232,10 +233,11 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 	return true
 }
 
-// Blended over what is behind: transparent, with opacity under 1 (a
-// ShaderMaterial's alpha is its own).
+// Blended over what is behind: transparent, with opacity under 1 or alpha
+// from elsewhere (a colour map's, a ShaderMaterial's), as three.js blends
+// any transparent material.
 blended :: proc "contextless" (m: Material) -> bool {
-	return .Transparent in m.flags && (m.opacity < 1 || m.shader != 0)
+	return .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.shader != 0)
 }
 
 // ---- shading ----------------------------------------------------------------------------
@@ -292,6 +294,7 @@ Shading_Material :: struct {
 	normal_map:    Texture_Id,
 	roughness_map: Texture_Id,
 	emissive_map:  Texture_Id,
+	metalness_map: Texture_Id,
 	shader:        Shader_Id, // 0: the standard material
 }
 
@@ -307,11 +310,12 @@ Shading_Flag :: enum u8 {
 	Normal_Map,
 	Roughness_Map,
 	Emissive_Map,
+	Metalness_Map,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
 
-TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map}
+TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map}
 
 // From the draws' material column: `scene_materials(scene)`.
 shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material, textures: ^Textures = nil) {
@@ -349,6 +353,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		if has_tex(textures, m.emissive_map) {
 			f += {.Emissive_Map}
 		}
+		if has_tex(textures, m.metalness_map) && .Basic not_in m.flags {
+			f += {.Metalness_Map}
+		}
 		out[i] = {
 			base          = linear(m.color),
 			emissive      = linear(m.emissive) * m.emissive_intensity,
@@ -360,6 +367,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			normal_map    = m.normal_map,
 			roughness_map = m.roughness_map,
 			emissive_map  = m.emissive_map,
+			metalness_map = m.metalness_map,
 			shader        = m.shader,
 		}
 	}

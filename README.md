@@ -20,7 +20,8 @@ What is known about three.js carries over:
   mapping.
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
   `emissive`, `emissive_intensity`, `opacity`, `side`, texture maps
-  `color_map`, `normal_map`, `roughness_map`, `emissive_map`, and the
+  `color_map`, `normal_map`, `roughness_map` (green), `metalness_map`
+  (blue; glTF packs both in one texture), `emissive_map`, and the
   booleans as a bit set: `flags = {.Transparent, .Flat_Shading}`) or
   MeshBasicMaterial (`.Basic`), or ShaderMaterial: your own vertex and
   fragment shaders in GLSL ES (three.js's GLSL 1 style with `attribute`,
@@ -70,6 +71,10 @@ m.color, m.roughness, m.color_map = {1, 0.35, 0.3}, 0.4, albedo
 m.flags = {.Cast_Shadow, .Receive_Shadow}
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
+// glTF 2.0 / GLB: loaded once into flat tables, drawn per frame at time t
+duck, _ := o3d.gltf_load("duck.glb", &geos, &textures)
+o3d.gltf_draw(&scene, &duck, o3d.compose({-1.5, 0, 0}), anim = 0, time = t)
+
 // ShaderMaterial: compiled once (same sources, same id), uniforms per frame
 shaders: o3d.Shaders                       // kept, like geometry
 wave, errors := o3d.shader(&shaders, vertex_glsl, fragment_glsl)   // errors: "Fragment:3:7: ..."
@@ -104,6 +109,18 @@ renders a test scene both ways to PNGs.
   of 32-bit indices shared by every geometry, a geometry being its ranges
   in them. The GPU mirrors the two arrays in two buffers, uploading what
   is new at the start of a frame.
+- **glTF (`gltf.odin`):** `gltf_load` and `gltf_parse` (`vendor:cgltf`)
+  unpack meshes into `Geometries`, images into `Textures`, metallic-roughness
+  materials into `Material`, the node hierarchy into a topologically sorted
+  `#soa` array (`parent < i`), and keyframe animations (`STEP`, `LINEAR`,
+  `CUBICSPLINE`) into flat time/value arrays. `gltf_draw` evaluates the
+  hierarchy and animation at time `t` in a single forward pass with zero
+  heap allocations. As three.js's GLTFLoader: the default scene; OPAQUE
+  ignores alpha, BLEND blends, MASK draws opaque (no alpha cutoff yet);
+  the metallicRoughness texture is both roughness and metalness map; no
+  normals means flat shading. Files are validated (`cgltf.validate`) and
+  out-of-range indices rejected. Not imported: skins, morph targets,
+  cameras, lights, `KHR_*` extensions, texture transforms, a second uv set.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, the
@@ -179,14 +196,11 @@ renders a test scene both ways to PNGs.
 Not released yet. In order, with the size of each next to shadows (one
 sizeable change):
 
-1. glTF import (medium; `vendor:cgltf`): meshes, materials (glTF's
-   metallic-roughness is MeshStandardMaterial's), node transforms, baked
-   animation sampled at a time.
-2. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing
+1. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing
    into its own texture, composited like any layer; a group's 2D drawing as
    a texture on a surface; the Lua API in three.js's names; inspect
    checks; the docs page mapping three.js terms.
-3. ShaderMaterial textures (small here): `uniform sampler2D` bound to
+2. ShaderMaterial textures (small here): `uniform sampler2D` bound to
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
 

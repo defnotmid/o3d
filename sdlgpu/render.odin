@@ -260,7 +260,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
 		}
-		samplers := [7]sdl.GPUTextureSamplerBinding {
+		samplers := [8]sdl.GPUTextureSamplerBinding {
 			{texture = g.shadow_map, sampler = g.shadow_sampler},
 			tex_binding(g, m.color_map),
 			tex_binding(g, m.normal_map),
@@ -268,6 +268,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			tex_binding(g, m.emissive_map),
 			tex_binding(g, env.radiance, g.env_sampler),
 			tex_binding(g, env.irradiance, g.env_sampler),
+			tex_binding(g, m.metalness_map),
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], len(samplers))
 		du := Draw_Uniforms{view_proj * d.model, d.model, o3d.normal_matrix(d.model)}
