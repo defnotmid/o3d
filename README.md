@@ -78,8 +78,10 @@ m.flags = {.Cast_Shadow, .Receive_Shadow}
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
 // glTF 2.0 / GLB: loaded once into flat tables, drawn per frame at time t
-duck, _ := o3d.gltf_load("duck.glb", &geos, &textures)
+duck, err := o3d.gltf_load("duck.glb", &geos, &textures)   // err: .None, or why (GLTF_ERROR_TEXT[err])
 o3d.gltf_draw(&scene, &duck, o3d.compose({-1.5, 0, 0}), anim = 0, time = t)
+// From several threads, each with its own pose (the model is then only read):
+// o3d.gltf_draw(&scene, &duck, anim = 0, time = t, pose = &thread_pose)
 
 // ShaderMaterial: compiled once (same sources, same id), uniforms per frame
 shaders: o3d.Shaders                       // kept, like geometry
@@ -131,7 +133,10 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   `#soa` array (`parent < i`), and keyframe animations (`STEP`, `LINEAR`,
   `CUBICSPLINE`) into flat time/value arrays. `gltf_draw` evaluates the
   hierarchy and animation at time `t` in a single forward pass with zero
-  heap allocations. As three.js's GLTFLoader: the default scene; OPAQUE
+  heap allocations, posing into the caller's `Model_Pose` (one per thread
+  lets threads pose one model at once) or the model's own. A failed load
+  returns a `Gltf_Error` (the file, an external buffer, validation) with
+  `GLTF_ERROR_TEXT` for messages. As three.js's GLTFLoader: the default scene; OPAQUE
   ignores alpha, BLEND blends, MASK draws opaque (no alpha cutoff yet);
   the metallicRoughness texture is both roughness and metalness map; no
   normals means flat shading. Files are validated (`cgltf.validate`) and
@@ -161,6 +166,11 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   them makes them then, in frame time); `texture_environment` looks them up.
   Changing one means changing the other; the tests compare the two
   renderers.
+- **GPU targets:** the colour (multisampled), resolve and depth targets
+  only grow, to the largest frame drawn; a frame renders into their
+  top-left width x height (viewport and scissor) and is copied to the
+  caller's texture, so views of several sizes, or one whose size animates,
+  make no targets per frame.
 - **Anti-aliasing:** 4x MSAA on the GPU; the software renderer keeps four
   samples per pixel at the same positions, shades once per pixel per
   triangle, and resolves the same way.

@@ -48,8 +48,13 @@ GPU :: struct {
 	pipelines:        [o3d.Side][2]^sdl.GPUGraphicsPipeline,
 	bg_pipeline:      ^sdl.GPUGraphicsPipeline,
 	// The multisampled colour and depth targets, at `size`.
+	// The frame's targets, at `capacity`: a frame draws into their top-left
+	// width x height and is copied out, so frames of other sizes (several
+	// views, a view whose size animates) reuse them; they only grow. `color`
+	// is multisampled when `samples` is, resolved into `resolved`.
 	color, depth:     ^sdl.GPUTexture,
-	size:             [2]u32,
+	resolved:         ^sdl.GPUTexture,
+	capacity:         [2]u32,
 	vertices:         Pool_Buffer,
 	indices:          Pool_Buffer,
 	// The generations of the tables mirrored (geometry, textures, shaders'
@@ -495,22 +500,27 @@ release_targets :: proc(g: ^GPU) {
 	if g.depth != nil {
 		sdl.ReleaseGPUTexture(g.device, g.depth)
 	}
-	g.color, g.depth, g.size = nil, nil, {}
+	if g.resolved != nil {
+		sdl.ReleaseGPUTexture(g.device, g.resolved)
+	}
+	g.color, g.depth, g.resolved, g.capacity = nil, nil, nil, {}
 }
 
 @(private)
 ensure_targets :: proc(g: ^GPU, w, h: u32) -> bool {
-	if g.size == {w, h} && g.depth != nil {
+	if w <= g.capacity.x && h <= g.capacity.y && g.depth != nil {
 		return true
 	}
+	size := [2]u32{max(w, g.capacity.x), max(h, g.capacity.y)}
 	release_targets(g)
-	if g.samples != ._1 {
-		g.color = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.COLOR_TARGET}, width = w, height = h, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
-		if g.color == nil {
-			return false
-		}
+	single := g.samples == ._1
+	// The texture copied out is the resolve target, or the colour target
+	// itself without multisampling.
+	g.color = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.COLOR_TARGET} if !single else {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
+	if !single {
+		g.resolved = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 	}
-	g.depth = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = w, height = h, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
-	g.size = {w, h}
-	return g.depth != nil
+	g.depth = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
+	g.capacity = size
+	return g.color != nil && g.depth != nil && (single || g.resolved != nil)
 }

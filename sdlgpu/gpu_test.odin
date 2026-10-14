@@ -4,6 +4,8 @@ import "core:log"
 import "core:os"
 import "core:testing"
 
+import sdl "vendor:sdl3"
+
 // A device for a GPU test. Without one the test fails, so the GPU is never
 // silently left unchecked, unless O3D_NO_GPU is set (CI without a GPU, or
 // macOS, whose Metal driver needs the main thread the test runner does not
@@ -85,4 +87,43 @@ test_gpu_reused_across_tables :: proc(t: ^testing.T) {
 		delete(cpu_px)
 		testing.expectf(t, err == "" && psnr > PARITY_MIN_PSNR, "%s after the others: %s PSNR %.1f dB", c.name, err, psnr)
 	}
+}
+
+// Frames of other sizes reuse the targets (they only grow): a small frame
+// drawn after a large one is the same bytes as drawn on a fresh GPU, and
+// neither it nor a second small one makes new targets.
+@(test)
+test_targets_grow_only :: proc(t: ^testing.T) {
+	fresh, reused: GPU
+	if !test_gpu(t, &fresh) {
+		return
+	}
+	defer destroy(&fresh)
+	if !test_gpu(t, &reused) {
+		return
+	}
+	defer destroy(&reused)
+	a: Parity_Assets
+	defer parity_assets_destroy(&a)
+	test_scene(&a.scene, &a.geos)
+	frame :: proc(g: ^GPU, a: ^Parity_Assets, w, h: u32) -> []u8 {
+		out := target(g, w, h)
+		defer sdl.ReleaseGPUTexture(g.device, out)
+		render(g, &a.scene, &a.geos, nil, out, w, h)
+		px, _ := read(g, out, w, h)
+		return px
+	}
+	want := frame(&fresh, &a, 160, 120)
+	defer delete(want)
+	delete(frame(&reused, &a, 320, 240))
+	targets := reused.color
+	got := frame(&reused, &a, 160, 120)
+	defer delete(got)
+	delete(frame(&reused, &a, 200, 100))
+	testing.expect(t, reused.color == targets && reused.capacity == {320, 240}, "smaller frames reuse the targets")
+	differ := 0
+	for i in 0 ..< len(want) {
+		differ += 1 if got[i] != want[i] else 0
+	}
+	testing.expectf(t, differ == 0, "%d bytes differ from a fresh GPU's frame", differ)
 }

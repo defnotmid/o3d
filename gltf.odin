@@ -21,6 +21,68 @@ import "vendor:cgltf"
 // as the spec asks. Not imported: skins, morph targets, cameras, lights,
 // extensions (KHR_*), texture transforms, a second uv set.
 
+// Why a glTF did not load; GLTF_ERROR_TEXT says it in words.
+Gltf_Error :: enum u8 {
+	None,
+	Empty, // no bytes
+	File_Not_Found,
+	Io,
+	Data_Too_Short,
+	Unknown_Format,
+	Invalid_Json,
+	Invalid_Gltf,
+	Legacy_Gltf,
+	Out_Of_Memory,
+	// An external buffer (.bin) the file names.
+	Buffer_Not_Found,
+	Buffer_Io,
+	// Failed validation: an accessor, view or index past its data.
+	Invalid,
+}
+
+@(rodata)
+GLTF_ERROR_TEXT := [Gltf_Error]string {
+	.None             = "",
+	.Empty            = "no data",
+	.File_Not_Found   = "file not found",
+	.Io               = "could not read the file",
+	.Data_Too_Short   = "the data ends early",
+	.Unknown_Format   = "not glTF or GLB",
+	.Invalid_Json     = "invalid JSON",
+	.Invalid_Gltf     = "not valid glTF",
+	.Legacy_Gltf      = "glTF 1.0 (2.0 is supported)",
+	.Out_Of_Memory    = "out of memory",
+	.Buffer_Not_Found = "a buffer file it names was not found",
+	.Buffer_Io        = "a buffer file it names could not be read",
+	.Invalid          = "an accessor, view or index points past its data",
+}
+
+// A cgltf result as a Gltf_Error; `buffers`: from loading external buffers.
+@(private = "file")
+gltf_error :: proc "contextless" (r: cgltf.result, buffers := false) -> Gltf_Error {
+	switch r {
+	case .success:
+		return .None
+	case .data_too_short:
+		return .Data_Too_Short
+	case .unknown_format:
+		return .Unknown_Format
+	case .invalid_json:
+		return .Invalid_Json
+	case .invalid_gltf, .invalid_options:
+		return .Invalid_Gltf
+	case .file_not_found:
+		return .Buffer_Not_Found if buffers else .File_Not_Found
+	case .io_error:
+		return .Buffer_Io if buffers else .Io
+	case .out_of_memory:
+		return .Out_Of_Memory
+	case .legacy_gltf:
+		return .Legacy_Gltf
+	}
+	return .Invalid_Gltf
+}
+
 Animation_Path :: enum u8 {
 	Translation,
 	Rotation,
@@ -74,14 +136,29 @@ Model :: struct {
 	channels:   [dynamic]Model_Channel,
 	times:      [dynamic]f32,
 	values:     [dynamic]Vec4,
-	// Preallocated per-node evaluation scratch so `gltf_draw` never allocates.
-	scratch:    struct {
-		translation: [dynamic]Vec3,
-		rotation:    [dynamic]linalg.Quaternionf32,
-		scale:       [dynamic]Vec3,
-		dirty:       [dynamic]bool,
-		world:       [dynamic]Mat4,
-	},
+	// The pose `gltf_draw` uses when the caller gives none.
+	scratch:    Model_Pose,
+}
+
+// Where `gltf_draw` poses a model: per node, the animated transform and the
+// world matrix. A model is only read while it is drawn with a caller's pose,
+// so threads may pose one model at once, each with its own (sized on first
+// use, reused: no allocation after).
+Model_Pose :: struct {
+	translation: [dynamic]Vec3,
+	rotation:    [dynamic]linalg.Quaternionf32,
+	scale:       [dynamic]Vec3,
+	dirty:       [dynamic]bool,
+	world:       [dynamic]Mat4,
+}
+
+model_pose_destroy :: proc(p: ^Model_Pose) {
+	delete(p.translation)
+	delete(p.rotation)
+	delete(p.scale)
+	delete(p.dirty)
+	delete(p.world)
+	p^ = {}
 }
 
 model_destroy :: proc(m: ^Model) {
@@ -95,42 +172,41 @@ model_destroy :: proc(m: ^Model) {
 	delete(m.channels)
 	delete(m.times)
 	delete(m.values)
-	delete(m.scratch.translation)
-	delete(m.scratch.rotation)
-	delete(m.scratch.scale)
-	delete(m.scratch.dirty)
-	delete(m.scratch.world)
+	model_pose_destroy(&m.scratch)
 	m^ = {}
 }
 
 // Loads a `.gltf` or `.glb` file from disk into flat `Model`, `Geometries`,
-// and `Textures` tables.
-gltf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -> (m: Model, ok: bool) {
+// and `Textures` tables; `err` says why not (GLTF_ERROR_TEXT).
+gltf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -> (m: Model, err: Gltf_Error) {
 	cpath := strings.clone_to_cstring(path, context.temp_allocator)
 	opts: cgltf.options
 	data, res := cgltf.parse_file(opts, cpath)
 	if res != .success || data == nil {
-		return {}, false
+		return {}, gltf_error(res) if res != .success else .Invalid_Gltf
 	}
 	defer cgltf.free(data)
-	if cgltf.load_buffers(opts, data, cpath) != .success || cgltf.validate(data) != .success {
-		return {}, false
+	if r := cgltf.load_buffers(opts, data, cpath); r != .success {
+		return {}, gltf_error(r, buffers = true)
+	}
+	if cgltf.validate(data) != .success {
+		return {}, .Invalid
 	}
 	slash := strings.last_index_byte(path, '/')
 	base_dir := path[:slash] if slash >= 0 else ""
-	return build_model(data, geos, textures, base_dir)
+	return build_model(data, geos, textures, base_dir), .None
 }
 
 // Parses a `.gltf` or `.glb` byte slice in memory into flat `Model`,
-// `Geometries`, and `Textures` tables.
-gltf_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, base_dir := "") -> (m: Model, ok: bool) {
+// `Geometries`, and `Textures` tables; `err` says why not (GLTF_ERROR_TEXT).
+gltf_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, base_dir := "") -> (m: Model, err: Gltf_Error) {
 	if len(bytes) == 0 {
-		return {}, false
+		return {}, .Empty
 	}
 	opts: cgltf.options
 	data, res := cgltf.parse(opts, raw_data(bytes), uint(len(bytes)))
 	if res != .success || data == nil {
-		return {}, false
+		return {}, gltf_error(res) if res != .success else .Invalid_Gltf
 	}
 	defer cgltf.free(data)
 	cpath: cstring = ""
@@ -138,10 +214,13 @@ gltf_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, ba
 		dummy := strings.concatenate({base_dir, "/scene.gltf"}, context.temp_allocator)
 		cpath = strings.clone_to_cstring(dummy, context.temp_allocator)
 	}
-	if cgltf.load_buffers(opts, data, cpath) != .success || cgltf.validate(data) != .success {
-		return {}, false
+	if r := cgltf.load_buffers(opts, data, cpath); r != .success {
+		return {}, gltf_error(r, buffers = true)
 	}
-	return build_model(data, geos, textures, base_dir)
+	if cgltf.validate(data) != .success {
+		return {}, .Invalid
+	}
+	return build_model(data, geos, textures, base_dir), .None
 }
 
 // Finds an animation's index by name (-1 if not found).
@@ -157,11 +236,21 @@ gltf_animation :: proc "contextless" (m: ^Model, name: string) -> int {
 // Evaluates `m`'s node hierarchy (and optional keyframe animation `anim` at
 // `time` seconds) under `transform` and appends its mesh primitives to
 // `scene.draws`. `flags` (e.g. `{.Cast_Shadow, .Receive_Shadow}`) are merged
-// into each primitive's material flags. Zero allocations on warm frames.
-gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}) {
+// into each primitive's material flags. `pose` is where it is posed (nil:
+// the model's own, so one thread at a time); with the caller's, the model is
+// only read. Zero allocations on warm frames.
+gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil) {
 	n := len(m.nodes)
 	if n == 0 {
 		return
+	}
+	p := pose if pose != nil else &m.scratch
+	if len(p.world) != n {
+		resize(&p.translation, n)
+		resize(&p.rotation, n)
+		resize(&p.scale, n)
+		resize(&p.dirty, n)
+		resize(&p.world, n)
 	}
 	has_anim := anim >= 0 && anim < len(m.animations)
 	if has_anim {
@@ -179,10 +268,10 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		} else {
 			t = 0
 		}
-		copy(m.scratch.translation[:n], m.nodes.translation[:n])
-		copy(m.scratch.rotation[:n], m.nodes.rotation[:n])
-		copy(m.scratch.scale[:n], m.nodes.scale[:n])
-		slice.zero(m.scratch.dirty[:n])
+		copy(p.translation[:n], m.nodes.translation[:n])
+		copy(p.rotation[:n], m.nodes.rotation[:n])
+		copy(p.scale[:n], m.nodes.scale[:n])
+		slice.zero(p.dirty[:n])
 
 		for ch in m.channels[a.first_channel:][:a.channel_count] {
 			if ch.key_count == 0 || int(ch.node) >= n {
@@ -191,27 +280,27 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 			v := sample_channel(m, ch, t)
 			switch ch.path {
 			case .Translation:
-				m.scratch.translation[ch.node] = v.xyz
+				p.translation[ch.node] = v.xyz
 			case .Rotation:
-				m.scratch.rotation[ch.node] = quaternion(x = v.x, y = v.y, z = v.z, w = v.w)
+				p.rotation[ch.node] = quaternion(x = v.x, y = v.y, z = v.z, w = v.w)
 			case .Scale:
-				m.scratch.scale[ch.node] = v.xyz
+				p.scale[ch.node] = v.xyz
 			}
-			m.scratch.dirty[ch.node] = true
+			p.dirty[ch.node] = true
 		}
 	}
 
 	parents := m.nodes.parent[:n]
 	meshes := m.nodes.mesh[:n]
 	locals := m.nodes.local[:n]
-	world := m.scratch.world[:n]
+	world := p.world[:n]
 	for i in 0 ..< n {
 		local := locals[i]
-		if has_anim && m.scratch.dirty[i] {
-			local = linalg.matrix4_from_trs_f32(m.scratch.translation[i], m.scratch.rotation[i], m.scratch.scale[i])
+		if has_anim && p.dirty[i] {
+			local = linalg.matrix4_from_trs_f32(p.translation[i], p.rotation[i], p.scale[i])
 		}
-		p := parents[i]
-		world[i] = (world[p] * local) if p >= 0 else (transform * local)
+		parent := parents[i]
+		world[i] = (world[parent] * local) if parent >= 0 else (transform * local)
 		mi := meshes[i]
 		if mi < 0 || int(mi) >= len(m.meshes) {
 			continue
@@ -232,7 +321,7 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 // ---- model builder ----------------------------------------------------------------------
 
 @(private = "file")
-build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, base_dir: string) -> (m: Model, ok: bool) {
+build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, base_dir: string) -> (m: Model) {
 	// 1. Decode images into `textures` once per glTF image.
 	img_ids := make([]Texture_Id, len(data.images), context.temp_allocator)
 	if textures != nil {
@@ -298,7 +387,7 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 
 	// 4. Flatten animations and keyframe samplers.
 	build_animations(data, &m, node_map, &f_scratch)
-	return m, true
+	return m
 }
 
 @(private = "file")

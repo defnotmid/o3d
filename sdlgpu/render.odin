@@ -228,14 +228,18 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		}
 	}
 
-	color := sdl.GPUColorTargetInfo{clear_color = {0, 0, 0, 0}, load_op = .CLEAR}
-	if g.samples == ._1 {
-		color.texture, color.store_op = out, .STORE
-	} else {
-		color.texture, color.store_op, color.resolve_texture = g.color, .RESOLVE, out
+	// Into the targets' top-left width x height (they may be larger), then
+	// copied to `out`.
+	color := sdl.GPUColorTargetInfo{texture = g.color, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE}
+	frame := g.color
+	if g.samples != ._1 {
+		color.store_op, color.resolve_texture = .RESOLVE, g.resolved
+		frame = g.resolved
 	}
 	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
+	sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
+	sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})
 	bound: ^sdl.GPUGraphicsPipeline
 	if bg_tex != 0 {
 		sdl.BindGPUGraphicsPipeline(pass, g.bg_pipeline)
@@ -311,6 +315,9 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 	}
 	sdl.EndGPURenderPass(pass)
+	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = out}, width, height, 1, false)
+	sdl.EndGPUCopyPass(copy_pass)
 	if own {
 		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
 		if fence == nil {

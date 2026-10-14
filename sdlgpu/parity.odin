@@ -371,10 +371,10 @@ build_gltf :: proc(a: ^Parity_Assets) -> string {
 		size_of(Bin),
 	)
 
-	ok: bool
-	a.model, ok = o3d.gltf_parse(transmute([]u8)src, &a.geos, &a.textures)
-	if !ok {
-		return "the glTF did not parse"
+	err: o3d.Gltf_Error
+	a.model, err = o3d.gltf_parse(transmute([]u8)src, &a.geos, &a.textures)
+	if err != .None {
+		return o3d.GLTF_ERROR_TEXT[err]
 	}
 	o3d.scene_clear(&a.scene)
 	a.scene.camera.position = {0, 0, 3.5}

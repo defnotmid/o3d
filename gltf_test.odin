@@ -149,9 +149,9 @@ test_gltf_parse_and_animate :: proc(t: ^testing.T) {
 	textures: Textures
 	defer textures_destroy(&textures)
 
-	model, ok := gltf_parse(transmute([]u8)src, &geos, &textures)
+	model, err := gltf_parse(transmute([]u8)src, &geos, &textures)
 	defer model_destroy(&model)
-	testing.expect(t, ok, "gltf_parse should succeed")
+	testing.expect_value(t, err, Gltf_Error.None)
 	testing.expect_value(t, len(model.meshes), 1)
 	testing.expect_value(t, len(model.primitives), 1)
 	testing.expect_value(t, len(model.nodes), 2)
@@ -230,7 +230,9 @@ test_gltf_parse_and_animate :: proc(t: ^testing.T) {
 test_gltf_conventions :: proc(t: ^testing.T) {
 	base := make_test_gltf(context.temp_allocator)
 	load :: proc(t: ^testing.T, src: string) -> (m: Model, geos: Geometries, textures: Textures, ok: bool) {
-		m, ok = gltf_parse(transmute([]u8)src, &geos, &textures)
+		err: Gltf_Error
+		m, err = gltf_parse(transmute([]u8)src, &geos, &textures)
+		ok = err == .None
 		return
 	}
 	variant :: proc(src: string, pairs: ..string) -> string {
@@ -275,4 +277,39 @@ test_gltf_conventions :: proc(t: ^testing.T) {
 		defer textures_destroy(&textures)
 		testing.expect(t, !ok || len(m.primitives) == 0, "out-of-range indices rejected")
 	}
+}
+
+// A failed load says why: no data, not glTF, a buffer file missing,
+// validation; and a model posed with callers' pose buffers is the same as
+// posed with its own, the model only read.
+@(test)
+test_gltf_errors_and_poses :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	textures: Textures
+	defer textures_destroy(&textures)
+	_, empty := gltf_parse(nil, &geos, &textures)
+	testing.expect_value(t, empty, Gltf_Error.Empty)
+	junk := "not a model"
+	_, unknown := gltf_parse(transmute([]u8)junk, &geos, &textures)
+	testing.expect(t, unknown != .None && GLTF_ERROR_TEXT[unknown] != "", "junk is an error with words")
+	missing := `{"asset": {"version": "2.0"}, "buffers": [{"uri": "nowhere.bin", "byteLength": 12}]}`
+	_, buffer := gltf_parse(transmute([]u8)missing, &geos, &textures, "/nonexistent")
+	testing.expect_value(t, buffer, Gltf_Error.Buffer_Not_Found)
+	_, no_file := gltf_load("/nonexistent/model.glb", &geos, &textures)
+	testing.expect_value(t, no_file, Gltf_Error.File_Not_Found)
+
+	src := make_test_gltf(context.temp_allocator)
+	model, err := gltf_parse(transmute([]u8)src, &geos, &textures)
+	defer model_destroy(&model)
+	testing.expect_value(t, err, Gltf_Error.None)
+	own, mine: Scene
+	defer scene_destroy(&own)
+	defer scene_destroy(&mine)
+	pose: Model_Pose
+	defer model_pose_destroy(&pose)
+	gltf_draw(&own, &model, anim = 0, time = 0.4)
+	gltf_draw(&mine, &model, anim = 0, time = 0.4, pose = &pose)
+	testing.expect_value(t, len(mine.draws), len(own.draws))
+	testing.expect_value(t, mine.draws[0].model, own.draws[0].model)
 }
