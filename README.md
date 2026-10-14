@@ -31,7 +31,7 @@ What is known about three.js carries over:
   three.js's built-in uniforms (`modelMatrix`, `modelViewMatrix`,
   `projectionMatrix`, `viewMatrix`, `normalMatrix`, `cameraPosition`,
   `isOrthographic`) and attributes (`position`, `normal`, `uv`), compiled by
-  [oksl](../oksl) on both renderers. The output is written as the shader
+  [oksl](https://github.com/defnotmid/oksl) on both renderers. The output is written as the shader
   leaves it; `.Transparent` blends it, `side` culls as for any material.
   `projectionMatrix` maps depth to 0..1 (SDL_GPU's clip space) rather than
   WebGL's -1..1, which matters only to shaders that build their own.
@@ -100,8 +100,9 @@ sw: o3d.Software
 pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
 ```
 
-o3d imports oksl as `deps:oksl`, so builds pass `-collection:deps=..`
-(the directory holding both). `vendor:cgltf` needs its library built once
+o3d imports oksl as `deps:oksl`: clone
+[oksl](https://github.com/defnotmid/oksl) next to o3d, and builds pass
+`-collection:deps=..` (the directory holding both). `vendor:cgltf` needs its library built once
 per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
 
 - `odin test . -collection:deps=..` and `odin test sdlgpu
@@ -211,9 +212,8 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
 
 ## Next
 
-v0.0.1 is the first tag, for onimite's integration (the repository is
-private for now). In order, with the size of each next to shadows (one
-sizeable change):
+Tagged for onimite's integration (v0.0.2 is the first that runs on Metal).
+In order, with the size of each next to shadows (one sizeable change):
 
 1. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing
    into its own texture, composited like any layer; a group's 2D drawing as
