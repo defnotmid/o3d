@@ -1,12 +1,12 @@
 // o3d's vertex and fragment shaders for SDL_GPU, compiled by build.sh to
 // SPIR-V (Vulkan) and MSL (Metal). The shading must stay the software
-// renderer's (scene.odin `shade`): three.js's MeshStandardMaterial without
-// an environment map.
+// renderer's (scene.odin `shade`): three.js's MeshStandardMaterial with
+// equirectangular environment lighting and background.
 //
 // SDL_GPU binding convention: vertex uniforms set 1, fragment uniforms
 // set 3.
+import common;
 
-static const float PI = 3.14159265358979323846;
 static const int MAX_LIGHTS = 8;
 // Light_Kind's values and Shading_Flag's bits (o3d_test checks).
 static const uint LIGHT_AMBIENT = 0;
@@ -54,12 +54,14 @@ struct Light {
 };
 
 // shadowMatrix: the shadow light's view-projection; shadowParams: map size
-// (0: no shadow), bias, normal bias.
+// (0: no shadow), bias, normal bias; envParams: intensity (0: no env),
+// max radiance mip level.
 struct Lighting {
     float4 eye;
     int4 count;
     float4x4 shadowMatrix;
     float4 shadowParams;
+    float4 envParams;
     Light lights[MAX_LIGHTS];
 };
 
@@ -72,6 +74,8 @@ struct Lighting {
 [[vk::binding(2, 2)]] Sampler2D<float4> normalMap : register(t2, space2);
 [[vk::binding(3, 2)]] Sampler2D<float4> roughnessMap : register(t3, space2);
 [[vk::binding(4, 2)]] Sampler2D<float4> emissiveMap : register(t4, space2);
+[[vk::binding(5, 2)]] Sampler2D<float4> envRadianceMap : register(t5, space2);
+[[vk::binding(6, 2)]] Sampler2D<float4> envIrradianceMap : register(t6, space2);
 
 struct VS_In {
     float3 position : TEXCOORD0;
@@ -94,19 +98,6 @@ VS_Out vs_main(VS_In i) {
     o.normal = mul(draw.normal, float4(i.normal, 0)).xyz;
     o.uv = i.uv;
     return o;
-}
-
-float srgb_to_linear(float c) {
-    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-}
-
-float3 linear_rgb(float3 c) {
-    return float3(srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b));
-}
-
-float linear_to_srgb(float c) {
-    c = saturate(c);
-    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
 }
 
 float3 perturb_normal(float3 n, float3 dp_dx, float3 dp_dy, float2 duv_dx, float2 duv_dy, float3 map_n) {
@@ -205,6 +196,18 @@ float3 shade(float3 base, float roughness_in, float3 world, float3 n, float3 eye
         float dd = nh * nh * (a2 - 1) + 1;
         float dist_term = a2 / (PI * dd * dd);
         o += light * nl * (diffuse / PI + fresnel * (vis * dist_term));
+    }
+    if (lighting.envParams.x > 0) {
+        float3 r = 2 * dot(n, v) * n - v;
+        float3 irr = linear_rgb(envIrradianceMap.SampleLevel(equirect_uv(n), 0).rgb);
+        float3 rad = linear_rgb(envRadianceMap.SampleLevel(equirect_uv(r), roughness * lighting.envParams.y).rgb);
+        float4 c0 = float4(-1, -0.0275, -0.572, 0.022);
+        float4 c1 = float4(1, 0.0425, 1.04, -0.04);
+        float4 rv = roughness * c0 + c1;
+        float a004 = min(rv.x * rv.x, exp2(-9.28 * nv)) * rv.x + rv.y;
+        float2 fab = float2(-1.04, 1.04) * a004 + rv.zw;
+        float3 spec = f0 * fab.x + fab.y;
+        o += lighting.envParams.x * (irr * diffuse * (1 - spec) + rad * spec);
     }
     return o;
 }

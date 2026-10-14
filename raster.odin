@@ -1,0 +1,469 @@
+package o3d
+
+import "core:math"
+import "core:math/linalg"
+import "core:slice"
+
+import "deps:oksl"
+
+// Phase 3 of the software renderer: each band clears its rows, rasterizes its
+// triangles in drawing order (per pixel when untextured, in 2x2 quads when
+// textured or running an oksl ShaderMaterial), and resolves 4x MSAA samples
+// into premultiplied RGBA8 pixels (compositing the equirectangular background
+// on uncovered or partially transparent pixels).
+
+@(private)
+draw_band :: proc(data: rawptr, band, wi: int) {
+	job := (^Frame_Job)(data)
+	s := job.s
+	y0 := band * BAND_ROWS
+	y1 := min(y0 + BAND_ROWS, s.height)
+	slice.zero(s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES])
+	slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 1)
+	refs := s.band_tris[s.band_start[band]:s.band_start[band + 1]]
+	for r := 0; r < len(refs); {
+		t := s.chunks[refs[r].chunk].tris[refs[r].tri] // gathered from the columns once
+		if s.materials[t.draw].shader != 0 {
+			r += draw_custom(job, &s.workers[wi], refs[r:], y0, y1)
+			continue
+		}
+		draw_standard(job, refs[r], t, y0, y1)
+		r += 1
+	}
+	if job.bg_tex != 0 {
+		inv_w := 2.0 / f32(s.width)
+		inv_h := 2.0 / f32(s.height)
+		for y in y0 ..< y1 {
+			ndc_y := 1 - (f32(y) + 0.5) * inv_h
+			p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
+			p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
+			p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
+			p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
+			ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
+			ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
+			row_base := y * s.width
+			for x in 0 ..< s.width {
+				i := row_base + x
+				acc: [4]u32
+				for k in 0 ..< SAMPLES {
+					c := s.color[i * SAMPLES + k]
+					acc += {c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, c >> 24}
+				}
+				rem := u32(SAMPLES * 255) - acc[3]
+				if rem > 0 {
+					dir := linalg.normalize(ray0 + f32(x) * ray_step)
+					c := linear(sample_lod(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod).rgb) * job.bg_intensity
+					bg := pack(c, 1)
+					bg_rgb := [3]u32{bg & 0xff, (bg >> 8) & 0xff, (bg >> 16) & 0xff}
+					acc.rgb += (bg_rgb * rem + 127) / 255
+					acc[3] = SAMPLES * 255
+				}
+				for ch in 0 ..< 4 {
+					s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
+				}
+			}
+		}
+	} else {
+		for i in y0 * s.width ..< y1 * s.width {
+			acc: [4]u32
+			for k in 0 ..< SAMPLES {
+				c := s.color[i * SAMPLES + k]
+				acc += {c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, c >> 24}
+			}
+			for ch in 0 ..< 4 {
+				s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
+			}
+		}
+	}
+}
+
+// A band of the shadow map: its rows cleared to the far plane, then each
+// triangle's depth at the texel centres it covers, nearest kept.
+@(private)
+draw_depth_band :: proc(data: rawptr, band, _: int) {
+	job := (^Frame_Job)(data)
+	s := job.s
+	size := job.width
+	y0 := band * BAND_ROWS
+	y1 := min(y0 + BAND_ROWS, job.height)
+	slice.fill(s.shadow_map[y0 * size:y1 * size], 1)
+	for ref in s.band_tris[s.band_start[band]:s.band_start[band + 1]] {
+		t := s.chunks[ref.chunk].tris[ref.tri]
+		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+		if area == 0 {
+			continue
+		}
+		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
+		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
+		for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
+			for x in x_lo ..< x_hi {
+				c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
+				if !inside(t, c, area) {
+					continue
+				}
+				b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
+				b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
+				z := b0 * t.p[0].z + b1 * t.p[1].z + (1 - b0 - b1) * t.p[2].z
+				i := y * size + x
+				if z >= 0 && z <= 1 && z < s.shadow_map[i] {
+					s.shadow_map[i] = z
+				}
+			}
+		}
+	}
+}
+
+// A standard-material triangle's rows in the band: per pixel when untextured,
+// or in 2x2 quads when textured so uv and world derivatives give the mip level
+// and the normal map's tangent frame.
+@(private = "file")
+draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0, y1: int) {
+	t := t // a local the pixel loop keeps in registers (a parameter is a reference)
+	s := job.s
+	m := &s.materials[t.draw]
+	blend := .Blended in m.flags
+	receive := .Receive_Shadow in m.flags && job.shadow.light >= 0
+	area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+	if area == 0 {
+		return
+	}
+	if m.flags & TEXTURE_FLAGS != {} {
+		draw_standard_textured(job, ref, t, m, y0, y1, area, blend, receive)
+		return
+	}
+	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	// World position and normal over w per corner.
+	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
+	world, normal: [3]Vec3
+	for k in 0 ..< 3 {
+		world[k] = (^Vec3)(&vs[k * UNTEX_FLOATS])^
+		normal[k] = (^Vec3)(&vs[k * UNTEX_FLOATS + 3])^
+	}
+	flat_n: Vec3
+	if .Flat_Shading in m.flags {
+		w0 := world[0] / t.inv_w[0]
+		flat_n = linalg.normalize(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
+	}
+	for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
+		for x in x_lo ..< x_hi {
+			covered := coverage(t, x, y, area)
+			if covered == {} {
+				continue
+			}
+			// Shade once, at the pixel centre, perspective-correct.
+			c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
+			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
+			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
+			b2 := 1 - b0 - b1
+			iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+			p := (world[0] * b0 + world[1] * b1 + world[2] * b2) / iw
+			n := flat_n
+			if .Flat_Shading not_in m.flags {
+				n = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
+			}
+			shadow: f32 = 1
+			if receive {
+				shadow = shadow_factor(s.shadow_map, &job.shadow, p, n)
+			}
+			lit := shade(m, p, n, job.eye, job.lights, shadow, job.env) + m.emissive
+			write_samples(s, t, x, y, area, covered, pack(lit, m.opacity), blend)
+		}
+	}
+}
+
+@(private = "file")
+draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32, blend, receive: bool) {
+	s := job.s
+	vs := s.chunks[ref.chunk].values[t.values:][:3 * STANDARD_FLOATS]
+	world, normal: [3]Vec3
+	uv: [3]Vec2
+	for k in 0 ..< 3 {
+		base := k * STANDARD_FLOATS
+		world[k] = (^Vec3)(&vs[base])^
+		normal[k] = (^Vec3)(&vs[base + 3])^
+		uv[k] = (^Vec2)(&vs[base + 6])^
+	}
+	flat_n: Vec3
+	if .Flat_Shading in m.flags {
+		w0 := world[0] / t.inv_w[0]
+		flat_n = linalg.normalize(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
+	}
+	inv_area := 1 / area
+	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width) &~ 1
+	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
+		for qx := x_lo; qx < x_hi; qx += 2 {
+			lanes, helpers := quad_coverage(t, qx, qy, s.width, y1, area)
+			if card(helpers) == 4 {
+				continue
+			}
+			worlds, norms: [4]Vec3 = ---, ---
+			uvs: [4]Vec2 = ---
+			for l in 0 ..< 4 {
+				c := Vec2{f32(qx + l & 1) + 0.5, f32(qy + l >> 1) + 0.5}
+				b0 := edge(t.p[1].xy, t.p[2].xy, c) * inv_area
+				b1 := edge(t.p[2].xy, t.p[0].xy, c) * inv_area
+				b2 := 1 - b0 - b1
+				inv_iw := 1 / (b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2])
+				worlds[l] = (world[0] * b0 + world[1] * b1 + world[2] * b2) * inv_iw
+				uvs[l] = (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) * inv_iw
+				if l not_in helpers && .Flat_Shading not_in m.flags {
+					norms[l] = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) * inv_iw)
+				}
+			}
+			for l in 0 ..< 4 {
+				if lanes[l] == {} {
+					continue
+				}
+				x, y := qx + l & 1, qy + l >> 1
+				duv_dx, duv_dy := quad_deriv(uvs, l)
+				pm := m^
+				emissive := m.emissive
+				opacity := m.opacity
+				if .Color_Map in m.flags {
+					tex := sample(job.textures, m.color_map, uvs[l], duv_dx, duv_dy)
+					pm.base *= linear(tex.rgb)
+					if blend {
+						opacity *= tex.a
+					}
+				}
+				if .Roughness_Map in m.flags {
+					pm.roughness *= sample(job.textures, m.roughness_map, uvs[l], duv_dx, duv_dy).g
+				}
+				if .Emissive_Map in m.flags {
+					emissive *= linear(sample(job.textures, m.emissive_map, uvs[l], duv_dx, duv_dy).rgb)
+				}
+				n := flat_n if .Flat_Shading in m.flags else norms[l]
+				shadow: f32 = 1
+				if receive {
+					shadow = shadow_factor(s.shadow_map, &job.shadow, worlds[l], n)
+				}
+				if .Normal_Map in m.flags {
+					if linalg.dot(n, job.eye - worlds[l]) < 0 && .Two_Sided in pm.flags {
+						n = -n
+					}
+					pm.flags -= {.Two_Sided}
+					dp_dx, dp_dy := quad_deriv(worlds, l)
+					map_n := sample(job.textures, m.normal_map, uvs[l], duv_dx, duv_dy).rgb * 2 - 1
+					n = perturb_normal(n, dp_dx, dp_dy, duv_dx, duv_dy, map_n)
+				}
+				lit := shade(&pm, worlds[l], n, job.eye, job.lights, shadow, job.env) + emissive
+				write_samples(s, t, x, y, area, lanes[l], pack(lit, opacity), blend)
+			}
+		}
+	}
+}
+
+// Screen-space horizontal and vertical finite differences across a 2x2 quad.
+@(private = "file")
+quad_deriv :: #force_inline proc "contextless" (v: [4]$T, lane: int) -> (dx, dy: T) {
+	row := lane & 2
+	col := lane & 1
+	return v[row + 1] - v[row], v[2 + col] - v[col]
+}
+
+// Coverage and helper lanes for the 2x2 quad at even pixel (qx, qy).
+@(private = "file")
+quad_coverage :: #force_inline proc "contextless" (t: Tri, qx, qy, width, y1: int, area: f32) -> (lanes: [4]Sample_Mask, helpers: oksl.Quad_Lanes) {
+	for l in 0 ..< 4 {
+		x, y := qx + l & 1, qy + l >> 1
+		if x < width && y < y1 {
+			lanes[l] = coverage(t, x, y, area)
+		}
+		if lanes[l] == {} {
+			helpers += {l}
+		}
+	}
+	return
+}
+
+// A run of one ShaderMaterial draw's triangles from `refs` (at least the
+// first): their quads in the band shaded by the fragment program in one
+// batch, then written in triangle order. Returns how many it took.
+@(private = "file")
+draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Ref, y0, y1: int) -> int {
+	s := job.s
+	q := &w.quads
+	clear(&q.origin)
+	clear(&q.helpers)
+	clear(&q.facing)
+	clear(&q.covered)
+	clear(&q.tri)
+	draw := -1
+	taken := 0
+	for ref in refs {
+		t := s.chunks[ref.chunk].tris[ref.tri]
+		if draw >= 0 && (t.draw != draw || len(q.origin) >= QUAD_BATCH) {
+			break
+		}
+		draw = t.draw
+		taken += 1
+		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+		if area == 0 {
+			continue
+		}
+		// Quads at even pixels: a band (BAND_ROWS even) holds whole quads.
+		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width) &~ 1
+		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+		for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
+			for qx := x_lo; qx < x_hi; qx += 2 {
+				lanes, helpers := quad_coverage(t, qx, qy, s.width, y1, area)
+				if card(helpers) == 4 {
+					continue
+				}
+				append(&q.origin, [2]i32{i32(qx), i32(qy)})
+				append(&q.helpers, helpers)
+				append(&q.facing, t.front)
+				append(&q.covered, lanes)
+				append(&q.tri, ref)
+			}
+		}
+	}
+	nq := len(q.origin)
+	if nq == 0 {
+		return taken
+	}
+	sh := shader_get(job.shaders, s.materials[draw].shader)
+	nf := sh.varying_floats
+	// Each lane's varyings, perspective-correct (helpers' extrapolated).
+	table_grow_non_zero(&q.values, nf * nq * 4)
+	for qi in 0 ..< nq {
+		ref := q.tri[qi]
+		t := s.chunks[ref.chunk].tris[ref.tri]
+		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+		vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
+		for l in 0 ..< 4 {
+			c := Vec2{f32(int(q.origin[qi].x) + l & 1) + 0.5, f32(int(q.origin[qi].y) + l >> 1) + 0.5}
+			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
+			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
+			b2 := 1 - b0 - b1
+			iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+			j := qi * 4 + l
+			for f in 0 ..< nf {
+				q.values[f * nq * 4 + j] = (vs[f] * b0 + vs[nf + f] * b1 + vs[2 * nf + f] * b2) / iw
+			}
+			for f in shader_flat(sh) {
+				q.values[int(f) * nq * 4 + j] = vs[f] // kept as is: the first corner's
+			}
+		}
+	}
+	table_grow_non_zero(&q.colours, nq * 4)
+	table_grow_non_zero(&q.shaded, nq)
+	quads := oksl.Fragment_Quads {
+		count        = nq,
+		origin       = q.origin[:],
+		front_facing = q.facing[:],
+		helpers      = q.helpers[:],
+		varyings     = q.values[:],
+	}
+	oksl.run_fragment(&sh.pipeline.fragment.program, block(&s.blocks, draw, .Fragment), quads, q.colours[:], q.shaded[:], &w.vm)
+	blend := .Blended in s.materials[draw].flags
+	for qi in 0 ..< nq {
+		ref := q.tri[qi]
+		t := s.chunks[ref.chunk].tris[ref.tri]
+		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+		for l in q.shaded[qi] {
+			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
+			write_samples(s, t, x, y, area, q.covered[qi][l], pack_raw(q.colours[qi * 4 + l], blend), blend)
+		}
+	}
+	return taken
+}
+
+// The samples of pixel (x, y) inside the triangle.
+@(private = "file")
+coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (covered: Sample_Mask) {
+	for k in 0 ..< SAMPLES {
+		p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
+		if inside(t, p, area) {
+			covered += {k}
+		}
+	}
+	return
+}
+
+// A pixel's colour into its covered samples that pass the depth test:
+// blended over them (depth kept), or replacing them (depth written).
+@(private = "file")
+write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: int, area: f32, covered: Sample_Mask, col: u32, blend: bool) {
+	for k in covered {
+		p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
+		s0 := edge(t.p[1].xy, t.p[2].xy, p) / area
+		s1 := edge(t.p[2].xy, t.p[0].xy, p) / area
+		z := s0 * t.p[0].z + s1 * t.p[1].z + (1 - s0 - s1) * t.p[2].z
+		i := (y * s.width + x) * SAMPLES + k
+		if z < 0 || z > 1 || z >= s.depth[i] {
+			continue
+		}
+		if blend {
+			s.color[i] = over(col, s.color[i])
+		} else {
+			s.color[i] = col
+			s.depth[i] = z
+		}
+	}
+}
+
+@(private = "file")
+edge :: #force_inline proc "contextless" (a, b, p: Vec2) -> f32 {
+	return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+}
+
+// Inside the (front-facing, area < 0) triangle, with a top-left rule so
+// shared edges are drawn once.
+@(private = "file")
+inside :: #force_inline proc "contextless" (t: Tri, p: Vec2, area: f32) -> bool {
+	for k in 0 ..< 3 {
+		a, b := t.p[k].xy, t.p[(k + 1) % 3].xy
+		e := edge(a, b, p)
+		if e > 0 {
+			return false
+		}
+		if e == 0 {
+			// Top edge (horizontal, going right in screen) or left edge (going down).
+			top_left := (a.y == b.y && b.x < a.x) || b.y > a.y
+			if !top_left {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Linear colour to sRGB premultiplied RGBA8.
+@(private = "file")
+pack :: proc "contextless" (c: Vec3, alpha: f32) -> u32 {
+	r := u32(math.round(linear_to_srgb(c.r) * alpha * 255))
+	g := u32(math.round(linear_to_srgb(c.g) * alpha * 255))
+	b := u32(math.round(linear_to_srgb(c.b) * alpha * 255))
+	a := u32(math.round(alpha * 255))
+	return r | g << 8 | b << 16 | a << 24
+}
+
+// A ShaderMaterial's output as written (no conversion) to RGBA8,
+// premultiplied when it is blended (as the GPU's SRC_ALPHA blend does).
+@(private = "file")
+pack_raw :: proc "contextless" (c: [4]f32, blend: bool) -> u32 {
+	a := clamp(c.a, 0, 1)
+	m: f32 = a if blend else 1
+	out: u32
+	for ch in 0 ..< 3 {
+		out |= u32(math.round(clamp(c[ch], 0, 1) * m * 255)) << (8 * u32(ch))
+	}
+	return out | u32(math.round(a * 255)) << 24
+}
+
+// Premultiplied `src` over `dst` (in the stored sRGB values, as the GPU's
+// fixed-function blend on an UNORM target does).
+@(private = "file")
+over :: proc "contextless" (src, dst: u32) -> u32 {
+	inv := 255 - (src >> 24)
+	out: u32
+	for sh in ([4]u32{0, 8, 16, 24}) {
+		s := (src >> sh) & 0xff
+		d := (dst >> sh) & 0xff
+		out |= min(s + (d * inv + 127) / 255, 255) << sh
+	}
+	return out
+}

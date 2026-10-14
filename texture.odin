@@ -22,6 +22,8 @@ Texture :: struct {
 	levels:                   u32,
 	first_texel, texel_count: u32,
 	mips:                     [MAX_MIPS]u32,
+	env_radiance:             Texture_Id,
+	env_irradiance:           Texture_Id,
 }
 
 Textures :: struct {
@@ -154,14 +156,38 @@ sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: 
 	return linalg.lerp(c0, c1, frac)
 }
 
+// Trilinearly samples `id` at explicit `lod` with horizontal repeat and
+// vertical pole clamp (for equirectangular environment and background maps).
+sample_lod :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec4 {
+	tex, ok := texture_get(t, id)
+	if !ok {
+		return {0, 0, 0, 0}
+	}
+	if tex.levels <= 1 || lod <= 0 {
+		return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv, true)
+	}
+	lod_clamped := clamp(lod, 0, f32(tex.levels - 1))
+	l0 := int(lod_clamped)
+	l1 := min(l0 + 1, int(tex.levels) - 1)
+	frac := lod_clamped - f32(l0)
+	c0 := sample_mip(t.texels[tex.mips[l0]:], int(max(tex.width >> u32(l0), 1)), int(max(tex.height >> u32(l0), 1)), uv, true)
+	if l0 == l1 || frac <= 0 {
+		return c0
+	}
+	c1 := sample_mip(t.texels[tex.mips[l1]:], int(max(tex.width >> u32(l1), 1)), int(max(tex.height >> u32(l1), 1)), uv, true)
+	return linalg.lerp(c0, c1, frac)
+}
+
 BILINEAR_SCALE :: 256
 TEXEL_NORM :: 1.0 / (f32(BILINEAR_SCALE * BILINEAR_SCALE) * 255.0)
 
 // Bilinearly samples one mip level with 8-bit fixed-point subtexel weights
-// (matching GPU hardware filtering) and repeat wrapping.
-@(private = "file")
-sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2) -> Vec4 #no_bounds_check {
-	st := linalg.fract(Vec2{uv.x, 1 - uv.y}) * Vec2{f32(w), f32(h)} - 0.5
+// (matching GPU hardware filtering). When `clamp_v` is true, u wraps and v
+// clamps to edge (equirectangular poles).
+@(private)
+sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2, clamp_v := false) -> Vec4 #no_bounds_check {
+	tc := Vec2{linalg.fract(uv.x), clamp(1 - uv.y, 0, 1) if clamp_v else linalg.fract(1 - uv.y)}
+	st := tc * Vec2{f32(w), f32(h)} - 0.5
 	f0 := linalg.floor(st)
 	p0 := linalg.array_cast(f0, int)
 	wt := linalg.clamp(linalg.array_cast(linalg.round((st - f0) * f32(BILINEAR_SCALE)), i32), 0, BILINEAR_SCALE)
@@ -173,8 +199,14 @@ sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2) -> Vec4 #no
 
 	ix0 := p0.x + w if p0.x < 0 else (p0.x - w if p0.x >= w else p0.x)
 	ix1 := 0 if ix0 + 1 >= w else ix0 + 1
-	iy0 := p0.y + h if p0.y < 0 else (p0.y - h if p0.y >= h else p0.y)
-	iy1 := 0 if iy0 + 1 >= h else iy0 + 1
+	iy0, iy1: int
+	if clamp_v {
+		iy0 = clamp(p0.y, 0, h - 1)
+		iy1 = clamp(p0.y + 1, 0, h - 1)
+	} else {
+		iy0 = p0.y + h if p0.y < 0 else (p0.y - h if p0.y >= h else p0.y)
+		iy1 = 0 if iy0 + 1 >= h else iy0 + 1
+	}
 
 	row0, row1 := iy0 * w, iy1 * w
 	c00 := linalg.array_cast(mip[row0 + ix0], i32)
@@ -196,3 +228,4 @@ perturb_normal :: proc "contextless" (n, dp_dx, dp_dy: Vec3, duv_dx, duv_dy: Vec
 	scale := linalg.inverse_sqrt(det) if det > 0 else 0
 	return linalg.normalize(t * (map_n.x * scale) + b * (map_n.y * scale) + n * map_n.z)
 }
+

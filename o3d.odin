@@ -128,6 +128,10 @@ linear :: proc "contextless" (c: Vec3) -> Vec3 {
 	return {srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)}
 }
 
+srgb8 :: #force_inline proc "contextless" (linear_val: f32) -> u8 {
+	return u8(linear_to_srgb(linear_val) * 255 + 0.5)
+}
+
 // ---- tables -----------------------------------------------------------------------------
 
 // Grows a dynamic array with geometric reserve so arena allocators do not

@@ -480,3 +480,114 @@ test_software_textures :: proc(t: ^testing.T) {
 	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
 }
 
+// Equirectangular environment lighting and background: with no lights at all,
+// a metal sphere reflects the panorama (sharper at low roughness, blurred at
+// high roughness), a dielectric sphere receives diffuse irradiance, the
+// background draws behind them, and a pool is byte-identical.
+@(test)
+test_software_environment :: proc(t: ^testing.T) {
+	// Round-trip equirect_dir / equirect_uv.
+	for uv in ([3]Vec2{{0.25, 0.75}, {0.5, 0.5}, {0.8, 0.2}}) {
+		rt := equirect_uv(equirect_dir(uv))
+		testing.expectf(t, linalg.length(rt - uv) < 1e-5, "equirect round-trip %v -> %v", uv, rt)
+	}
+
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+
+	// 64x32 equirectangular panorama: blue sky (+Y, top rows), warm ground
+	// (-Y, bottom rows), bright sun at +Z (reflected by the center of a sphere
+	// seen from +Z).
+	EW, EH :: 64, 32
+	env_px: [EW * EH * 4]u8
+	for y in 0 ..< EH {
+		v := 1 - (f32(y) + 0.5) / f32(EH)
+		for x in 0 ..< EW {
+			u := (f32(x) + 0.5) / f32(EW)
+			dir := equirect_dir({u, v})
+			sky := clamp(dir.y * 0.5 + 0.5, 0, 1)
+			col := linalg.lerp(Vec3{0.55, 0.25, 0.1}, Vec3{0.15, 0.45, 0.95}, sky)
+			sun := math.pow(max(linalg.dot(dir, Vec3{0, 0, 1}), 0), 32)
+			col = linalg.clamp(col + Vec3{0.85, 0.85, 0.7} * sun, 0, 1)
+			i := (y * EW + x) * 4
+			env_px[i + 0] = srgb8(col.r)
+			env_px[i + 1] = srgb8(col.g)
+			env_px[i + 2] = srgb8(col.b)
+			env_px[i + 3] = 255
+		}
+	}
+	env_id := texture_add(&textures, env_px[:], EW, EH)
+
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 40, near = 0.1, far = 100}
+	mirror := MATERIAL_DEFAULT
+	mirror.metalness, mirror.roughness = 1, 0.06
+	rough_metal := MATERIAL_DEFAULT
+	rough_metal.metalness, rough_metal.roughness = 1, 0.85
+	matte := MATERIAL_DEFAULT
+	matte.metalness, matte.roughness = 0, 1
+
+	W :: 96
+	s: Software
+	defer software_destroy(&s)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+
+	// 1. Without environment or lights, the metal sphere is completely black.
+	append(&scene.draws, Draw{sphere(&g, 1, 32, 16), compose(), mirror})
+	px_dark := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	testing.expect_value(t, at(px_dark, W / 2, W / 2), [4]u8{0, 0, 0, 255})
+
+	// 2. With scene.environment and scene.background, mirror metal reflects the
+	// +Z sun at its center, blue sky above, warm ground below, and the background
+	// is opaque.
+	scene.environment = env_id
+	scene.background = env_id
+	px_mirror := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	center_mirror := at(px_mirror, W / 2, W / 2)
+	top_mirror := at(px_mirror, W / 2, W / 2 - 14)
+	bot_mirror := at(px_mirror, W / 2, W / 2 + 14)
+	bg_corner := at(px_mirror, 4, 4)
+	testing.expectf(t, center_mirror[0] > 200 && center_mirror[1] > 200, "mirror sun reflection: %v", center_mirror)
+	testing.expectf(t, top_mirror[2] > top_mirror[0], "mirror upper sky blue: %v", top_mirror)
+	testing.expectf(t, bot_mirror[0] > bot_mirror[2], "mirror lower ground warm: %v", bot_mirror)
+	testing.expectf(t, bg_corner[3] == 255 && bg_corner[2] > 100, "opaque background corner: %v", bg_corner)
+
+	// 3. Rough metal blurs the sun highlight so the peak center brightness is lower.
+	scene.draws.material[0] = rough_metal
+	px_rough := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	center_rough := at(px_rough, W / 2, W / 2)
+	testing.expectf(t, center_rough[0] > 80 && center_rough[0] < center_mirror[0] - 20, "rough metal softer than mirror: rough=%v mirror=%v", center_rough, center_mirror)
+
+	// 4. Matte dielectric sphere is lit by diffuse irradiance (sky on top, ground on bottom).
+	scene.draws.material[0] = matte
+	px_matte := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	top_matte := at(px_matte, W / 2, W / 2 - 16)
+	bot_matte := at(px_matte, W / 2, W / 2 + 16)
+	testing.expectf(t, top_matte[2] > bot_matte[2] && bot_matte[0] > top_matte[0] - 15, "matte irradiance top=%v bot=%v", top_matte, bot_matte)
+
+	// 5. Pool renders byte-identical pixels.
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, 4)
+	thread.pool_start(&pool)
+	defer {
+		thread.pool_join(&pool)
+		thread.pool_destroy(&pool)
+	}
+	pooled: Software
+	defer software_destroy(&pooled)
+	got := software_render(&pooled, &scene, &g, nil, W, W, &pool, &textures)
+	differ := 0
+	for i in 0 ..< len(px_matte) {
+		differ += 1 if got[i] != px_matte[i] else 0
+	}
+	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
+}
+
+

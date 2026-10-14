@@ -114,20 +114,31 @@ Draw :: struct {
 }
 
 Scene :: struct {
-	camera:         Camera,
-	lights:         [dynamic]Light,
-	draws:          #soa[dynamic]Draw,
+	camera:                Camera,
+	lights:                [dynamic]Light,
+	draws:                 #soa[dynamic]Draw,
+	// Equirectangular environment map (image-based lighting) and background.
+	environment:           Texture_Id,
+	environment_intensity: f32, // 0 means 1
+	background:            Texture_Id,
+	background_intensity:  f32, // 0 means 1
+	background_blurriness: f32, // 0..1
 	// ShaderMaterials' uniforms: each a name and its floats'
 	// uniform_floats[first:][:count].
-	uniforms:       [dynamic]struct {
+	uniforms:              [dynamic]struct {
 		name:         string,
 		first, count: u32,
 	},
-	uniform_floats: [dynamic]f32,
+	uniform_floats:        [dynamic]f32,
 }
 
 scene_clear :: proc(s: ^Scene) {
 	s.camera = CAMERA_DEFAULT
+	s.environment = 0
+	s.environment_intensity = 0
+	s.background = 0
+	s.background_intensity = 0
+	s.background_blurriness = 0
 	clear(&s.lights)
 	clear(&s.draws)
 	clear(&s.uniforms)
@@ -357,9 +368,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 // The colour (linear) leaving a point of `m` at `world` with normal `n`
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
 // specular with Smith correlated visibility and Schlick Fresnel), direct
-// lights plus ambient and hemisphere light; no environment map. `shadow`
-// scales the shadow light's direct light (shadow_factor; 1: lit).
-shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1) -> Vec3 {
+// lights plus ambient, hemisphere and equirectangular environment lighting.
+// `shadow` scales the shadow light's direct light (shadow_factor; 1: lit).
+shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}) -> Vec3 {
 	base := m.base
 	if .Basic in m.flags {
 		return base
@@ -418,6 +429,18 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 			dist := a2 / (math.PI * dd * dd)
 			out += irradiance * (diffuse / math.PI + fresnel * (vis * dist))
 		}
+	}
+	if env.radiance != 0 {
+		r := 2 * linalg.dot(n, v) * n - v
+		irr := linear(sample_lod(env.textures, env.irradiance, equirect_uv(n), 0).rgb)
+		rad := linear(sample_lod(env.textures, env.radiance, equirect_uv(r), roughness * env.max_lod).rgb)
+		c0 :: Vec4{-1, -0.0275, -0.572, 0.022}
+		c1 :: Vec4{1, 0.0425, 1.04, -0.04}
+		rv := roughness * c0 + c1
+		a004 := min(rv.x * rv.x, linalg.exp2(-9.28 * nv)) * rv.x + rv.y
+		fab := Vec2{-1.04, 1.04} * a004 + rv.zw
+		spec := f0 * fab.x + fab.y
+		out += env.intensity * (irr * diffuse * (1 - spec) + rad * spec)
 	}
 	return out
 }

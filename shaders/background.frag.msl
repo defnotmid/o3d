@@ -1,0 +1,128 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 20 "common.slang"
+float2 equirect_uv_0(float3 d_0)
+{
+
+    return float2(atan2(d_0.z, d_0.x) * 0.15915493667125702f + 0.5f, 0.5f - asin(clamp(d_0.y, -1.0f, 1.0f)) * 0.31830987334251404f);
+}
+
+
+#line 6
+float srgb_to_linear_0(float c_0)
+{
+
+#line 6
+    float _S1;
+    if(c_0 <= 0.04044999927282333f)
+    {
+
+#line 7
+        _S1 = c_0 / 12.92000007629394531f;
+
+#line 7
+    }
+    else
+    {
+
+#line 7
+        _S1 = pow((c_0 + 0.05499999970197678f) / 1.0549999475479126f, 2.40000009536743164f);
+
+#line 7
+    }
+
+#line 7
+    return _S1;
+}
+
+float3 linear_rgb_0(float3 c_1)
+{
+
+#line 11
+    return float3(srgb_to_linear_0(c_1.x), srgb_to_linear_0(c_1.y), srgb_to_linear_0(c_1.z));
+}
+
+float linear_to_srgb_0(float c_2)
+{
+
+#line 15
+    float _S2 = saturate(c_2);
+
+#line 15
+    float _S3;
+    if(_S2 <= 0.00313080009073019f)
+    {
+
+#line 16
+        _S3 = _S2 * 12.92000007629394531f;
+
+#line 16
+    }
+    else
+    {
+
+#line 16
+        _S3 = 1.0549999475479126f * pow(_S2, 0.4166666567325592f) - 0.05499999970197678f;
+
+#line 16
+    }
+
+#line 16
+    return _S3;
+}
+
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 90
+struct pixelInput_0
+{
+    float3 ray_0 [[user(TEXCOORD)]];
+};
+
+
+#line 12 "background.slang"
+struct Background_FS_0
+{
+    float4 params_0;
+};
+
+struct KernelContext_0
+{
+    Background_FS_0 constant* bg_fs_0;
+    texture2d<float, access::sample> bgMap_texture_0;
+    sampler bgMap_sampler_0;
+};
+
+
+#line 37
+[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S4 [[stage_in]], float4 position_0 [[position]], Background_FS_0 constant* bg_fs_1 [[buffer(0)]], texture2d<float, access::sample> bgMap_texture_1 [[texture(0)]], sampler bgMap_sampler_1 [[sampler(0)]])
+{
+
+#line 37
+    thread KernelContext_0 kernelContext_0;
+
+#line 37
+    (&kernelContext_0)->bg_fs_0 = bg_fs_1;
+
+#line 37
+    (&kernelContext_0)->bgMap_texture_0 = bgMap_texture_1;
+
+#line 37
+    (&kernelContext_0)->bgMap_sampler_0 = bgMap_sampler_1;
+
+    float3 bg_0 = linear_rgb_0(((bgMap_texture_1).sample((bgMap_sampler_1), (equirect_uv_0(normalize(_S4.ray_0))), level((bg_fs_1->params_0.w)))).xyz) * bg_fs_1->params_0.xyz;
+
+#line 39
+    pixelOutput_0 _S5 = { float4(linear_to_srgb_0(bg_0.x), linear_to_srgb_0(bg_0.y), linear_to_srgb_0(bg_0.z), 1.0f) };
+    return _S5;
+}
+

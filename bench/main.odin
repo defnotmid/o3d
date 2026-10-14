@@ -205,5 +205,28 @@ main :: proc() {
 
 		run_case("small_textured   (1T, 0-alloc)", &sw, &scene, &geos, &textures, nil, W, H, WARMUP, ITERS)
 		run_case("small_textured   (pool)", &sw, &scene, &geos, &textures, &pool, W, H, WARMUP, ITERS)
+
+		EW, EH :: 64, 32
+		env_px: [EW * EH * 4]u8
+		for y in 0 ..< EH {
+			v := 1 - (f32(y) + 0.5) / f32(EH)
+			for x in 0 ..< EW {
+				u := (f32(x) + 0.5) / f32(EW)
+				dir := o3d.equirect_dir({u, v})
+				sky := clamp(dir.y * 0.5 + 0.5, 0, 1)
+				col := o3d.Vec3{0.55, 0.3, 0.15} * (1 - sky) + o3d.Vec3{0.2, 0.5, 0.95} * sky
+				i := (y * EW + x) * 4
+				env_px[i + 0] = u8(col.r * 255)
+				env_px[i + 1] = u8(col.g * 255)
+				env_px[i + 2] = u8(col.b * 255)
+				env_px[i + 3] = 255
+			}
+		}
+		env_id := o3d.texture_add(&textures, env_px[:], EW, EH)
+		scene.environment = env_id
+		scene.background = env_id
+
+		run_case("small_env        (1T, 0-alloc)", &sw, &scene, &geos, &textures, nil, W, H, WARMUP, ITERS)
+		run_case("small_env        (pool)", &sw, &scene, &geos, &textures, &pool, W, H, WARMUP, ITERS)
 	}
 }

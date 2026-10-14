@@ -350,3 +350,73 @@ test_textures_match_software :: proc(t: ^testing.T) {
 		fmt.printf("textured materials: PSNR %.1f dB\n", psnr)
 	}
 }
+
+// Equirectangular environment lighting (prefiltered radiance + diffuse
+// irradiance) and blurred background match between GPU and software rasterizer.
+@(test)
+test_environment_matches_software :: proc(t: ^testing.T) {
+	g: GPU
+	if init(&g) != nil {
+		fmt.println("no GPU device: skipped")
+		return
+	}
+	defer destroy(&g)
+	geos: o3d.Geometries
+	defer o3d.geometries_destroy(&geos)
+	textures: o3d.Textures
+	defer o3d.textures_destroy(&textures)
+	scene: o3d.Scene
+	defer o3d.scene_destroy(&scene)
+
+	EW, EH :: 64, 32
+	env_px: [EW * EH * 4]u8
+	for y in 0 ..< EH {
+		v := 1 - (f32(y) + 0.5) / f32(EH)
+		for x in 0 ..< EW {
+			u := (f32(x) + 0.5) / f32(EW)
+			dir := o3d.equirect_dir({u, v})
+			sky := clamp(dir.y * 0.5 + 0.5, 0, 1)
+			col := o3d.Vec3{0.55, 0.3, 0.15} * (1 - sky) + o3d.Vec3{0.2, 0.5, 0.95} * sky
+			sun := math.pow(max(dir.x * 0.6 + dir.y * 0.5 + dir.z * 0.6, 0), 16)
+			col = {
+				clamp(col.r + 0.6 * sun, 0, 1),
+				clamp(col.g + 0.55 * sun, 0, 1),
+				clamp(col.b + 0.4 * sun, 0, 1),
+			}
+			i := (y * EW + x) * 4
+			env_px[i + 0] = u8(col.r * 255)
+			env_px[i + 1] = u8(col.g * 255)
+			env_px[i + 2] = u8(col.b * 255)
+			env_px[i + 3] = 255
+		}
+	}
+	env_id := o3d.texture_add(&textures, env_px[:], EW, EH)
+
+	test_scene(&scene, &geos)
+	clear(&scene.lights) // Pure IBL scene so environment radiance & irradiance dominate!
+	scene.environment = env_id
+	scene.environment_intensity = 1.2
+	scene.background = env_id
+	scene.background_blurriness = 0.25
+
+	W, H :: 200, 150
+	out := target(&g, W, H)
+	defer sdl.ReleaseGPUTexture(g.device, out)
+	testing.expect(t, render(&g, &scene, &geos, nil, out, W, H, textures = &textures) == nil)
+	gpu, _ := read(&g, out, W, H)
+	defer delete(gpu)
+	sw: o3d.Software
+	defer o3d.software_destroy(&sw)
+	cpu := o3d.software_render(&sw, &scene, &geos, nil, W, H, nil, &textures)
+	sum: f64
+	for i in 0 ..< len(cpu) {
+		d := f64(cpu[i]) - f64(gpu[i])
+		sum += d * d
+	}
+	psnr := 10 * math.log10(255 * 255 / max(sum / f64(len(cpu)), 1e-9))
+	testing.expectf(t, psnr > 32, "PSNR %.1f dB", psnr)
+	when ODIN_DEBUG {
+		fmt.printf("environment lighting + background: PSNR %.1f dB\n", psnr)
+	}
+}
+

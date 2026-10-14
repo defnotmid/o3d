@@ -115,9 +115,16 @@ renders a test scene both ways to PNGs.
   `shaders/o3d.slang` and checks them.
 - **Shading** is one model in two places, `shade` in scene.odin and
   `shaders/o3d.slang`: Lambert diffuse plus GGX specular with Smith
-  correlated visibility and Schlick Fresnel, as three.js's
-  MeshStandardMaterial computes it without an environment map. Changing one
-  means changing the other; the tests compare the two renderers.
+  correlated visibility and Schlick Fresnel, plus equirectangular
+  environment lighting (`scene.environment`, `scene.environment_intensity`)
+  and background (`scene.background`, `scene.background_intensity`,
+  `scene.background_blurriness`), as three.js's MeshStandardMaterial
+  computes it. When a texture is used as `scene.environment` (or blurred
+  `scene.background`), `texture_environment` builds once and caches in
+  `Textures` its GGX-prefiltered radiance mip chain (roughness 0..1) and
+  cosine-convolved diffuse irradiance map, sampled alike by both renderers.
+  Changing one means changing the other; the tests compare the two
+  renderers.
 - **Anti-aliasing:** 4x MSAA on the GPU; the software renderer keeps four
   samples per pixel at the same positions, shades once per pixel per
   triangle, and resolves the same way.
@@ -172,24 +179,15 @@ renders a test scene both ways to PNGs.
 Not released yet. In order, with the size of each next to shadows (one
 sizeable change):
 
-1. Textures (larger than shadows): `map`, `normalMap`, `roughnessMap`,
-   `emissiveMap` with uvs; image loading and mipmaps; a software sampler
-   choosing the level as the GPU does (from uv derivatives); per-pixel
-   tangents for normal maps as three.js derives them (screen derivatives).
-   First, because environment lighting samples the same way.
-2. Environment lighting (the largest): an equirectangular image as
-   image-based light and background (metals reflect something), as
-   three.js's `scene.environment`: prefiltered radiance by roughness and
-   diffuse irradiance, sampled alike by both renderers.
-3. glTF import (medium; `vendor:cgltf`): meshes, materials (glTF's
+1. glTF import (medium; `vendor:cgltf`): meshes, materials (glTF's
    metallic-roughness is MeshStandardMaterial's), node transforms, baked
-   animation sampled at a time. Wants textures for fidelity.
-4. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing
+   animation sampled at a time.
+2. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing
    into its own texture, composited like any layer; a group's 2D drawing as
    a texture on a surface; the Lua API in three.js's names; inspect
    checks; the docs page mapping three.js terms.
-5. ShaderMaterial textures (small here): `uniform sampler2D` bound to
-   item 1's textures; `texelFetch` / `textureSize` and CPU implicit-LOD
+3. ShaderMaterial textures (small here): `uniform sampler2D` bound to
+   `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
 
 Before onimite depends on o3d: run the tests on macOS. The Metal path
