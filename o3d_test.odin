@@ -365,3 +365,118 @@ test_software_shadow :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
 }
+
+// Textures build a full mipmap chain in one shared array and `sample` picks
+// the level from screen uv derivatives: magnified reads the fine checker,
+// minified reads the averaged top level.
+@(test)
+test_texture_mipmaps :: proc(t: ^testing.T) {
+	textures: Textures
+	defer textures_destroy(&textures)
+	N :: 16
+	px: [N * N * 4]u8
+	for y in 0 ..< N {
+		for x in 0 ..< N {
+			i := (y * N + x) * 4
+			v := u8(240) if (x + y) % 2 == 0 else u8(20)
+			px[i], px[i + 1], px[i + 2], px[i + 3] = v, v, v, 255
+		}
+	}
+	id := texture_add(&textures, px[:], N, N)
+	tex, ok := texture_get(&textures, id)
+	testing.expect(t, ok && tex.levels == 5 && tex.texel_count == 16 * 16 + 8 * 8 + 4 * 4 + 2 * 2 + 1)
+	// Magnified (zero derivatives -> level 0): texel centres return 240 and 20.
+	c0 := sample(&textures, id, {0.5 / N, 1 - 0.5 / N}, {}, {})
+	c1 := sample(&textures, id, {1.5 / N, 1 - 0.5 / N}, {}, {})
+	testing.expectf(t, c0.r > 0.9 && c1.r < 0.1, "level 0 texels: %v, %v", c0, c1)
+	// Minified (1 uv unit per pixel -> level 4, 1x1 average ~ 130/255).
+	avg := sample(&textures, id, {0.25, 0.75}, {1, 0}, {0, 1})
+	testing.expectf(t, abs(avg.r - 130.0 / 255.0) < 0.02, "minified average: %v", avg)
+}
+
+// Standard material textures on the software renderer: color_map (with
+// v = 1 at the top of the mesh reading row 0 of the image), normal_map
+// (screen-derivative tangents tilting normals toward +X on the left and -X
+// on the right), roughness_map, and emissive_map; byte-identical on a pool.
+@(test)
+test_software_textures :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 3.5}, fov = 45, near = 0.1, far = 100}
+	// Light from +X (right): surfaces whose normal tilts toward +X are brighter.
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3.0, position = {4, 0, 2}})
+
+	T :: 32
+	col_px, norm_px, emissive_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			// Top half red, bottom half green.
+			if y < T / 2 {
+				col_px[i], col_px[i + 1], col_px[i + 2], col_px[i + 3] = 240, 30, 30, 255
+			} else {
+				col_px[i], col_px[i + 1], col_px[i + 2], col_px[i + 3] = 30, 240, 30, 255
+			}
+			// Left half tilts normal toward +X (R=220), right half toward -X (R=35).
+			nx := u8(220) if x < T / 2 else u8(35)
+			norm_px[i], norm_px[i + 1], norm_px[i + 2], norm_px[i + 3] = nx, 128, 200, 255
+			// Emissive spot in the bottom-right quadrant.
+			if x >= T / 2 && y >= T / 2 {
+				emissive_px[i], emissive_px[i + 1], emissive_px[i + 2], emissive_px[i + 3] = 0, 0, 250, 255
+			} else {
+				emissive_px[i + 3] = 255
+			}
+		}
+	}
+	col_id := texture_add(&textures, col_px[:], T, T)
+	norm_id := texture_add(&textures, norm_px[:], T, T)
+	em_id := texture_add(&textures, emissive_px[:], T, T)
+
+	m := MATERIAL_DEFAULT
+	m.color_map = col_id
+	m.normal_map = norm_id
+	m.emissive = {1, 1, 1}
+	m.emissive_map = em_id
+	append(&scene.draws, Draw{plane(&g, 2, 2), compose(), m})
+
+	W :: 96
+	s: Software
+	defer software_destroy(&s)
+	px := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	top_left := at(px, W / 2 - 16, W / 2 - 16)
+	top_right := at(px, W / 2 + 16, W / 2 - 16)
+	bot_left := at(px, W / 2 - 16, W / 2 + 16)
+	bot_right := at(px, W / 2 + 16, W / 2 + 16)
+	// Top is red, bottom is green; left tilts toward the +X light so it is brighter than right;
+	// bottom-right has blue emission.
+	testing.expectf(t, top_left[0] > top_left[1] * 2, "top_left red: %v", top_left)
+	testing.expectf(t, top_left[0] > top_right[0] + 40, "normal map +X vs -X: left %v, right %v", top_left, top_right)
+	testing.expectf(t, bot_left[1] > bot_left[0] * 2, "bot_left green: %v", bot_left)
+	testing.expectf(t, bot_right[2] > 200, "bot_right blue emissive: %v", bot_right)
+
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, 4)
+	thread.pool_start(&pool)
+	defer {
+		thread.pool_join(&pool)
+		thread.pool_destroy(&pool)
+	}
+	pooled: Software
+	defer software_destroy(&pooled)
+	got := software_render(&pooled, &scene, &g, nil, W, W, &pool, &textures)
+	differ := 0
+	for i in 0 ..< len(px) {
+		differ += 1 if got[i] != px[i] else 0
+	}
+	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
+}
+

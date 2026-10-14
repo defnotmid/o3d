@@ -19,14 +19,15 @@ What is known about three.js carries over:
 - Colours are sRGB; lighting is linear; the output is sRGB with no tone
   mapping.
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
-  `emissive`, `emissive_intensity`, `opacity`, `side`, and the booleans as
-  a bit set: `flags = {.Transparent, .Flat_Shading}`) or MeshBasicMaterial
-  (`.Basic`), or ShaderMaterial: your own vertex and fragment shaders in
-  GLSL ES (three.js's GLSL 1 style with `attribute`, `varying` and
-  `gl_FragColor`, or GLSL 3 with `glsl3 = true`), with three.js's built-in
-  uniforms (`modelMatrix`, `modelViewMatrix`, `projectionMatrix`,
-  `viewMatrix`, `normalMatrix`, `cameraPosition`, `isOrthographic`) and
-  attributes (`position`, `normal`, `uv`), compiled by
+  `emissive`, `emissive_intensity`, `opacity`, `side`, texture maps
+  `color_map`, `normal_map`, `roughness_map`, `emissive_map`, and the
+  booleans as a bit set: `flags = {.Transparent, .Flat_Shading}`) or
+  MeshBasicMaterial (`.Basic`), or ShaderMaterial: your own vertex and
+  fragment shaders in GLSL ES (three.js's GLSL 1 style with `attribute`,
+  `varying` and `gl_FragColor`, or GLSL 3 with `glsl3 = true`), with
+  three.js's built-in uniforms (`modelMatrix`, `modelViewMatrix`,
+  `projectionMatrix`, `viewMatrix`, `normalMatrix`, `cameraPosition`,
+  `isOrthographic`) and attributes (`position`, `normal`, `uv`), compiled by
   [oksl](../oksl) on both renderers. The output is written as the shader
   leaves it; `.Transparent` blends it, `side` culls as for any material.
   `projectionMatrix` maps depth to 0..1 (SDL_GPU's clip space) rather than
@@ -56,6 +57,8 @@ composite over anything.
 
 ```odin
 geos: o3d.Geometries                       // kept: geometry is made once
+textures: o3d.Textures                     // kept: textures and mipmaps are made once
+albedo, _ := o3d.texture_load(&textures, "brick.png")
 scene: o3d.Scene                           // filled every frame
 o3d.scene_clear(&scene)
 scene.camera = {position = {0, 2, 6}, target = {0, 0.5, 0}, fov = 40, near = 0.1, far = 100}
@@ -63,7 +66,7 @@ append(&scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, groun
 append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {3, 5, 2},
 	cast_shadow = true, shadow = {map_size = 1024, bias = -0.0005}})
 m := o3d.MATERIAL_DEFAULT
-m.color, m.roughness = {1, 0.35, 0.3}, 0.4
+m.color, m.roughness, m.color_map = {1, 0.35, 0.3}, 0.4, albedo
 m.flags = {.Cast_Shadow, .Receive_Shadow}
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
@@ -79,17 +82,18 @@ append(&scene.draws, o3d.Draw{o3d.sphere(&geos, 1), o3d.compose(), w})
 g: o3d_sdlgpu.GPU
 o3d_sdlgpu.init(&g, device)
 out := o3d_sdlgpu.target(&g, 1920, 1080)
-o3d_sdlgpu.render(&g, &scene, &geos, &shaders, out, 1920, 1080, cmd)   // or nil cmd: submit and wait
+o3d_sdlgpu.render(&g, &scene, &geos, &shaders, out, 1920, 1080, cmd, &textures)   // or nil cmd: submit and wait
 
 // CPU: the same pixels, rows banded on the caller's thread pool
 sw: o3d.Software
-pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool)
+pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
 ```
 
 o3d imports oksl as `deps:oksl`, so builds pass `-collection:deps=..`
-(the directory holding both): `odin test . -collection:deps=..`, and
-`odin run demo -collection:deps=.. -- out_dir` renders a test scene both
-ways to PNGs.
+(the directory holding both): `odin test . -collection:deps=..`,
+`odin run bench -collection:deps=.. -o:speed` runs the zero-allocation
+software benchmark, and `odin run demo -collection:deps=.. -- out_dir`
+renders a test scene both ways to PNGs.
 
 ## Design
 

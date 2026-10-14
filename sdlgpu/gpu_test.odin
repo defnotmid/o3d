@@ -260,3 +260,93 @@ test_shadow_matches_software :: proc(t: ^testing.T) {
 	psnr := 10 * math.log10(255 * 255 / max(sum / f64(len(cpu)), 1e-9))
 	testing.expectf(t, psnr > 32, "PSNR %.1f dB", psnr)
 }
+
+// Material texture maps (color_map, normal_map, roughness_map, emissive_map)
+// with mipmaps match between GPU and software rasterizer.
+@(test)
+test_textures_match_software :: proc(t: ^testing.T) {
+	g: GPU
+	if init(&g) != nil {
+		fmt.println("no GPU device: skipped")
+		return
+	}
+	defer destroy(&g)
+	geos: o3d.Geometries
+	defer o3d.geometries_destroy(&geos)
+	textures: o3d.Textures
+	defer o3d.textures_destroy(&textures)
+	scene: o3d.Scene
+	defer o3d.scene_destroy(&scene)
+
+	TW, TH :: 32, 32
+	color_px: [TW * TH * 4]u8
+	normal_px: [TW * TH * 4]u8
+	rough_px: [TW * TH * 4]u8
+	emissive_px: [TW * TH * 4]u8
+	for y in 0 ..< TH {
+		for x in 0 ..< TW {
+			i := (y * TW + x) * 4
+			u := f32(x) / f32(TW - 1)
+			v := f32(y) / f32(TH - 1)
+			// Smooth color pattern so GPU hardware trilinear and software trilinear agree closely
+			color_px[i + 0] = u8(clamp(0.25 + 0.65 * (0.5 + 0.5 * math.cos(u * math.TAU * 2)), 0, 1) * 255)
+			color_px[i + 1] = u8(clamp(0.25 + 0.65 * (0.5 + 0.5 * math.sin(v * math.TAU * 2)), 0, 1) * 255)
+			color_px[i + 2] = u8(clamp(0.35 + 0.50 * u * v, 0, 1) * 255)
+			color_px[i + 3] = 255
+
+			nx := 0.25 * math.sin(u * math.TAU * 2)
+			ny := 0.25 * math.cos(v * math.TAU * 2)
+			nz := math.sqrt(max(1 - nx * nx - ny * ny, 0))
+			normal_px[i + 0] = u8(clamp((nx * 0.5 + 0.5) * 255, 0, 255))
+			normal_px[i + 1] = u8(clamp((ny * 0.5 + 0.5) * 255, 0, 255))
+			normal_px[i + 2] = u8(clamp((nz * 0.5 + 0.5) * 255, 0, 255))
+			normal_px[i + 3] = 255
+
+			rough := u8(clamp((0.35 + 0.55 * (0.5 + 0.5 * math.sin((u + v) * math.TAU))) * 255, 0, 255))
+			rough_px[i + 0] = rough
+			rough_px[i + 1] = rough
+			rough_px[i + 2] = rough
+			rough_px[i + 3] = 255
+
+			emissive_px[i + 0] = u8(clamp(0.4 * u * 255, 0, 255))
+			emissive_px[i + 1] = u8(clamp(0.2 * v * 255, 0, 255))
+			emissive_px[i + 2] = u8(clamp(0.5 * (1 - u) * 255, 0, 255))
+			emissive_px[i + 3] = 255
+		}
+	}
+	color_id := o3d.texture_add(&textures, color_px[:], TW, TH)
+	normal_id := o3d.texture_add(&textures, normal_px[:], TW, TH)
+	rough_id := o3d.texture_add(&textures, rough_px[:], TW, TH)
+	emissive_id := o3d.texture_add(&textures, emissive_px[:], TW, TH)
+
+	test_scene(&scene, &geos)
+	scene.draws.material[0].color_map = color_id
+	scene.draws.material[0].roughness_map = rough_id
+	scene.draws.material[1].color_map = color_id
+	scene.draws.material[1].normal_map = normal_id
+	scene.draws.material[1].roughness_map = rough_id
+	scene.draws.material[2].normal_map = normal_id
+	scene.draws.material[2].emissive = {1, 1, 1}
+	scene.draws.material[2].emissive_intensity = 0.6
+	scene.draws.material[2].emissive_map = emissive_id
+
+	W, H :: 200, 150
+	out := target(&g, W, H)
+	defer sdl.ReleaseGPUTexture(g.device, out)
+	testing.expect(t, render(&g, &scene, &geos, nil, out, W, H, textures = &textures) == nil)
+	gpu, _ := read(&g, out, W, H)
+	defer delete(gpu)
+	sw: o3d.Software
+	defer o3d.software_destroy(&sw)
+	cpu := o3d.software_render(&sw, &scene, &geos, nil, W, H, nil, &textures)
+	sum: f64
+	for i in 0 ..< len(cpu) {
+		d := f64(cpu[i]) - f64(gpu[i])
+		sum += d * d
+	}
+	psnr := 10 * math.log10(255 * 255 / max(sum / f64(len(cpu)), 1e-9))
+	testing.expectf(t, psnr > 32, "PSNR %.1f dB", psnr)
+	when ODIN_DEBUG {
+		fmt.printf("textured materials: PSNR %.1f dB\n", psnr)
+	}
+}

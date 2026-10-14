@@ -18,6 +18,10 @@ static const uint FLAG_FLAT_SHADING = 2;
 static const uint FLAG_TWO_SIDED = 4;
 static const uint FLAG_BLENDED = 8;
 static const uint FLAG_RECEIVE_SHADOW = 16;
+static const uint FLAG_COLOR_MAP = 32;
+static const uint FLAG_NORMAL_MAP = 64;
+static const uint FLAG_ROUGHNESS_MAP = 128;
+static const uint FLAG_EMISSIVE_MAP = 256;
 
 struct Draw_VS {
     float4x4 mvp;
@@ -64,6 +68,10 @@ struct Lighting {
 [[vk::binding(1, 3)]] ConstantBuffer<Lighting> lighting : register(b1, space3);
 // The shadow map: depth per texel (R32_FLOAT), read texel by texel.
 [[vk::binding(0, 2)]] Sampler2D<float> shadowMap : register(t0, space2);
+[[vk::binding(1, 2)]] Sampler2D<float4> colorMap : register(t1, space2);
+[[vk::binding(2, 2)]] Sampler2D<float4> normalMap : register(t2, space2);
+[[vk::binding(3, 2)]] Sampler2D<float4> roughnessMap : register(t3, space2);
+[[vk::binding(4, 2)]] Sampler2D<float4> emissiveMap : register(t4, space2);
 
 struct VS_In {
     float3 position : TEXCOORD0;
@@ -88,9 +96,27 @@ VS_Out vs_main(VS_In i) {
     return o;
 }
 
+float srgb_to_linear(float c) {
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
+float3 linear_rgb(float3 c) {
+    return float3(srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b));
+}
+
 float linear_to_srgb(float c) {
     c = saturate(c);
     return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+float3 perturb_normal(float3 n, float3 dp_dx, float3 dp_dy, float2 duv_dx, float2 duv_dy, float3 map_n) {
+    float3 q1perp = cross(n, dp_dy);
+    float3 q0perp = cross(dp_dx, n);
+    float3 t = q1perp * duv_dx.x + q0perp * duv_dy.x;
+    float3 b = q1perp * duv_dx.y + q0perp * duv_dy.y;
+    float det = max(dot(t, t), dot(b, b));
+    float scale = det > 0 ? rsqrt(det) : 0;
+    return normalize(t * (map_n.x * scale) + b * (map_n.y * scale) + n * map_n.z);
 }
 
 // shadow.odin's shadow_factor: a 3x3 grid of bilinear depth comparisons,
@@ -127,12 +153,12 @@ float shadow_factor(float3 world, float3 normal) {
     return lit / 9;
 }
 
-float3 shade(float3 base, float3 world, float3 n, float3 eye, float shadow) {
+float3 shade(float3 base, float roughness_in, float3 world, float3 n, float3 eye, float shadow) {
     float metalness = material.metalness;
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
     float3 f0 = lerp(float3(0.04), base, metalness);
-    float roughness = clamp(material.roughness, 0.0525, 1);
+    float roughness = clamp(roughness_in, 0.0525, 1);
     float alpha = roughness * roughness;
     float nv = clamp(dot(n, v), 1e-4, 1);
     float3 o = float3(0);
@@ -187,10 +213,23 @@ float3 shade(float3 base, float3 world, float3 n, float3 eye, float shadow) {
 float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
     uint flags = material.flags;
     float3 base = material.color.rgb;
+    float a = material.color.a;
+    float2 uv = float2(i.uv.x, 1 - i.uv.y);
+    if ((flags & FLAG_COLOR_MAP) != 0) {
+        float4 tex = colorMap.Sample(uv);
+        base *= linear_rgb(tex.rgb);
+        if ((flags & FLAG_BLENDED) != 0) {
+            a *= tex.a;
+        }
+    }
     float3 c;
     if ((flags & FLAG_BASIC) != 0) {
         c = base;
     } else {
+        float roughness = material.roughness;
+        if ((flags & FLAG_ROUGHNESS_MAP) != 0) {
+            roughness *= roughnessMap.Sample(uv).g;
+        }
         float3 n = normalize(i.normal);
         if ((flags & FLAG_FLAT_SHADING) != 0) {
             n = normalize(cross(ddx(i.world), ddy(i.world)));
@@ -206,10 +245,17 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
         if ((flags & FLAG_TWO_SIDED) != 0 && !front) {
             n = -n;
         }
-        c = shade(base, i.world, n, lighting.eye.xyz, shadow);
+        if ((flags & FLAG_NORMAL_MAP) != 0) {
+            float3 map_n = normalMap.Sample(uv).rgb * 2 - 1;
+            n = perturb_normal(n, ddx(i.world), ddy(i.world), ddx(i.uv), ddy(i.uv), map_n);
+        }
+        c = shade(base, roughness, i.world, n, lighting.eye.xyz, shadow);
     }
-    c += material.emissive.rgb;
-    float a = material.color.a;
+    float3 emissive = material.emissive.rgb;
+    if ((flags & FLAG_EMISSIVE_MAP) != 0) {
+        emissive *= linear_rgb(emissiveMap.Sample(uv).rgb);
+    }
+    c += emissive;
     return float4(linear_to_srgb(c.r) * a, linear_to_srgb(c.g) * a, linear_to_srgb(c.b) * a, a);
 }
 

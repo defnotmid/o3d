@@ -251,7 +251,7 @@ shader_blocks_destroy :: proc(b: ^Shader_Blocks) {
 shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, out: ^Shader_Blocks) {
 	n := len(scene.draws)
 	clear(&out.bytes)
-	resize(&out.at, n)
+	table_grow_non_zero(&out.at, n)
 	materials := scene_materials(scene)
 	models := scene.draws.model[:n]
 	for m, i in materials {
@@ -267,7 +267,7 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, out: ^
 				continue
 			}
 			at := len(out.bytes)
-			resize(&out.bytes, at + mod.block_size)
+			table_grow(&out.bytes, at + mod.block_size)
 			block := out.bytes[at:]
 			out.at[i][stage] = i32(at)
 			for offset, b in sh.builtins[stage] {

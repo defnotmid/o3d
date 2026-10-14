@@ -8,11 +8,11 @@ struct pixelOutput_0
 };
 
 
-#line 218 "o3d.slang"
+#line 264 "o3d.slang"
 [[fragment]] pixelOutput_0 fs_shadow(float4 position_0 [[position]])
 {
 
-#line 218
+#line 264
     pixelOutput_0 _S1 = { position_0.z };
     return _S1;
 }

@@ -127,3 +127,22 @@ linear_to_srgb :: proc "contextless" (value: f32) -> f32 {
 linear :: proc "contextless" (c: Vec3) -> Vec3 {
 	return {srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)}
 }
+
+// ---- tables -----------------------------------------------------------------------------
+
+// Grows a dynamic array with geometric reserve so arena allocators do not
+// strand O(N^2) backing memory across incremental resizes.
+table_grow :: #force_inline proc(table: ^[dynamic]$T, length: int) {
+	if length > cap(table^) {
+		reserve(table, max(length, 2 * cap(table^), 64))
+	}
+	resize(table, length)
+}
+
+table_grow_non_zero :: #force_inline proc(table: ^[dynamic]$T, length: int) {
+	if length > cap(table^) {
+		reserve(table, max(length, 2 * cap(table^), 64))
+	}
+	non_zero_resize(table, length)
+}
+

@@ -83,6 +83,10 @@ Material :: struct {
 	opacity:            f32,
 	side:               Side,
 	flags:              Material_Flags,
+	color_map:          Texture_Id,
+	normal_map:         Texture_Id,
+	roughness_map:      Texture_Id,
+	emissive_map:       Texture_Id,
 	shader:             Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
 	uniforms:           Uniform_Range,
@@ -267,13 +271,17 @@ shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int 
 // that is drawn and the flags both renderers' shading reads. Both build it
 // once per frame (the GPU's uniforms are these, packed).
 Shading_Material :: struct {
-	base:      Vec3, // linear
-	emissive:  Vec3, // linear, times intensity
-	opacity:   f32, // 1 unless blended
-	metalness: f32,
-	roughness: f32,
-	flags:     Shading_Flags,
-	shader:    Shader_Id, // 0: the standard material
+	base:          Vec3, // linear
+	emissive:      Vec3, // linear, times intensity
+	opacity:       f32, // 1 unless blended
+	metalness:     f32,
+	roughness:     f32,
+	flags:         Shading_Flags,
+	color_map:     Texture_Id,
+	normal_map:    Texture_Id,
+	roughness_map: Texture_Id,
+	emissive_map:  Texture_Id,
+	shader:        Shader_Id, // 0: the standard material
 }
 
 // Bit values are the shader's FLAG_* constants (o3d_test checks).
@@ -284,13 +292,23 @@ Shading_Flag :: enum u8 {
 	Two_Sided,
 	Blended,
 	Receive_Shadow,
+	Color_Map,
+	Normal_Map,
+	Roughness_Map,
+	Emissive_Map,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
 
+TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map}
+
 // From the draws' material column: `scene_materials(scene)`.
-shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material) {
-	resize(out, len(materials))
+shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material, textures: ^Textures = nil) {
+	table_grow_non_zero(out, len(materials))
+	has_tex :: #force_inline proc "contextless" (t: ^Textures, id: Texture_Id) -> bool {
+		_, ok := texture_get(t, id)
+		return ok
+	}
 	for m, i in materials {
 		f: Shading_Flags
 		if .Basic in m.flags {
@@ -308,14 +326,30 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		if .Receive_Shadow in m.flags {
 			f += {.Receive_Shadow}
 		}
+		if has_tex(textures, m.color_map) {
+			f += {.Color_Map}
+		}
+		if has_tex(textures, m.normal_map) && .Basic not_in m.flags {
+			f += {.Normal_Map}
+		}
+		if has_tex(textures, m.roughness_map) && .Basic not_in m.flags {
+			f += {.Roughness_Map}
+		}
+		if has_tex(textures, m.emissive_map) {
+			f += {.Emissive_Map}
+		}
 		out[i] = {
-			base      = linear(m.color),
-			emissive  = linear(m.emissive) * m.emissive_intensity,
-			opacity   = clamp(m.opacity, 0, 1) if .Blended in f else 1,
-			metalness = m.metalness,
-			roughness = m.roughness,
-			flags     = f,
-			shader    = m.shader,
+			base          = linear(m.color),
+			emissive      = linear(m.emissive) * m.emissive_intensity,
+			opacity       = clamp(m.opacity, 0, 1) if .Blended in f else 1,
+			metalness     = m.metalness,
+			roughness     = m.roughness,
+			flags         = f,
+			color_map     = m.color_map,
+			normal_map    = m.normal_map,
+			roughness_map = m.roughness_map,
+			emissive_map  = m.emissive_map,
+			shader        = m.shader,
 		}
 	}
 }
