@@ -27,9 +27,36 @@ Vertex :: struct {
 	uv:       Vec2,
 }
 
+// A skinned vertex's four joint indices (into the draw's joint matrices) and
+// weights (normalized to sum to 1), kept in `Geometries.skin_vertices` so
+// unskinned meshes stay as they are.
+Skin_Vertex :: struct {
+	joints:  [4]u16,
+	weights: Vec4,
+}
+
+// Applies linear blend skinning from `joints` to `v` in the draw's local
+// space, the same math as `vs_skinned` in shaders/o3d.slang.
+skin_vertex :: #force_inline proc "contextless" (v: Vertex, sv: Skin_Vertex, joints: []Mat4) -> (pos, norm: Vec3) {
+	last := u16(len(joints) - 1)
+	j0 := min(sv.joints[0], last)
+	j1 := min(sv.joints[1], last)
+	j2 := min(sv.joints[2], last)
+	j3 := min(sv.joints[3], last)
+	skin := Mat4(sv.weights.x) * joints[j0] +
+	        Mat4(sv.weights.y) * joints[j1] +
+	        Mat4(sv.weights.z) * joints[j2] +
+	        Mat4(sv.weights.w) * joints[j3]
+	pos = (skin * Vec4{v.position.x, v.position.y, v.position.z, 1}).xyz
+	norm = (skin * Vec4{v.normal.x, v.normal.y, v.normal.z, 0}).xyz
+	return
+}
+
 Geometry :: struct {
 	first_vertex, vertex_count: u32,
 	first_index, index_count:   u32,
+	first_skin:                 u32,
+	skinned:                    bool,
 	// Distance from the origin to the farthest vertex (culling, sorting).
 	radius:                     f32,
 }
@@ -68,13 +95,14 @@ PRIMITIVES := [Primitive]Builder {
 }
 
 Geometries :: struct {
-	generation: Generation, // of these contents, for the GPU's mirror
-	vertices: [dynamic]Vertex,
-	indices:  [dynamic]u32,
-	list:     [dynamic]Geometry,
-	keys:     map[Geometry_Key]Geometry_Id,
+	generation:    Generation, // of these contents, for the GPU's mirror
+	vertices:      [dynamic]Vertex,
+	skin_vertices: [dynamic]Skin_Vertex,
+	indices:       [dynamic]u32,
+	list:          [dynamic]Geometry,
+	keys:          map[Geometry_Key]Geometry_Id,
 	// A primitive is built here, then appended to the shared arrays.
-	scratch:  struct {
+	scratch:       struct {
 		vertices: [dynamic]Vertex,
 		indices:  [dynamic]u32,
 	},
@@ -82,6 +110,7 @@ Geometries :: struct {
 
 geometries_destroy :: proc(g: ^Geometries) {
 	delete(g.vertices)
+	delete(g.skin_vertices)
 	delete(g.indices)
 	delete(g.list)
 	delete(g.keys)
@@ -103,6 +132,15 @@ geometry_mesh :: proc "contextless" (g: ^Geometries, id: Geometry_Id) -> (vertic
 	return g.vertices[geo.first_vertex:][:geo.vertex_count], g.indices[geo.first_index:][:geo.index_count], true
 }
 
+// A geometry's skinning vertices (nil when unskinned).
+geometry_skin :: proc "contextless" (g: ^Geometries, id: Geometry_Id) -> []Skin_Vertex {
+	geo, ok := geometry_get(g, id)
+	if !ok || !geo.skinned {
+		return nil
+	}
+	return g.skin_vertices[geo.first_skin:][:geo.vertex_count]
+}
+
 // Adds geometry made by the caller (copied; indices count from 0).
 // How many geometries have been made (each kept): a host compares it across
 // frames to find a scene that makes geometry every frame.
@@ -110,14 +148,27 @@ geometries_made :: proc "contextless" (g: ^Geometries) -> int {
 	return len(g.list)
 }
 
-geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32) -> Geometry_Id {
+geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: []Skin_Vertex = nil) -> Geometry_Id {
 	generation_take(&g.generation)
 	r: f32
 	for v in vertices {
 		r = max(r, linalg.length(v.position))
 	}
-	append(&g.list, Geometry{u32(len(g.vertices)), u32(len(vertices)), u32(len(g.indices)), u32(len(indices)), r})
+	skinned := len(skin) == len(vertices) && len(skin) > 0
+	first_skin := u32(len(g.skin_vertices)) if skinned else 0
+	append(&g.list, Geometry{
+		first_vertex = u32(len(g.vertices)),
+		vertex_count = u32(len(vertices)),
+		first_index  = u32(len(g.indices)),
+		index_count  = u32(len(indices)),
+		first_skin   = first_skin,
+		skinned      = skinned,
+		radius       = r,
+	})
 	append(&g.vertices, ..vertices)
+	if skinned {
+		append(&g.skin_vertices, ..skin)
+	}
 	append(&g.indices, ..indices)
 	return Geometry_Id(len(g.list))
 }

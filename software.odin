@@ -128,6 +128,7 @@ Worker :: struct {
 	vm:        oksl.Scratch,
 	positions: [dynamic][4]f32, // clip space
 	values:    [dynamic]f32,
+	skinned:   [dynamic]Vertex, // posed chunk vertices for a skinned ShaderMaterial
 	quads:     struct {
 		origin:  [dynamic][2]i32,
 		helpers: [dynamic]oksl.Quad_Lanes,
@@ -145,6 +146,7 @@ worker_destroy :: proc(w: ^Worker) {
 	oksl.scratch_destroy(&w.vm)
 	delete(w.positions)
 	delete(w.values)
+	delete(w.skinned)
 	delete(w.quads.origin)
 	delete(w.quads.helpers)
 	delete(w.quads.facing)
@@ -296,6 +298,9 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	di := s.order[c.order]
 	d := &job.scene.draws[di]
 	vertices, all, _ := geometry_mesh(job.geos, d.geometry)
+	skin := geometry_skin(job.geos, d.geometry)
+	joints := scene_draw_joints(job.scene, di)
+	skinned := len(skin) > 0 && len(joints) > 0
 	indices := all[c.first * 3:][:c.count * 3]
 	lo, hi := max(u32), u32(0)
 	for i in indices {
@@ -313,23 +318,43 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	table_grow_non_zero(&w.values, count * nf)
 	if job.depth_only {
 		mvp := job.view_proj * d.model
-		for vtx, i in vertices[lo:][:count] {
-			w.positions[i] = mvp * Vec4{vtx.position.x, vtx.position.y, vtx.position.z, 1}
+		if skinned {
+			for vtx, i in vertices[lo:][:count] {
+				pos, _ := skin_vertex(vtx, skin[int(lo) + i], joints)
+				w.positions[i] = mvp * Vec4{pos.x, pos.y, pos.z, 1}
+			}
+		} else {
+			for vtx, i in vertices[lo:][:count] {
+				w.positions[i] = mvp * Vec4{vtx.position.x, vtx.position.y, vtx.position.z, 1}
+			}
 		}
 	} else if sh == nil {
 		mvp := job.view_proj * d.model
 		nm := normal_matrix(d.model)
 		for vtx, i in vertices[lo:][:count] {
-			p := Vec4{vtx.position.x, vtx.position.y, vtx.position.z, 1}
+			pos, norm := vtx.position, vtx.normal
+			if skinned {
+				pos, norm = skin_vertex(vtx, skin[int(lo) + i], joints)
+			}
+			p := Vec4{pos.x, pos.y, pos.z, 1}
 			w.positions[i] = mvp * p
 			base := i * nf
 			(^Vec3)(&w.values[base])^ = (d.model * p).xyz
-			(^Vec3)(&w.values[base + 3])^ = (nm * Vec4{vtx.normal.x, vtx.normal.y, vtx.normal.z, 0}).xyz
+			(^Vec3)(&w.values[base + 3])^ = (nm * Vec4{norm.x, norm.y, norm.z, 0}).xyz
 			if textured {
 				(^Vec2)(&w.values[base + 6])^ = vtx.uv
 			}
 		}
 	} else {
+		src_verts := vertices[lo:][:count]
+		if skinned {
+			table_grow_non_zero(&w.skinned, count)
+			for vtx, i in src_verts {
+				pos, norm := skin_vertex(vtx, skin[int(lo) + i], joints)
+				w.skinned[i] = {pos, norm, vtx.uv}
+			}
+			src_verts = w.skinned[:count]
+		}
 		attrs: [16]oksl.Attribute
 		for a in Vertex_Attribute {
 			loc := sh.attributes[a]
@@ -337,7 +362,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 				continue
 			}
 			row := VERTEX_ATTRIBUTES[a]
-			attrs[loc] = {rawptr(uintptr(&vertices[lo]) + row.offset), size_of(Vertex), .Float2 if row.components == 2 else .Float3}
+			attrs[loc] = {rawptr(uintptr(&src_verts[0]) + row.offset), size_of(Vertex), .Float2 if row.components == 2 else .Float3}
 		}
 		oksl.run_vertex(&sh.pipeline.vertex.program, block(&s.blocks, di, .Vertex), attrs[:], count, w.positions[:], w.values[:], &w.vm)
 	}

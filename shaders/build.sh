@@ -9,6 +9,7 @@ cd "$(dirname "$0")"
 FLAGS=(-matrix-layout-column-major -O2 -I .)
 UNITS=(
 	o3d:vert:vs_main
+	o3d:skinned_vert:vs_skinned
 	o3d:frag:fs_main
 	o3d:shadow:fs_shadow
 	background:vert:vs_main

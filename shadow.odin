@@ -84,7 +84,7 @@ shadow_casters :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, sh: 
 		if .Cast_Shadow not_in m.flags || (m.shader != 0 && shader_get(shaders, m.shader) == nil) {
 			continue
 		}
-		if draw_seen(geos, geometries[i], models[i], sh.view_proj) {
+		if draw_seen(geos, geometries[i], models[i], sh.view_proj, scene_draw_joints(scene, i)) {
 			append(order, i)
 		}
 	}
@@ -136,13 +136,30 @@ shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: 
 	return lit / 9
 }
 
+@(private = "file")
+mat_scale :: #force_inline proc "contextless" (m: Mat4) -> f32 {
+	return max(
+		linalg.length(Vec3{m[0, 0], m[1, 0], m[2, 0]}),
+		linalg.length(Vec3{m[0, 1], m[1, 1], m[2, 1]}),
+		linalg.length(Vec3{m[0, 2], m[1, 2], m[2, 2]}),
+	)
+}
+
 // Whether a draw can be seen through `view_proj`: it has geometry and its
-// bounding sphere (scaled with the draw) is at least partly inside.
-draw_seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4) -> bool {
+// bounding sphere (covering its posed joints when skinned, and scaled with
+// the draw) is at least partly inside.
+draw_seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4, joints: []Mat4 = nil) -> bool {
 	geo := geometry_get(geos, id) or_return
 	if geo.index_count == 0 {
 		return false
 	}
-	scale := max(linalg.length(Vec3{model[0, 0], model[1, 0], model[2, 0]}), linalg.length(Vec3{model[0, 1], model[1, 1], model[2, 1]}), linalg.length(Vec3{model[0, 2], model[1, 2], model[2, 2]}))
-	return sphere_visible(view_proj, {model[0, 3], model[1, 3], model[2, 3]}, geo.radius * scale)
+	r := geo.radius
+	if len(joints) > 0 {
+		posed: f32
+		for j in joints {
+			posed = max(posed, linalg.length(Vec3{j[0, 3], j[1, 3], j[2, 3]}) + mat_scale(j) * r)
+		}
+		r = posed
+	}
+	return sphere_visible(view_proj, {model[0, 3], model[1, 3], model[2, 3]}, r * mat_scale(model))
 }

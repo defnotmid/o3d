@@ -106,6 +106,12 @@ Uniform_Range :: struct {
 	first, count: u32,
 }
 
+MAX_JOINTS :: 64
+
+Joint_Range :: struct {
+	first, count: u32,
+}
+
 MATERIAL_DEFAULT :: Material{color = {1, 1, 1}, metalness = 0, roughness = 1, emissive_intensity = 1, opacity = 1}
 
 Draw :: struct {
@@ -131,6 +137,9 @@ Scene :: struct {
 		first, count: u32,
 	},
 	uniform_floats:        [dynamic]f32,
+	// Skinned draws' joint matrices: draw i's are joints[draw_joints[i].first:][:draw_joints[i].count].
+	draw_joints:           [dynamic]Joint_Range,
+	joints:                [dynamic]Mat4,
 }
 
 scene_clear :: proc(s: ^Scene) {
@@ -144,6 +153,8 @@ scene_clear :: proc(s: ^Scene) {
 	clear(&s.draws)
 	clear(&s.uniforms)
 	clear(&s.uniform_floats)
+	clear(&s.draw_joints)
+	clear(&s.joints)
 }
 
 // Keeps uniforms for a material (`Material.uniforms`) this frame.
@@ -156,6 +167,44 @@ scene_uniforms :: proc(s: ^Scene, values: ..Uniform) -> Uniform_Range {
 	return r
 }
 
+// Keeps joint matrices in `s.joints` this frame.
+scene_joints :: proc(s: ^Scene, matrices: []Mat4) -> Joint_Range {
+	if len(matrices) == 0 {
+		return {}
+	}
+	first := len(s.joints)
+	table_grow_non_zero(&s.joints, first + len(matrices))
+	copy(s.joints[first:], matrices)
+	return {u32(first), u32(len(matrices))}
+}
+
+// Associates `r` with draw `di` for this frame.
+scene_set_draw_joints :: proc(s: ^Scene, di: int, r: Joint_Range) {
+	if r.count == 0 {
+		return
+	}
+	if len(s.draw_joints) <= di {
+		old := len(s.draw_joints)
+		table_grow_non_zero(&s.draw_joints, di + 1)
+		for i in old ..< di {
+			s.draw_joints[i] = {}
+		}
+	}
+	s.draw_joints[di] = r
+}
+
+// Draw `di`'s joint matrices (nil when unskinned).
+scene_draw_joints :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []Mat4 {
+	if di < 0 || di >= len(s.draw_joints) {
+		return nil
+	}
+	r := s.draw_joints[di]
+	if r.count == 0 || int(r.first + r.count) > len(s.joints) {
+		return nil
+	}
+	return s.joints[r.first:][:r.count]
+}
+
 // The draws' materials, one column of the table.
 scene_materials :: proc "contextless" (s: ^Scene) -> []Material {
 	return s.draws.material[:len(s.draws)]
@@ -166,6 +215,8 @@ scene_destroy :: proc(s: ^Scene) {
 	delete(s.draws)
 	delete(s.uniforms)
 	delete(s.uniform_floats)
+	delete(s.draw_joints)
+	delete(s.joints)
 	s^ = {}
 }
 
@@ -196,13 +247,13 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	geometries := scene.draws.geometry[:n]
 	view_proj := proj * view
 	for m, i in materials {
-		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj) {
+		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i)) {
 			append(order, i)
 		}
 	}
 	first := len(order)
 	for m, i in materials {
-		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj) {
+		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i)) {
 			append(order, i)
 		}
 	}

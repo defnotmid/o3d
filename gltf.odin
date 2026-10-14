@@ -18,7 +18,8 @@ import "vendor:cgltf"
 // the metallicRoughness texture as both roughness (green) and metalness
 // (blue) map; alphaMode OPAQUE ignores alpha, BLEND blends, MASK draws
 // opaque (no alpha cutoff yet); a primitive without normals is flat shaded,
-// as the spec asks. Not imported: skins, morph targets, cameras, lights,
+// as the spec asks; skins (`JOINTS_0`, `WEIGHTS_0`, `inverseBindMatrices`)
+// deform meshes in `gltf_draw`. Not imported: morph targets, cameras, lights,
 // extensions (KHR_*), texture transforms, a second uv set.
 
 // Why a glTF did not load; GLTF_ERROR_TEXT says it in words.
@@ -102,11 +103,17 @@ Model_Mesh :: struct {
 Model_Primitive :: struct {
 	geometry: Geometry_Id,
 	material: Material,
+	skinned:  bool,
+}
+
+Model_Skin :: struct {
+	first_joint, joint_count: u32,
 }
 
 Model_Node :: struct {
 	parent:      i32, // -1 for root nodes; always < current node index
 	mesh:        i32, // -1 if none, else index in `Model.meshes`
+	skin:        i32, // -1 if none, else index in `Model.skins`
 	has_matrix:  bool,
 	translation: Vec3,
 	rotation:    linalg.Quaternionf32,
@@ -129,27 +136,31 @@ Model_Channel :: struct {
 }
 
 Model :: struct {
-	meshes:     [dynamic]Model_Mesh,
-	primitives: [dynamic]Model_Primitive,
-	nodes:      #soa[dynamic]Model_Node,
-	animations: [dynamic]Model_Animation,
-	channels:   [dynamic]Model_Channel,
-	times:      [dynamic]f32,
-	values:     [dynamic]Vec4,
+	meshes:       [dynamic]Model_Mesh,
+	primitives:   [dynamic]Model_Primitive,
+	nodes:        #soa[dynamic]Model_Node,
+	skins:        [dynamic]Model_Skin,
+	skin_joints:  [dynamic]u32,
+	inverse_bind: [dynamic]Mat4,
+	animations:   [dynamic]Model_Animation,
+	channels:     [dynamic]Model_Channel,
+	times:        [dynamic]f32,
+	values:       [dynamic]Vec4,
 	// The pose `gltf_draw` uses when the caller gives none.
-	scratch:    Model_Pose,
+	scratch:      Model_Pose,
 }
 
 // Where `gltf_draw` poses a model: per node, the animated transform and the
-// world matrix. A model is only read while it is drawn with a caller's pose,
-// so threads may pose one model at once, each with its own (sized on first
-// use, reused: no allocation after).
+// world matrix, plus the posed joint matrices for skins. A model is only read
+// while it is drawn with a caller's pose, so threads may pose one model at
+// once, each with its own (sized on first use, reused: no allocation after).
 Model_Pose :: struct {
 	translation: [dynamic]Vec3,
 	rotation:    [dynamic]linalg.Quaternionf32,
 	scale:       [dynamic]Vec3,
 	dirty:       [dynamic]bool,
 	world:       [dynamic]Mat4,
+	joints:      [dynamic]Mat4,
 }
 
 model_pose_destroy :: proc(p: ^Model_Pose) {
@@ -158,6 +169,7 @@ model_pose_destroy :: proc(p: ^Model_Pose) {
 	delete(p.scale)
 	delete(p.dirty)
 	delete(p.world)
+	delete(p.joints)
 	p^ = {}
 }
 
@@ -168,6 +180,9 @@ model_destroy :: proc(m: ^Model) {
 	delete(m.meshes)
 	delete(m.primitives)
 	delete(m.nodes)
+	delete(m.skins)
+	delete(m.skin_joints)
+	delete(m.inverse_bind)
 	delete(m.animations)
 	delete(m.channels)
 	delete(m.times)
@@ -236,10 +251,11 @@ gltf_animation :: proc "contextless" (m: ^Model, name: string) -> int {
 // Evaluates `m`'s node hierarchy (and optional keyframe animation `anim` at
 // `time` seconds) under `transform` and appends its mesh primitives to
 // `scene.draws`. `flags` (e.g. `{.Cast_Shadow, .Receive_Shadow}`) are merged
-// into each primitive's material flags. `pose` is where it is posed (nil:
+// into each primitive's material flags; `override_material` replaces every
+// primitive's material when non-nil. `pose` is where it is posed (nil:
 // the model's own, so one thread at a time); with the caller's, the model is
 // only read. Zero allocations on warm frames.
-gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil) {
+gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil, override_material: ^Material = nil) {
 	n := len(m.nodes)
 	if n == 0 {
 		return
@@ -251,6 +267,9 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		resize(&p.scale, n)
 		resize(&p.dirty, n)
 		resize(&p.world, n)
+	}
+	if len(p.joints) != len(m.skin_joints) {
+		resize(&p.joints, len(m.skin_joints))
 	}
 	has_anim := anim >= 0 && anim < len(m.animations)
 	if has_anim {
@@ -292,6 +311,7 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 
 	parents := m.nodes.parent[:n]
 	meshes := m.nodes.mesh[:n]
+	skins := m.nodes.skin[:n]
 	locals := m.nodes.local[:n]
 	world := p.world[:n]
 	for i in 0 ..< n {
@@ -301,19 +321,38 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		}
 		parent := parents[i]
 		world[i] = (world[parent] * local) if parent >= 0 else (transform * local)
+	}
+	for i in 0 ..< n {
 		mi := meshes[i]
 		if mi < 0 || int(mi) >= len(m.meshes) {
 			continue
 		}
+		var_joints: Joint_Range
+		if si := skins[i]; si >= 0 && int(si) < len(m.skins) {
+			skin := m.skins[si]
+			jcount := int(skin.joint_count)
+			if jcount > 0 {
+				inv_mesh := linalg.inverse(world[i])
+				out_joints := p.joints[skin.first_joint:][:jcount]
+				skin_nodes := m.skin_joints[skin.first_joint:][:jcount]
+				ibms := m.inverse_bind[skin.first_joint:][:jcount]
+				for j in 0 ..< jcount {
+					jn := skin_nodes[j]
+					jw := world[jn] if int(jn) < n else linalg.MATRIX4F32_IDENTITY
+					out_joints[j] = inv_mesh * jw * ibms[j]
+				}
+				var_joints = scene_joints(scene, out_joints)
+			}
+		}
 		mesh := m.meshes[mi]
 		for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
-			mat := prim.material
+			mat := override_material^ if override_material != nil else prim.material
 			mat.flags += flags
-			append(&scene.draws, Draw{
-				geometry = prim.geometry,
-				model    = world[i],
-				material = mat,
-			})
+			di := len(scene.draws)
+			append(&scene.draws, Draw{prim.geometry, world[i], mat})
+			if prim.skinned && var_joints.count > 0 {
+				scene_set_draw_joints(scene, di, var_joints)
+			}
 		}
 	}
 }
@@ -333,6 +372,7 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 	// 2. Build meshes and primitives into `geos` and `m.primitives`.
 	reserve(&m.meshes, len(data.meshes))
 	v_scratch := make([dynamic]Vertex, context.temp_allocator)
+	s_scratch := make([dynamic]Skin_Vertex, context.temp_allocator)
 	i_scratch := make([dynamic]u32, context.temp_allocator)
 	f_scratch := make([dynamic]f32, context.temp_allocator)
 
@@ -342,7 +382,7 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 			if gp.type != .triangles {
 				continue
 			}
-			geo_id, has_normals := build_primitive(geos, &gp, &v_scratch, &i_scratch, &f_scratch)
+			geo_id, has_normals, has_skin := build_primitive(geos, &gp, &v_scratch, &s_scratch, &i_scratch, &f_scratch)
 			if geo_id == 0 {
 				continue
 			}
@@ -350,7 +390,7 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 			if !has_normals {
 				material.flags += {.Flat_Shading}
 			}
-			append(&m.primitives, Model_Primitive{geometry = geo_id, material = material})
+			append(&m.primitives, Model_Primitive{geometry = geo_id, material = material, skinned = has_skin})
 		}
 		append(&m.meshes, Model_Mesh{
 			first_primitive = first_prim,
@@ -377,6 +417,14 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 			}
 		}
 	}
+	for &gs in data.skins {
+		for jn in gs.joints {
+			emit_node(data, jn, -1, &m, node_map)
+		}
+	}
+
+	// 4. Flatten skins (joint node indices and inverse bind matrices).
+	build_skins(data, &m, node_map, &f_scratch)
 
 	num_nodes := len(m.nodes)
 	resize(&m.scratch.translation, num_nodes)
@@ -384,8 +432,9 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 	resize(&m.scratch.scale, num_nodes)
 	resize(&m.scratch.dirty, num_nodes)
 	resize(&m.scratch.world, num_nodes)
+	resize(&m.scratch.joints, len(m.skin_joints))
 
-	// 4. Flatten animations and keyframe samplers.
+	// 5. Flatten animations and keyframe samplers.
 	build_animations(data, &m, node_map, &f_scratch)
 	return m
 }
@@ -418,10 +467,10 @@ load_gltf_image :: proc(t: ^Textures, img: ^cgltf.image, base_dir: string) -> Te
 	return 0
 }
 
-// A triangle primitive into `geos` (0: none), and whether it had normals.
+// A triangle primitive into `geos` (0: none), and whether it had normals and skinning.
 @(private = "file")
-build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dynamic]Vertex, indices: ^[dynamic]u32, floats: ^[dynamic]f32) -> (id: Geometry_Id, has_normals: bool) {
-	pos_acc, norm_acc, uv_acc: ^cgltf.accessor
+build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dynamic]Vertex, skin: ^[dynamic]Skin_Vertex, indices: ^[dynamic]u32, floats: ^[dynamic]f32) -> (id: Geometry_Id, has_normals, has_skin: bool) {
+	pos_acc, norm_acc, uv_acc, joints_acc, weights_acc: ^cgltf.accessor
 	for &attr in prim.attributes {
 		switch attr.type {
 		case .position:
@@ -436,11 +485,19 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 			if attr.index == 0 {
 				uv_acc = attr.data
 			}
-		case .invalid, .tangent, .color, .joints, .weights, .custom:
+		case .joints:
+			if attr.index == 0 {
+				joints_acc = attr.data
+			}
+		case .weights:
+			if attr.index == 0 {
+				weights_acc = attr.data
+			}
+		case .invalid, .tangent, .color, .custom:
 		}
 	}
 	if pos_acc == nil || pos_acc.count == 0 {
-		return 0, false
+		return 0, false, false
 	}
 	vcount := int(pos_acc.count)
 	table_grow(verts, vcount)
@@ -470,6 +527,30 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 		}
 	}
 
+	has_skin = joints_acc != nil && weights_acc != nil && int(joints_acc.count) == vcount && int(weights_acc.count) == vcount
+	if has_skin {
+		table_grow_non_zero(skin, vcount)
+		table_grow_non_zero(floats, vcount * 4)
+		_ = cgltf.accessor_unpack_floats(weights_acc, raw_data(floats^), uint(vcount * 4))
+		for i in 0 ..< vcount {
+			j: [4]u32
+			_ = cgltf.accessor_read_uint(joints_acc, uint(i), &j[0], 4)
+			w := Vec4{
+				max(floats[i * 4 + 0], 0),
+				max(floats[i * 4 + 1], 0),
+				max(floats[i * 4 + 2], 0),
+				max(floats[i * 4 + 3], 0),
+			}
+			sum := w.x + w.y + w.z + w.w
+			w = w / sum if sum > 1e-8 else Vec4{1, 0, 0, 0}
+			joints: [4]u16
+			for k in 0 ..< 4 {
+				joints[k] = u16(min(j[k], u32(MAX_JOINTS - 1))) if w[k] > 0 else 0
+			}
+			skin[i] = {joints, w}
+		}
+	}
+
 	if prim.indices != nil {
 		icount := int(prim.indices.count)
 		table_grow_non_zero(indices, icount)
@@ -477,7 +558,7 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 		// validate checked them; a renderer indexes vertices by them unchecked.
 		for i in indices^ {
 			if int(i) >= vcount {
-				return 0, false
+				return 0, false, false
 			}
 		}
 	} else {
@@ -509,7 +590,7 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 		}
 	}
 
-	return geometry_add(geos, verts[:], indices[:]), has_normals
+	return geometry_add(geos, verts[:], indices[:], skin[:] if has_skin else nil), has_normals, has_skin
 }
 
 @(private = "file")
@@ -592,6 +673,13 @@ emit_node :: proc(data: ^cgltf.data, gn: ^cgltf.node, parent_idx: i32, m: ^Model
 			mesh_idx = i32(mi)
 		}
 	}
+	skin_idx: i32 = -1
+	if gn.skin != nil && len(data.skins) > 0 {
+		si := int(uintptr(gn.skin) - uintptr(raw_data(data.skins))) / size_of(cgltf.skin)
+		if si >= 0 && si < len(data.skins) {
+			skin_idx = i32(si)
+		}
+	}
 
 	t := Vec3(gn.translation) if gn.has_translation else Vec3{0, 0, 0}
 	r := quaternion(x = gn.rotation[0], y = gn.rotation[1], z = gn.rotation[2], w = gn.rotation[3]) if gn.has_rotation else linalg.QUATERNIONF32_IDENTITY
@@ -614,6 +702,7 @@ emit_node :: proc(data: ^cgltf.data, gn: ^cgltf.node, parent_idx: i32, m: ^Model
 	append(&m.nodes, Model_Node{
 		parent      = parent,
 		mesh        = mesh_idx,
+		skin        = skin_idx,
 		has_matrix  = bool(gn.has_matrix),
 		translation = t,
 		rotation    = r,
@@ -622,6 +711,49 @@ emit_node :: proc(data: ^cgltf.data, gn: ^cgltf.node, parent_idx: i32, m: ^Model
 	})
 	for child in gn.children {
 		emit_node(data, child, my_idx, m, node_map)
+	}
+}
+
+@(private = "file")
+build_skins :: proc(data: ^cgltf.data, m: ^Model, node_map: []i32, floats: ^[dynamic]f32) {
+	if len(data.skins) == 0 || len(data.nodes) == 0 {
+		return
+	}
+	reserve(&m.skins, len(data.skins))
+	for &gs in data.skins {
+		first_joint := u32(len(m.skin_joints))
+		jcount := min(len(gs.joints), MAX_JOINTS)
+		has_ibm := gs.inverse_bind_matrices != nil && int(gs.inverse_bind_matrices.count) >= jcount
+		if has_ibm {
+			table_grow_non_zero(floats, jcount * 16)
+			_ = cgltf.accessor_unpack_floats(gs.inverse_bind_matrices, raw_data(floats^), uint(jcount * 16))
+		}
+		for j in 0 ..< jcount {
+			jn := gs.joints[j]
+			node_idx: u32
+			if jn != nil {
+				raw_node := int(uintptr(jn) - uintptr(raw_data(data.nodes))) / size_of(cgltf.node)
+				if raw_node >= 0 && raw_node < len(node_map) && node_map[raw_node] >= 0 {
+					node_idx = u32(node_map[raw_node])
+				}
+			}
+			append(&m.skin_joints, node_idx)
+			ibm := linalg.MATRIX4F32_IDENTITY
+			if has_ibm {
+				cm := floats[j * 16:]
+				ibm = Mat4{
+					cm[0], cm[4], cm[8],  cm[12],
+					cm[1], cm[5], cm[9],  cm[13],
+					cm[2], cm[6], cm[10], cm[14],
+					cm[3], cm[7], cm[11], cm[15],
+				}
+			}
+			append(&m.inverse_bind, ibm)
+		}
+		append(&m.skins, Model_Skin{
+			first_joint = first_joint,
+			joint_count = u32(jcount),
+		})
 	}
 }
 

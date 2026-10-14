@@ -40,6 +40,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"textures", 200, 150, build_textures},
 	{"environment", 200, 150, build_environment},
 	{"gltf", 160, 120, build_gltf},
+	{"skinned", 160, 120, build_skinned},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -383,3 +384,77 @@ build_gltf :: proc(a: ^Parity_Assets) -> string {
 	o3d.gltf_draw(&a.scene, &a.model, anim = 0, time = 0.35)
 	return ""
 }
+
+// A 2-joint skinned glTF bar bent at t = 0.65, casting a shadow onto a floor.
+@(private = "file")
+build_skinned :: proc(a: ^Parity_Assets) -> string {
+	Bin :: struct #packed {
+		pos:     [6][3]f32,
+		norm:    [6][3]f32,
+		joints:  [6][4]u16,
+		weights: [6][4]f32,
+		idx:     [12]u16,
+		ibm:     [2]o3d.Mat4,
+		times:   [2]f32,
+		rot:     [2][4]f32,
+	}
+	s45 := math.sqrt_f32(0.5)
+	ibm0 := o3d.Mat4(1)
+	ibm1 := o3d.Mat4(1)
+	ibm1[1, 3] = -1
+	b := Bin {
+		pos = {
+			{-0.3, 0, 0}, {0.3, 0, 0},
+			{-0.3, 1, 0}, {0.3, 1, 0},
+			{-0.3, 2, 0}, {0.3, 2, 0},
+		},
+		norm = {
+			{0, 0, 1}, {0, 0, 1},
+			{0, 0, 1}, {0, 0, 1},
+			{0, 0, 1}, {0, 0, 1},
+		},
+		joints = {
+			{0, 0, 0, 0}, {0, 0, 0, 0},
+			{0, 1, 0, 0}, {0, 1, 0, 0},
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+		},
+		weights = {
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+			{0.5, 0.5, 0, 0}, {0.5, 0.5, 0, 0},
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+		},
+		idx   = {0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4},
+		ibm   = {ibm0, ibm1},
+		times = {0, 1},
+		rot   = {{0, 0, 0, 1}, {0, 0, s45, s45}},
+	}
+	encoded := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	src := fmt.tprintf(
+		`{{"asset":{{"version":"2.0"}},"buffers":[{{"uri":"data:application/octet-stream;base64,%s","byteLength":%d}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":72}},{{"buffer":0,"byteOffset":72,"byteLength":72}},{{"buffer":0,"byteOffset":144,"byteLength":48}},{{"buffer":0,"byteOffset":192,"byteLength":96}},{{"buffer":0,"byteOffset":288,"byteLength":24}},{{"buffer":0,"byteOffset":312,"byteLength":128}},{{"buffer":0,"byteOffset":440,"byteLength":8}},{{"buffer":0,"byteOffset":448,"byteLength":32}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":1,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":2,"componentType":5123,"count":6,"type":"VEC4"}},{{"bufferView":3,"componentType":5126,"count":6,"type":"VEC4"}},{{"bufferView":4,"componentType":5123,"count":12,"type":"SCALAR"}},{{"bufferView":5,"componentType":5126,"count":2,"type":"MAT4"}},{{"bufferView":6,"componentType":5126,"count":2,"type":"SCALAR"}},{{"bufferView":7,"componentType":5126,"count":2,"type":"VEC4"}}],"materials":[{{"pbrMetallicRoughness":{{"baseColorFactor":[0.9,0.4,0.2,1],"metallicFactor":0.1,"roughnessFactor":0.4}},"doubleSided":true}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"JOINTS_0":2,"WEIGHTS_0":3}},"indices":4,"material":0}}]}}],"skins":[{{"inverseBindMatrices":5,"joints":[1,2]}}],"nodes":[{{"mesh":0,"skin":0}},{{"children":[2]}},{{"translation":[0,1,0]}}],"scenes":[{{"nodes":[0,1]}}],"scene":0,"animations":[{{"name":"bend","samplers":[{{"input":6,"output":7,"interpolation":"LINEAR"}}],"channels":[{{"sampler":0,"target":{{"node":2,"path":"rotation"}}}}]}}]}}`,
+		encoded,
+		size_of(Bin),
+	)
+	err: o3d.Gltf_Error
+	a.model, err = o3d.gltf_parse(transmute([]u8)src, &a.geos, &a.textures)
+	if err != .None {
+		return o3d.GLTF_ERROR_TEXT[err]
+	}
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {0.4, 1.4, 3.8}, target = {-0.2, 0.8, 0}, fov = 45, near = 0.1, far = 30}
+	append(&a.scene.lights, o3d.Light{
+		kind        = .Directional,
+		color       = {1, 0.95, 0.85},
+		intensity   = 2.6,
+		position    = {2, 4, 3},
+		target      = {0, 0.5, 0},
+		cast_shadow = true,
+		shadow      = {map_size = 512, height = 6, bias = -0.002, normal_bias = 0.01},
+	})
+	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness, floor.flags = {0.45, 0.48, 0.52}, 0.9, {.Receive_Shadow}
+	append(&a.scene.draws, o3d.Draw{geometry = o3d.plane(&a.geos, 5, 5), model = o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), material = floor})
+	o3d.gltf_draw(&a.scene, &a.model, anim = 0, time = 0.65, flags = {.Cast_Shadow, .Receive_Shadow})
+	return ""
+}
+

@@ -16,8 +16,10 @@ import o3d ".."
 import "deps:oksl"
 
 VERT_SPV :: #load("../shaders/o3d.vert.spv")
+SKINNED_VERT_SPV :: #load("../shaders/o3d.skinned_vert.spv")
 FRAG_SPV :: #load("../shaders/o3d.frag.spv")
 VERT_MSL :: #load("../shaders/o3d.vert.msl")
+SKINNED_VERT_MSL :: #load("../shaders/o3d.skinned_vert.msl")
 FRAG_MSL :: #load("../shaders/o3d.frag.msl")
 SHADOW_SPV :: #load("../shaders/o3d.shadow.spv")
 SHADOW_MSL :: #load("../shaders/o3d.shadow.msl")
@@ -38,52 +40,58 @@ Pool_Buffer :: struct {
 }
 
 GPU :: struct {
-	device:           ^sdl.GPUDevice,
-	owns_device:      bool,
-	vert, frag:       ^sdl.GPUShader,
-	bg_vert, bg_frag: ^sdl.GPUShader,
-	samples:          sdl.GPUSampleCount,
-	depth_format:     sdl.GPUTextureFormat,
+	device:                   ^sdl.GPUDevice,
+	owns_device:              bool,
+	vert, skinned_vert, frag: ^sdl.GPUShader,
+	bg_vert, bg_frag:         ^sdl.GPUShader,
+	samples:                  sdl.GPUSampleCount,
+	depth_format:             sdl.GPUTextureFormat,
 	// By the material's side, then blended or not.
-	pipelines:        [o3d.Side][2]^sdl.GPUGraphicsPipeline,
-	bg_pipeline:      ^sdl.GPUGraphicsPipeline,
+	pipelines:                [o3d.Side][2]^sdl.GPUGraphicsPipeline,
+	skinned_pipelines:        [o3d.Side][2]^sdl.GPUGraphicsPipeline,
+	bg_pipeline:              ^sdl.GPUGraphicsPipeline,
 	// The multisampled colour and depth targets, at `size`.
 	// The frame's targets, at `capacity`: a frame draws into their top-left
 	// width x height and is copied out, so frames of other sizes (several
 	// views, a view whose size animates) reuse them; they only grow. `color`
 	// is multisampled when `samples` is, resolved into `resolved`.
-	color, depth:     ^sdl.GPUTexture,
-	resolved:         ^sdl.GPUTexture,
-	capacity:         [2]u32,
-	vertices:         Pool_Buffer,
-	indices:          Pool_Buffer,
+	color, depth:             ^sdl.GPUTexture,
+	resolved:                 ^sdl.GPUTexture,
+	capacity:                 [2]u32,
+	vertices:                 Pool_Buffer,
+	skin_vertices:            Pool_Buffer,
+	indices:                  Pool_Buffer,
+	custom_skinned:           Pool_Buffer,
 	// The generations of the tables mirrored (geometry, textures, shaders'
 	// pipelines): a different one (new contents, ids reused) starts over.
-	mirrored:         struct {
+	mirrored:                 struct {
 		geometry, textures, shaders: o3d.Generation,
 	},
 	// Per texture (its id - 1): `Textures.list` mirrored on the GPU.
-	textures:         [dynamic]^sdl.GPUTexture,
-	dummy_texture:    ^sdl.GPUTexture,
-	linear_sampler:   ^sdl.GPUSampler,
-	env_sampler:      ^sdl.GPUSampler,
+	textures:                 [dynamic]^sdl.GPUTexture,
+	dummy_texture:            ^sdl.GPUTexture,
+	linear_sampler:           ^sdl.GPUSampler,
+	env_sampler:              ^sdl.GPUSampler,
 	// Per shader (its id - 1): ShaderMaterials' GPU shaders and pipelines,
 	// made the first time a frame draws with them.
-	custom:           [dynamic]Custom,
+	custom:                   [dynamic]Custom,
 	// The shadow pass (shadow.odin): its fragment shader (depth out), its
 	// pipelines by the casters' material side, the map (depth per texel,
 	// read by the main pass) and its depth buffer at `shadow_size` squared.
-	shadow_frag:      ^sdl.GPUShader,
-	shadow_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
-	shadow_map:       ^sdl.GPUTexture,
-	shadow_depth:     ^sdl.GPUTexture,
-	shadow_size:      u32,
-	shadow_sampler:   ^sdl.GPUSampler,
-	casters:          [dynamic]int,
+	shadow_frag:              ^sdl.GPUShader,
+	shadow_pipelines:         [o3d.Side]^sdl.GPUGraphicsPipeline,
+	shadow_skinned_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
+	shadow_map:               ^sdl.GPUTexture,
+	shadow_depth:             ^sdl.GPUTexture,
+	shadow_size:              u32,
+	shadow_sampler:           ^sdl.GPUSampler,
+	casters:                  [dynamic]int,
 	// Scratch per frame.
-	order:            [dynamic]int,
-	materials:        [dynamic]o3d.Shading_Material, // per draw
-	blocks:           o3d.Shader_Blocks,
+	order:                    [dynamic]int,
+	materials:                [dynamic]o3d.Shading_Material, // per draw
+	blocks:                   o3d.Shader_Blocks,
+	custom_skinned_verts:     [dynamic]o3d.Vertex,
+	custom_skinned_first:     [dynamic]i32,
 }
 
 // A ShaderMaterial's shaders and pipelines (as `GPU.pipelines`), or why
@@ -151,29 +159,30 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	// slangc names the SPIR-V entry points "main" and keeps the names for Metal.
 	formats := sdl.GetGPUShaderFormats(g.device)
-	vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code: []u8
+	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code: []u8
 	format: sdl.GPUShaderFormat
-	vs_entry, fs_entry, shadow_entry: cstring
+	vs_entry, skinned_vs_entry, fs_entry, shadow_entry: cstring
 	switch {
 	case .SPIRV in formats:
-		vert_code, frag_code, shadow_code = VERT_SPV, FRAG_SPV, SHADOW_SPV
+		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_SPV, SKINNED_VERT_SPV, FRAG_SPV, SHADOW_SPV
 		bg_vert_code, bg_frag_code = BG_VERT_SPV, BG_FRAG_SPV
 		format = {.SPIRV}
-		vs_entry, fs_entry, shadow_entry = "main", "main", "main"
+		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "main", "main", "main", "main"
 	case .MSL in formats:
-		vert_code, frag_code, shadow_code = VERT_MSL, FRAG_MSL, SHADOW_MSL
+		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_MSL, SKINNED_VERT_MSL, FRAG_MSL, SHADOW_MSL
 		bg_vert_code, bg_frag_code = BG_VERT_MSL, BG_FRAG_MSL
 		format = {.MSL}
-		vs_entry, fs_entry, shadow_entry = "vs_main", "fs_main", "fs_shadow"
+		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "vs_main", "vs_skinned", "fs_main", "fs_shadow"
 	case:
 		return .Device
 	}
 	g.vert = sdl.CreateGPUShader(g.device, {code_size = len(vert_code), code = raw_data(vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
+	g.skinned_vert = sdl.CreateGPUShader(g.device, {code_size = len(skinned_vert_code), code = raw_data(skinned_vert_code), entrypoint = skinned_vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 2})
 	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 8, num_uniform_buffers = 2})
 	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT})
 	g.bg_vert = sdl.CreateGPUShader(g.device, {code_size = len(bg_vert_code), code = raw_data(bg_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
 	g.bg_frag = sdl.CreateGPUShader(g.device, {code_size = len(bg_frag_code), code = raw_data(bg_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
-	if g.vert == nil || g.frag == nil || g.shadow_frag == nil || g.bg_vert == nil || g.bg_frag == nil {
+	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.bg_vert == nil || g.bg_frag == nil {
 		return .Shader
 	}
 	g.depth_format = .D32_FLOAT
@@ -186,13 +195,15 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	for side in o3d.Side {
 		for blend in 0 ..< 2 {
-			g.pipelines[side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend == 1, false)
-			if g.pipelines[side][blend] == nil {
+			g.pipelines[side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend == 1, false, false)
+			g.skinned_pipelines[side][blend] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend == 1, false, true)
+			if g.pipelines[side][blend] == nil || g.skinned_pipelines[side][blend] == nil {
 				return .Shader
 			}
 		}
-		g.shadow_pipelines[side] = make_shadow_pipeline(g, side)
-		if g.shadow_pipelines[side] == nil {
+		g.shadow_pipelines[side] = make_shadow_pipeline(g, side, false)
+		g.shadow_skinned_pipelines[side] = make_shadow_pipeline(g, side, true)
+		if g.shadow_pipelines[side] == nil || g.shadow_skinned_pipelines[side] == nil {
 			return .Shader
 		}
 	}
@@ -226,11 +237,13 @@ destroy :: proc(g: ^GPU) {
 	if g.device == nil {
 		return
 	}
-	for b in ([]^Pool_Buffer{&g.vertices, &g.indices}) {
+	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.indices, &g.custom_skinned}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
 	}
+	delete(g.custom_skinned_verts)
+	delete(g.custom_skinned_first)
 	for tex in g.textures {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(g.device, tex)
@@ -259,12 +272,22 @@ destroy :: proc(g: ^GPU) {
 				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
 			}
 		}
+		for p in g.skinned_pipelines[side] {
+			if p != nil {
+				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+			}
+		}
 	}
 	if g.bg_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(g.device, g.bg_pipeline)
 	}
 	release_targets(g)
 	for p in g.shadow_pipelines {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
+	}
+	for p in g.shadow_skinned_pipelines {
 		if p != nil {
 			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
 		}
@@ -285,6 +308,9 @@ destroy :: proc(g: ^GPU) {
 	}
 	if g.vert != nil {
 		sdl.ReleaseGPUShader(g.device, g.vert)
+	}
+	if g.skinned_vert != nil {
+		sdl.ReleaseGPUShader(g.device, g.skinned_vert)
 	}
 	if g.frag != nil {
 		sdl.ReleaseGPUShader(g.device, g.frag)
@@ -309,12 +335,25 @@ STANDARD_ATTRIBUTES := [3]sdl.GPUVertexAttribute {
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
 }
 
-// A pipeline drawing `Vertex`es (one buffer, slot 0) for a material side,
-// blended or not. The standard material's output is premultiplied; a
-// ShaderMaterial's (`raw`) is as written, premultiplied by the blend.
+@(private = "file", rodata)
+SKINNED_ATTRIBUTES := [5]sdl.GPUVertexAttribute {
+	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = 0},
+	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = 12},
+	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
+	{location = 3, buffer_slot = 1, format = .USHORT4, offset = 0},
+	{location = 4, buffer_slot = 1, format = .FLOAT4, offset = 8},
+}
+
+// A pipeline drawing `Vertex`es (slot 0, plus `Skin_Vertex`es in slot 1 when
+// `skinned`) for a material side, blended or not. The standard material's
+// output is premultiplied; a ShaderMaterial's (`raw`) is as written,
+// premultiplied by the blend.
 @(private = "file")
-make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend, raw: bool) -> ^sdl.GPUGraphicsPipeline {
-	buffer := sdl.GPUVertexBufferDescription{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX}
+make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend, raw, skinned: bool) -> ^sdl.GPUGraphicsPipeline {
+	buffers := [2]sdl.GPUVertexBufferDescription {
+		{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX},
+		{slot = 1, pitch = size_of(o3d.Skin_Vertex), input_rate = .VERTEX},
+	}
 	color := sdl.GPUColorTargetDescription {
 		format = COLOR_FORMAT,
 		blend_state = {
@@ -339,7 +378,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 	info := sdl.GPUGraphicsPipelineCreateInfo {
 		vertex_shader = vert,
 		fragment_shader = frag,
-		vertex_input_state = {vertex_buffer_descriptions = &buffer, num_vertex_buffers = 1, vertex_attributes = raw_data(attrs), num_vertex_attributes = u32(len(attrs))},
+		vertex_input_state = {vertex_buffer_descriptions = &buffers[0], num_vertex_buffers = 2 if skinned else 1, vertex_attributes = raw_data(attrs), num_vertex_attributes = u32(len(attrs))},
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = g.samples},
@@ -417,7 +456,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 				n += 1
 			}
 		}
-		p^ = make_pipeline(g, c.vert, c.frag, attrs[:n], side, blend, true)
+		p^ = make_pipeline(g, c.vert, c.frag, attrs[:n], side, blend, true, false)
 	}
 	return p^
 }
@@ -443,8 +482,12 @@ release_custom :: proc(g: ^GPU, c: ^Custom) {
 // The shadow pass's pipeline for casters of a material side: depth into the
 // R32_FLOAT map (nearest kept by the depth test), the other side drawn.
 @(private = "file")
-make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side) -> ^sdl.GPUGraphicsPipeline {
-	buffer := sdl.GPUVertexBufferDescription{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX}
+make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side, skinned: bool) -> ^sdl.GPUGraphicsPipeline {
+	buffers := [2]sdl.GPUVertexBufferDescription {
+		{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX},
+		{slot = 1, pitch = size_of(o3d.Skin_Vertex), input_rate = .VERTEX},
+	}
+	attrs := SKINNED_ATTRIBUTES[:] if skinned else STANDARD_ATTRIBUTES[:]
 	color := sdl.GPUColorTargetDescription{format = SHADOW_FORMAT}
 	cull: sdl.GPUCullMode
 	switch o3d.shadow_side(side) {
@@ -456,9 +499,9 @@ make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side) -> ^sdl.GPUGraphicsPipelin
 		cull = .NONE
 	}
 	info := sdl.GPUGraphicsPipelineCreateInfo {
-		vertex_shader = g.vert,
+		vertex_shader = g.skinned_vert if skinned else g.vert,
 		fragment_shader = g.shadow_frag,
-		vertex_input_state = {vertex_buffer_descriptions = &buffer, num_vertex_buffers = 1, vertex_attributes = &STANDARD_ATTRIBUTES[0], num_vertex_attributes = len(STANDARD_ATTRIBUTES)},
+		vertex_input_state = {vertex_buffer_descriptions = &buffers[0], num_vertex_buffers = 2 if skinned else 1, vertex_attributes = raw_data(attrs), num_vertex_attributes = u32(len(attrs))},
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = ._1},

@@ -229,4 +229,92 @@ main :: proc() {
 		run_case("small_env        (1T, 0-alloc)", &sw, &scene, &geos, &textures, nil, W, H, WARMUP, ITERS)
 		run_case("small_env        (pool)", &sw, &scene, &geos, &textures, &pool, W, H, WARMUP, ITERS)
 	}
+
+	{
+		Skinned_Bin :: struct #packed {
+			pos:     [6][3]f32,
+			norm:    [6][3]f32,
+			joints:  [6][4]u16,
+			weights: [6][4]f32,
+			idx:     [12]u16,
+			ibm:     [2]o3d.Mat4,
+			times:   [2]f32,
+			rot:     [2][4]f32,
+		}
+		s45 := math.sqrt_f32(0.5)
+		ibm0 := o3d.Mat4(1)
+		ibm1 := o3d.Mat4(1)
+		ibm1[1, 3] = -1
+		b := Skinned_Bin {
+			pos     = {{-0.3, 0, 0}, {0.3, 0, 0}, {-0.3, 1, 0}, {0.3, 1, 0}, {-0.3, 2, 0}, {0.3, 2, 0}},
+			norm    = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}},
+			joints  = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 1, 0, 0}, {0, 1, 0, 0}, {1, 0, 0, 0}, {1, 0, 0, 0}},
+			weights = {{1, 0, 0, 0}, {1, 0, 0, 0}, {0.5, 0.5, 0, 0}, {0.5, 0.5, 0, 0}, {1, 0, 0, 0}, {1, 0, 0, 0}},
+			idx     = {0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4},
+			ibm     = {ibm0, ibm1},
+			times   = {0, 1},
+			rot     = {{0, 0, 0, 1}, {0, 0, s45, s45}},
+		}
+		// Build a minimal GLB in memory (12-byte header + JSON chunk + BIN chunk).
+		json_str := `{"asset":{"version":"2.0"},"buffers":[{"byteLength":480}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":72},{"buffer":0,"byteOffset":72,"byteLength":72},{"buffer":0,"byteOffset":144,"byteLength":48},{"buffer":0,"byteOffset":192,"byteLength":96},{"buffer":0,"byteOffset":288,"byteLength":24},{"buffer":0,"byteOffset":312,"byteLength":128},{"buffer":0,"byteOffset":440,"byteLength":8},{"buffer":0,"byteOffset":448,"byteLength":32}],"accessors":[{"bufferView":0,"componentType":5126,"count":6,"type":"VEC3"},{"bufferView":1,"componentType":5126,"count":6,"type":"VEC3"},{"bufferView":2,"componentType":5123,"count":6,"type":"VEC4"},{"bufferView":3,"componentType":5126,"count":6,"type":"VEC4"},{"bufferView":4,"componentType":5123,"count":12,"type":"SCALAR"},{"bufferView":5,"componentType":5126,"count":2,"type":"MAT4"},{"bufferView":6,"componentType":5126,"count":2,"type":"SCALAR"},{"bufferView":7,"componentType":5126,"count":2,"type":"VEC4"}],"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.9,0.4,0.2,1],"metallicFactor":0.1,"roughnessFactor":0.4},"doubleSided":true}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"JOINTS_0":2,"WEIGHTS_0":3},"indices":4,"material":0}]}],"skins":[{"inverseBindMatrices":5,"joints":[1,2]}],"nodes":[{"mesh":0,"skin":0},{"children":[2]},{"translation":[0,1,0]}],"scenes":[{"nodes":[0,1]}],"scene":0,"animations":[{"name":"bend","samplers":[{"input":6,"output":7,"interpolation":"LINEAR"}],"channels":[{"sampler":0,"target":{"node":2,"path":"rotation"}}]}]}`
+		jlen := (len(json_str) + 3) & ~int(3)
+		blen := size_of(Skinned_Bin)
+		total := 12 + 8 + jlen + 8 + blen
+		glb := make([]u8, total)
+		defer delete(glb)
+		(^u32)(&glb[0])^ = 0x46546C67 // "glTF"
+		(^u32)(&glb[4])^ = 2
+		(^u32)(&glb[8])^ = u32(total)
+		(^u32)(&glb[12])^ = u32(jlen)
+		(^u32)(&glb[16])^ = 0x4E4F534A // "JSON"
+		for i in 0 ..< jlen {
+			glb[20 + i] = json_str[i] if i < len(json_str) else ' '
+		}
+		boff := 20 + jlen
+		(^u32)(&glb[boff])^ = u32(blen)
+		(^u32)(&glb[boff + 4])^ = 0x004E4942 // "BIN\0"
+		mem.copy(&glb[boff + 8], &b, blen)
+
+		geos: o3d.Geometries
+		defer o3d.geometries_destroy(&geos)
+		model, _ := o3d.gltf_parse(glb, &geos)
+		defer o3d.model_destroy(&model)
+		scene: o3d.Scene
+		defer o3d.scene_destroy(&scene)
+
+		samples_us := make([]f64, ITERS)
+		defer delete(samples_us)
+		pixels: []u8
+		for w in 0 ..< WARMUP {
+			o3d.scene_clear(&scene)
+			scene.camera = {position = {0.4, 1.4, 3.8}, target = {-0.2, 0.8, 0}, fov = 45, near = 0.1, far = 30}
+			append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.85}, intensity = 2.6, position = {2, 4, 3}})
+			o3d.gltf_draw(&scene, &model, anim = 0, time = f32(w) * 0.1)
+			pixels = o3d.software_render(&sw, &scene, &geos, nil, W, H, nil, nil)
+		}
+		for i in 0 ..< ITERS {
+			t0 := time.tick_now()
+			{
+				no_allocations()
+				o3d.scene_clear(&scene)
+				scene.camera = {position = {0.4, 1.4, 3.8}, target = {-0.2, 0.8, 0}, fov = 45, near = 0.1, far = 30}
+				append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.85}, intensity = 2.6, position = {2, 4, 3}})
+				o3d.gltf_draw(&scene, &model, anim = 0, time = 0.65)
+				pixels = o3d.software_render(&sw, &scene, &geos, nil, W, H, nil, nil)
+			}
+			samples_us[i] = time.duration_microseconds(time.tick_since(t0))
+		}
+		slice.sort(samples_us)
+		fmt.printf(
+			"%-28s  %dx%-4d  p50=%7.1f us  p95=%7.1f us  p99=%7.1f us  max=%7.1f us  digest=%016x\n",
+			"small_skinned    (1T, 0-alloc)",
+			W,
+			H,
+			samples_us[ITERS / 2],
+			samples_us[(ITERS * 95) / 100],
+			samples_us[(ITERS * 99) / 100],
+			samples_us[ITERS - 1],
+			fnv1a64(pixels),
+		)
+	}
 }

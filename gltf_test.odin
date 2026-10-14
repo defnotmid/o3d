@@ -313,3 +313,184 @@ test_gltf_errors_and_poses :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(mine.draws), len(own.draws))
 	testing.expect_value(t, mine.draws[0].model, own.draws[0].model)
 }
+
+// Hand-made skinned glTF 2.0: a vertical bar from y = 0 to y = 2 (6 vertices,
+// 4 triangles) rigged to 2 joints:
+// - joint 0 at (0, 0, 0), inverseBind = identity
+// - joint 1 at (0, 1, 0) (child of joint 0), inverseBind = translate(0, -1, 0)
+// Bottom vertices (y = 0) are weighted 100% to joint 0; middle vertices (y = 1)
+// have unnormalized weights (2, 2, 0, 0) on joints (0, 1); top vertices (y = 2)
+// are weighted 100% to joint 1.
+// Animation "bend" rotates joint 1 by +90 deg around Z at t = 1 (bending the
+// top of the bar from (0, 2, 0) to (-1, 1, 0)).
+@(private = "file")
+make_skinned_test_gltf :: proc(allocator := context.temp_allocator) -> string {
+	Bin :: struct #packed {
+		pos:     [6][3]f32,
+		norm:    [6][3]f32,
+		joints:  [6][4]u16,
+		weights: [6][4]f32,
+		idx:     [12]u16,
+		ibm:     [2]Mat4,
+		times:   [2]f32,
+		rot:     [2][4]f32,
+	}
+	s45 := math.sqrt_f32(0.5)
+	ibm0 := linalg.MATRIX4F32_IDENTITY
+	ibm1 := linalg.MATRIX4F32_IDENTITY
+	ibm1[1, 3] = -1 // translate(0, -1, 0)
+	b := Bin {
+		pos = {
+			{-0.25, 0, 0}, {0.25, 0, 0},
+			{-0.25, 1, 0}, {0.25, 1, 0},
+			{-0.25, 2, 0}, {0.25, 2, 0},
+		},
+		norm = {
+			{0, 0, 1}, {0, 0, 1},
+			{0, 0, 1}, {0, 0, 1},
+			{0, 0, 1}, {0, 0, 1},
+		},
+		joints = {
+			{0, 0, 0, 0}, {0, 0, 0, 0},
+			{0, 1, 0, 0}, {0, 1, 0, 0},
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+		},
+		// Unnormalized weights on the middle row to verify load-time normalization.
+		weights = {
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+			{2, 2, 0, 0}, {2, 2, 0, 0},
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+		},
+		idx   = {0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4},
+		ibm   = {ibm0, ibm1},
+		times = {0, 1},
+		rot   = {{0, 0, 0, 1}, {0, 0, s45, s45}},
+	}
+	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = allocator)
+	return fmt.aprintf(
+		`{{
+  "asset": {{"version": "2.0"}},
+  "buffers": [{{"uri": "data:application/octet-stream;base64,%s", "byteLength": %d}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0,   "byteLength": 72}},
+    {{"buffer": 0, "byteOffset": 72,  "byteLength": 72}},
+    {{"buffer": 0, "byteOffset": 144, "byteLength": 48}},
+    {{"buffer": 0, "byteOffset": 192, "byteLength": 96}},
+    {{"buffer": 0, "byteOffset": 288, "byteLength": 24}},
+    {{"buffer": 0, "byteOffset": 312, "byteLength": 128}},
+    {{"buffer": 0, "byteOffset": 440, "byteLength": 8}},
+    {{"buffer": 0, "byteOffset": 448, "byteLength": 32}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 6, "type": "VEC3", "min": [-0.25, 0, 0], "max": [0.25, 2, 0]}},
+    {{"bufferView": 1, "componentType": 5126, "count": 6, "type": "VEC3"}},
+    {{"bufferView": 2, "componentType": 5123, "count": 6, "type": "VEC4"}},
+    {{"bufferView": 3, "componentType": 5126, "count": 6, "type": "VEC4"}},
+    {{"bufferView": 4, "componentType": 5123, "count": 12, "type": "SCALAR"}},
+    {{"bufferView": 5, "componentType": 5126, "count": 2, "type": "MAT4"}},
+    {{"bufferView": 6, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1]}},
+    {{"bufferView": 7, "componentType": 5126, "count": 2, "type": "VEC4"}}
+  ],
+  "materials": [{{
+    "pbrMetallicRoughness": {{"baseColorFactor": [0.9, 0.4, 0.2, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.5}},
+    "doubleSided": true
+  }}],
+  "meshes": [{{
+    "primitives": [{{
+      "attributes": {{"POSITION": 0, "NORMAL": 1, "JOINTS_0": 2, "WEIGHTS_0": 3}},
+      "indices": 4,
+      "material": 0
+    }}]
+  }}],
+  "skins": [{{
+    "inverseBindMatrices": 5,
+    "joints": [1, 2]
+  }}],
+  "nodes": [
+    {{"name": "bar", "mesh": 0, "skin": 0}},
+    {{"name": "j0", "children": [2]}},
+    {{"name": "j1", "translation": [0, 1, 0]}}
+  ],
+  "scenes": [{{"nodes": [0, 1]}}],
+  "scene": 0,
+  "animations": [{{
+    "name": "bend",
+    "samplers": [{{"input": 6, "output": 7, "interpolation": "LINEAR"}}],
+    "channels": [{{"sampler": 0, "target": {{"node": 2, "path": "rotation"}}}}]
+  }}]
+}}`,
+		b64,
+		size_of(Bin),
+		allocator = allocator,
+	)
+}
+
+@(test)
+test_gltf_skinning :: proc(t: ^testing.T) {
+	src := make_skinned_test_gltf(context.temp_allocator)
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	model, err := gltf_parse(transmute([]u8)src, &geos)
+	defer model_destroy(&model)
+	testing.expect_value(t, err, Gltf_Error.None)
+	testing.expect_value(t, len(model.skins), 1)
+	testing.expect_value(t, model.skins[0].joint_count, u32(2))
+
+	// Check normalized weights in skin_vertices.
+	skin_verts := geometry_skin(&geos, model.primitives[0].geometry)
+	testing.expect_value(t, len(skin_verts), 6)
+	testing.expect(t, abs(skin_verts[2].weights.x - 0.5) < 1e-5 && abs(skin_verts[2].weights.y - 0.5) < 1e-5, "middle vertex weights normalized to 0.5, 0.5")
+
+	scene: Scene
+	defer scene_destroy(&scene)
+	sw: Software
+	defer software_destroy(&sw)
+
+	// Bind pose (t = 0): top of bar is straight up at (0, 1.75, 0), nothing at (-0.75, 1, 0).
+	scene_clear(&scene)
+	scene.camera = {position = {0, 1, 3.5}, target = {0, 1, 0}, fov = 50, near = 0.1, far = 20}
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 1, 5}})
+	gltf_draw(&scene, &model, anim = 0, time = 0, loop = false)
+	testing.expect_value(t, len(scene_draw_joints(&scene, 0)), 2)
+	px0 := software_render(&sw, &scene, &geos, nil, 64, 64)
+	top_t0 := px0[(22 * 64 + 32) * 4 + 3]  // near (0, 1.5)
+	left_t0 := px0[(32 * 64 + 22) * 4 + 3] // near (-0.5, 1.0)
+	testing.expect(t, top_t0 > 200 && left_t0 == 0, "at t=0 bar is straight up")
+
+	// Bent pose (t = 1) with zero warm-frame heap allocations: top half bends 90 deg left to (-1, 1, 0).
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		scene_clear(&scene)
+		scene.camera = {position = {0, 1, 3.5}, target = {0, 1, 0}, fov = 50, near = 0.1, far = 20}
+		append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 1, 5}})
+		gltf_draw(&scene, &model, anim = 0, time = 1, loop = false)
+		px1 := software_render(&sw, &scene, &geos, nil, 64, 64)
+		top_t1 := px1[(22 * 64 + 32) * 4 + 3]
+		left_t1 := px1[(32 * 64 + 22) * 4 + 3]
+		testing.expect(t, top_t1 == 0 && left_t1 > 200, "at t=1 top half of bar bends to the left")
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, track.total_memory_allocated, 0)
+
+	// ShaderMaterial on a skinned draw: receives posed positions.
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	sh_id, sh_err := shader(
+		&shaders,
+		`void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+		`void main() { gl_FragColor = vec4(0.2, 0.9, 0.3, 1.0); }`,
+	)
+	testing.expect_value(t, sh_err, "")
+	custom_mat := MATERIAL_DEFAULT
+	custom_mat.shader = sh_id
+	custom_mat.side = .Double
+	scene_clear(&scene)
+	scene.camera = {position = {0, 1, 3.5}, target = {0, 1, 0}, fov = 50, near = 0.1, far = 20}
+	gltf_draw(&scene, &model, anim = 0, time = 1, loop = false, override_material = &custom_mat)
+	px_sh := software_render(&sw, &scene, &geos, &shaders, 64, 64)
+	testing.expect(t, px_sh[(32 * 64 + 22) * 4 + 1] > 200, "ShaderMaterial on skinned draw renders bent bar on left")
+}
+

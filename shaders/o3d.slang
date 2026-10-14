@@ -66,7 +66,14 @@ struct Lighting {
     Light lights[MAX_LIGHTS];
 };
 
+static const int MAX_JOINTS = 64;
+
+struct Joints_VS {
+    float4x4 mats[MAX_JOINTS];
+};
+
 [[vk::binding(0, 1)]] ConstantBuffer<Draw_VS> draw : register(b0, space1);
+[[vk::binding(1, 1)]] ConstantBuffer<Joints_VS> joints : register(b1, space1);
 [[vk::binding(0, 3)]] ConstantBuffer<Material> material : register(b0, space3);
 [[vk::binding(1, 3)]] ConstantBuffer<Lighting> lighting : register(b1, space3);
 // The shadow map: depth per texel (R32_FLOAT), read texel by texel.
@@ -85,6 +92,14 @@ struct VS_In {
     float2 uv : TEXCOORD2;
 };
 
+struct VS_Skinned_In {
+    float3 position : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float2 uv : TEXCOORD2;
+    uint4 joints : TEXCOORD3;
+    float4 weights : TEXCOORD4;
+};
+
 struct VS_Out {
     float4 position : SV_Position;
     float3 world : TEXCOORD0;
@@ -98,6 +113,22 @@ VS_Out vs_main(VS_In i) {
     o.position = mul(draw.mvp, float4(i.position, 1));
     o.world = mul(draw.model, float4(i.position, 1)).xyz;
     o.normal = mul(draw.normal, float4(i.normal, 0)).xyz;
+    o.uv = i.uv;
+    return o;
+}
+
+[shader("vertex")]
+VS_Out vs_skinned(VS_Skinned_In i) {
+    float4x4 skin = joints.mats[i.joints.x] * i.weights.x +
+                    joints.mats[i.joints.y] * i.weights.y +
+                    joints.mats[i.joints.z] * i.weights.z +
+                    joints.mats[i.joints.w] * i.weights.w;
+    float3 pos = mul(skin, float4(i.position, 1)).xyz;
+    float3 norm = mul(skin, float4(i.normal, 0)).xyz;
+    VS_Out o;
+    o.position = mul(draw.mvp, float4(pos, 1));
+    o.world = mul(draw.model, float4(pos, 1)).xyz;
+    o.normal = mul(draw.normal, float4(norm, 0)).xyz;
     o.uv = i.uv;
     return o;
 }
