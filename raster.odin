@@ -93,6 +93,15 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 		if area == 0 {
 			continue
 		}
+		m := &s.materials[t.draw]
+		masked := .Alpha_Mask in m.flags && .Color_Map in m.flags
+		uv: [3]Vec2 = ---
+		if masked {
+			vs := s.chunks[ref.chunk].values[t.values:][:3 * SHADOW_MASK_FLOATS]
+			for k in 0 ..< 3 {
+				uv[k] = (^Vec2)(&vs[k * SHADOW_MASK_FLOATS])^
+			}
+		}
 		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
 		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
 		for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
@@ -103,14 +112,50 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 				}
 				b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
 				b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
-				z := b0 * t.p[0].z + b1 * t.p[1].z + (1 - b0 - b1) * t.p[2].z
+				b2 := 1 - b0 - b1
+				z := b0 * t.p[0].z + b1 * t.p[1].z + b2 * t.p[2].z
 				i := y * size + x
 				if z >= 0 && z <= 1 && z < s.shadow_map[i] {
+					if masked {
+						iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+						raw := (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) / iw
+						xf := m.uv_transforms[.Color]
+						uv_col := Vec2{
+							xf[0].x * raw.x + xf[0].y * raw.y + xf[0].z,
+							xf[1].x * raw.x + xf[1].y * raw.y + xf[1].z,
+						}
+						if m.opacity * sample_lod(job.textures, m.color_map, uv_col, 0).a < m.alpha_cutoff {
+							continue
+						}
+					}
 					s.shadow_map[i] = z
 				}
 			}
 		}
 	}
+}
+
+// Transformed UV and screen derivatives for `slot` (selecting `uv0` or `uv1`).
+@(private = "file")
+slot_uv :: #force_inline proc "contextless" (m: ^Shading_Material, slot: Texture_Slot, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> (uv, ddx, ddy: Vec2) {
+	raw, dx, dy := uv0, d0x, d0y
+	if ((m.uv_sets >> u32(slot)) & 1) != 0 {
+		raw, dx, dy = uv1, d1x, d1y
+	}
+	xf := m.uv_transforms[slot]
+	uv = {
+		xf[0].x * raw.x + xf[0].y * raw.y + xf[0].z,
+		xf[1].x * raw.x + xf[1].y * raw.y + xf[1].z,
+	}
+	ddx = {
+		xf[0].x * dx.x + xf[0].y * dx.y,
+		xf[1].x * dx.x + xf[1].y * dx.y,
+	}
+	ddy = {
+		xf[0].x * dy.x + xf[0].y * dy.y,
+		xf[1].x * dy.x + xf[1].y * dy.y,
+	}
+	return
 }
 
 // A standard-material triangle's rows in the band: per pixel when untextured,
@@ -131,6 +176,10 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 		draw_standard_textured(job, ref, t, m, y0, y1, area, blend, receive)
 		return
 	}
+	if .Alpha_Mask in m.flags && m.opacity < m.alpha_cutoff {
+		return
+	}
+	out_alpha := m.opacity if blend else 1
 	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	// World position and normal over w per corner.
@@ -167,7 +216,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 				shadow = shadow_factor(s.shadow_map, &job.shadow, p, n)
 			}
 			lit := shade(m, p, n, job.eye, job.lights, shadow, job.env) + m.emissive
-			write_samples(s, t, x, y, area, covered, pack(lit, m.opacity), blend)
+			write_samples(s, t, x, y, area, covered, pack(lit, out_alpha), blend)
 		}
 	}
 }
@@ -177,12 +226,13 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 	s := job.s
 	vs := s.chunks[ref.chunk].values[t.values:][:3 * STANDARD_FLOATS]
 	world, normal: [3]Vec3
-	uv: [3]Vec2
+	uv, uv1: [3]Vec2
 	for k in 0 ..< 3 {
 		base := k * STANDARD_FLOATS
 		world[k] = (^Vec3)(&vs[base])^
 		normal[k] = (^Vec3)(&vs[base + 3])^
 		uv[k] = (^Vec2)(&vs[base + 6])^
+		uv1[k] = (^Vec2)(&vs[base + 8])^
 	}
 	flat_n: Vec3
 	if .Flat_Shading in m.flags {
@@ -199,7 +249,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				continue
 			}
 			worlds, norms: [4]Vec3 = ---, ---
-			uvs: [4]Vec2 = ---
+			uvs, uv1s: [4]Vec2 = ---, ---
 			for l in 0 ..< 4 {
 				c := Vec2{f32(qx + l & 1) + 0.5, f32(qy + l >> 1) + 0.5}
 				b0 := edge(t.p[1].xy, t.p[2].xy, c) * inv_area
@@ -208,6 +258,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				inv_iw := 1 / (b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2])
 				worlds[l] = (world[0] * b0 + world[1] * b1 + world[2] * b2) * inv_iw
 				uvs[l] = (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) * inv_iw
+				uv1s[l] = (uv1[0] * b0 + uv1[1] * b1 + uv1[2] * b2) * inv_iw
 				if l not_in helpers && .Flat_Shading not_in m.flags {
 					norms[l] = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) * inv_iw)
 				}
@@ -217,25 +268,43 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					continue
 				}
 				x, y := qx + l & 1, qy + l >> 1
-				duv_dx, duv_dy := quad_deriv(uvs, l)
+				d0x, d0y := quad_deriv(uvs, l)
+				d1x, d1y := quad_deriv(uv1s, l)
 				pm := m^
 				emissive := m.emissive
 				opacity := m.opacity
 				if .Color_Map in m.flags {
-					tex := sample(job.textures, m.color_map, uvs[l], duv_dx, duv_dy)
+					c_uv, c_dx, c_dy := slot_uv(m, .Color, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					tex := sample(job.textures, m.color_map, c_uv, c_dx, c_dy)
 					pm.base *= linear(tex.rgb)
-					if blend {
+					if blend || .Alpha_Mask in m.flags {
 						opacity *= tex.a
 					}
 				}
+				if .Alpha_Mask in m.flags {
+					if opacity < m.alpha_cutoff {
+						continue
+					}
+					if !blend {
+						opacity = 1
+					}
+				}
 				if .Roughness_Map in m.flags {
-					pm.roughness *= sample(job.textures, m.roughness_map, uvs[l], duv_dx, duv_dy).g
+					r_uv, r_dx, r_dy := slot_uv(m, .Roughness, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					pm.roughness *= sample(job.textures, m.roughness_map, r_uv, r_dx, r_dy).g
 				}
 				if .Metalness_Map in m.flags {
-					pm.metalness *= sample(job.textures, m.metalness_map, uvs[l], duv_dx, duv_dy).b
+					m_uv, m_dx, m_dy := slot_uv(m, .Metalness, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					pm.metalness *= sample(job.textures, m.metalness_map, m_uv, m_dx, m_dy).b
 				}
 				if .Emissive_Map in m.flags {
-					emissive *= linear(sample(job.textures, m.emissive_map, uvs[l], duv_dx, duv_dy).rgb)
+					e_uv, e_dx, e_dy := slot_uv(m, .Emissive, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					emissive *= linear(sample(job.textures, m.emissive_map, e_uv, e_dx, e_dy).rgb)
+				}
+				ao: f32 = 1
+				if .Ao_Map in m.flags {
+					a_uv, a_dx, a_dy := slot_uv(m, .Ao, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					ao = (sample(job.textures, m.ao_map, a_uv, a_dx, a_dy).r - 1) * m.ao_intensity + 1
 				}
 				n := flat_n if .Flat_Shading in m.flags else norms[l]
 				shadow: f32 = 1
@@ -248,10 +317,11 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					}
 					pm.flags -= {.Two_Sided}
 					dp_dx, dp_dy := quad_deriv(worlds, l)
-					map_n := sample(job.textures, m.normal_map, uvs[l], duv_dx, duv_dy).rgb * 2 - 1
-					n = perturb_normal(n, dp_dx, dp_dy, duv_dx, duv_dy, map_n)
+					n_uv, n_dx, n_dy := slot_uv(m, .Normal, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					map_n := sample(job.textures, m.normal_map, n_uv, n_dx, n_dy).rgb * 2 - 1
+					n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
 				}
-				lit := shade(&pm, worlds[l], n, job.eye, job.lights, shadow, job.env) + emissive
+				lit := shade(&pm, worlds[l], n, job.eye, job.lights, shadow, job.env, ao) + emissive
 				write_samples(s, t, x, y, area, lanes[l], pack(lit, opacity), blend)
 			}
 		}

@@ -60,6 +60,7 @@ GPU :: struct {
 	capacity:                 [2]u32,
 	vertices:                 Pool_Buffer,
 	skin_vertices:            Pool_Buffer,
+	morph_deltas:             Pool_Buffer,
 	indices:                  Pool_Buffer,
 	custom_skinned:           Pool_Buffer,
 	// The generations of the tables mirrored (geometry, textures, shaders'
@@ -106,15 +107,22 @@ Custom :: struct {
 // The uniforms as the shader reads them (std140 / Metal layouts agree here).
 Draw_Uniforms :: struct {
 	mvp, model, normal: o3d.Mat4,
+	morph_bases:        [2][4]u32,
+	morph_weights:      [2][4]f32,
+	morph_info:         [4]u32,
 }
+#assert(size_of(Draw_Uniforms) == 272)
 
 Material_Uniforms :: struct {
-	color, emissive:      [4]f32,
-	metalness, roughness: f32,
-	flags:                o3d.Shading_Flags,
-	_:                    u32,
+	color, emissive:                    [4]f32,
+	metalness, roughness, ao_intensity: f32,
+	flags:                              o3d.Shading_Flags,
+	alpha_cutoff:                       f32,
+	uv_sets:                            u32,
+	_, _:                               u32,
+	uv_transforms:                      [12][4]f32,
 }
-#assert(size_of(Material_Uniforms) == 48)
+#assert(size_of(Material_Uniforms) == 256)
 
 Light_Uniforms :: struct {
 	color, ground, vector: [4]f32,
@@ -176,10 +184,10 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	case:
 		return .Device
 	}
-	g.vert = sdl.CreateGPUShader(g.device, {code_size = len(vert_code), code = raw_data(vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
-	g.skinned_vert = sdl.CreateGPUShader(g.device, {code_size = len(skinned_vert_code), code = raw_data(skinned_vert_code), entrypoint = skinned_vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 2})
-	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 8, num_uniform_buffers = 2})
-	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT})
+	g.vert = sdl.CreateGPUShader(g.device, {code_size = len(vert_code), code = raw_data(vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_storage_buffers = 1, num_uniform_buffers = 1})
+	g.skinned_vert = sdl.CreateGPUShader(g.device, {code_size = len(skinned_vert_code), code = raw_data(skinned_vert_code), entrypoint = skinned_vs_entry, format = format, stage = .VERTEX, num_storage_buffers = 1, num_uniform_buffers = 2})
+	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 9, num_uniform_buffers = 2})
+	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
 	g.bg_vert = sdl.CreateGPUShader(g.device, {code_size = len(bg_vert_code), code = raw_data(bg_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
 	g.bg_frag = sdl.CreateGPUShader(g.device, {code_size = len(bg_frag_code), code = raw_data(bg_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
 	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.bg_vert == nil || g.bg_frag == nil {
@@ -215,7 +223,9 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	g.linear_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .REPEAT, address_mode_v = .REPEAT, address_mode_w = .REPEAT, max_lod = f32(o3d.MAX_MIPS)})
 	g.env_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .REPEAT, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE, max_lod = f32(o3d.MAX_MIPS)})
 	g.dummy_texture = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = 1, height = 1, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
-	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.dummy_texture == nil {
+	g.morph_deltas.capacity = 64 << 10
+	g.morph_deltas.buffer = sdl.CreateGPUBuffer(g.device, {usage = {.GRAPHICS_STORAGE_READ}, size = g.morph_deltas.capacity})
+	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.dummy_texture == nil || g.morph_deltas.buffer == nil {
 		return .Device
 	}
 	// 1x1 fallback shadow and colour textures, cleared, bound for unused slots.
@@ -237,7 +247,7 @@ destroy :: proc(g: ^GPU) {
 	if g.device == nil {
 		return
 	}
-	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.indices, &g.custom_skinned}) {
+	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices, &g.custom_skinned}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
@@ -329,19 +339,21 @@ target :: proc(g: ^GPU, width, height: u32) -> ^sdl.GPUTexture {
 
 // The standard material's vertex shader reads every attribute.
 @(private = "file", rodata)
-STANDARD_ATTRIBUTES := [3]sdl.GPUVertexAttribute {
+STANDARD_ATTRIBUTES := [4]sdl.GPUVertexAttribute {
 	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = 0},
 	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = 12},
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
+	{location = 3, buffer_slot = 0, format = .FLOAT2, offset = 32},
 }
 
 @(private = "file", rodata)
-SKINNED_ATTRIBUTES := [5]sdl.GPUVertexAttribute {
+SKINNED_ATTRIBUTES := [6]sdl.GPUVertexAttribute {
 	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = 0},
 	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = 12},
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
-	{location = 3, buffer_slot = 1, format = .USHORT4, offset = 0},
-	{location = 4, buffer_slot = 1, format = .FLOAT4, offset = 8},
+	{location = 3, buffer_slot = 0, format = .FLOAT2, offset = 32},
+	{location = 4, buffer_slot = 1, format = .USHORT4, offset = 0},
+	{location = 5, buffer_slot = 1, format = .FLOAT4, offset = 8},
 }
 
 // A pipeline drawing `Vertex`es (slot 0, plus `Skin_Vertex`es in slot 1 when

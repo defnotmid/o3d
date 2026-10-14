@@ -39,9 +39,10 @@ BAND_ROWS :: 32
 CHUNK_TRIS :: 8192
 // Quads shaded by one oksl call (a run of one draw's triangles).
 QUAD_BATCH :: 256
-// The standard material's corner floats: world position, normal, and uv when textured.
+// The standard material's corner floats: world position, normal, and uv + uv1 when textured.
 UNTEX_FLOATS :: 6
-STANDARD_FLOATS :: 8
+STANDARD_FLOATS :: 10
+SHADOW_MASK_FLOATS :: 2
 
 Software :: struct {
 	width, height: int,
@@ -297,61 +298,89 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	clear(&c.values)
 	di := s.order[c.order]
 	d := &job.scene.draws[di]
+	m := &s.materials[di]
+	geo, _ := geometry_get(job.geos, d.geometry)
 	vertices, all, _ := geometry_mesh(job.geos, d.geometry)
 	skin := geometry_skin(job.geos, d.geometry)
 	joints := scene_draw_joints(job.scene, di)
 	skinned := len(skin) > 0 && len(joints) > 0
+	active_buf: [MAX_MORPH_TARGETS]Active_Morph = ---
+	na := active_morphs(geo, scene_draw_morphs(job.scene, di), &active_buf)
+	active := active_buf[:na]
+	morphed := na > 0
+	deltas := job.geos.morph_deltas[:]
 	indices := all[c.first * 3:][:c.count * 3]
 	lo, hi := max(u32), u32(0)
 	for i in indices {
 		lo, hi = min(lo, i), max(hi, i)
 	}
 	count := int(hi - lo) + 1
-	sh := shader_get(job.shaders, s.materials[di].shader) if !job.depth_only else nil
-	textured := s.materials[di].flags & TEXTURE_FLAGS != {}
+	sh := shader_get(job.shaders, m.shader) if !job.depth_only else nil
+	textured := m.flags & TEXTURE_FLAGS != {}
 	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS if textured else UNTEX_FLOATS)
 	if job.depth_only {
-		nf = 0
+		if .Alpha_Mask in m.flags && .Color_Map not_in m.flags && m.opacity < m.alpha_cutoff {
+			slice.zero(s.chunk_bands[ci * job.bands:][:job.bands])
+			return
+		}
+		nf = SHADOW_MASK_FLOATS if (.Alpha_Mask in m.flags && .Color_Map in m.flags) else 0
 	}
 	flat := shader_flat(sh) if sh != nil else nil
 	table_grow_non_zero(&w.positions, count)
 	table_grow_non_zero(&w.values, count * nf)
 	if job.depth_only {
 		mvp := job.view_proj * d.model
-		if skinned {
-			for vtx, i in vertices[lo:][:count] {
-				pos, _ := skin_vertex(vtx, skin[int(lo) + i], joints)
-				w.positions[i] = mvp * Vec4{pos.x, pos.y, pos.z, 1}
+		use_uv1 := (m.uv_sets & (1 << u32(Texture_Slot.Color))) != 0
+		for vtx, i in vertices[lo:][:count] {
+			vi := lo + u32(i)
+			v := vtx
+			if morphed {
+				v.position, v.normal = morph_vertex(v, vi, deltas, active)
 			}
-		} else {
-			for vtx, i in vertices[lo:][:count] {
-				w.positions[i] = mvp * Vec4{vtx.position.x, vtx.position.y, vtx.position.z, 1}
+			if skinned {
+				v.position, v.normal = skin_vertex(v, skin[vi], joints)
+			}
+			w.positions[i] = mvp * Vec4{v.position.x, v.position.y, v.position.z, 1}
+			if nf == SHADOW_MASK_FLOATS {
+				(^Vec2)(&w.values[i * SHADOW_MASK_FLOATS])^ = v.uv1 if use_uv1 else v.uv
 			}
 		}
 	} else if sh == nil {
 		mvp := job.view_proj * d.model
 		nm := normal_matrix(d.model)
 		for vtx, i in vertices[lo:][:count] {
-			pos, norm := vtx.position, vtx.normal
-			if skinned {
-				pos, norm = skin_vertex(vtx, skin[int(lo) + i], joints)
+			vi := lo + u32(i)
+			v := vtx
+			if morphed {
+				v.position, v.normal = morph_vertex(v, vi, deltas, active)
 			}
-			p := Vec4{pos.x, pos.y, pos.z, 1}
+			if skinned {
+				v.position, v.normal = skin_vertex(v, skin[vi], joints)
+			}
+			p := Vec4{v.position.x, v.position.y, v.position.z, 1}
 			w.positions[i] = mvp * p
 			base := i * nf
 			(^Vec3)(&w.values[base])^ = (d.model * p).xyz
-			(^Vec3)(&w.values[base + 3])^ = (nm * Vec4{norm.x, norm.y, norm.z, 0}).xyz
+			(^Vec3)(&w.values[base + 3])^ = (nm * Vec4{v.normal.x, v.normal.y, v.normal.z, 0}).xyz
 			if textured {
-				(^Vec2)(&w.values[base + 6])^ = vtx.uv
+				(^Vec2)(&w.values[base + 6])^ = v.uv
+				(^Vec2)(&w.values[base + 8])^ = v.uv1
 			}
 		}
 	} else {
 		src_verts := vertices[lo:][:count]
-		if skinned {
+		if morphed || skinned {
 			table_grow_non_zero(&w.skinned, count)
 			for vtx, i in src_verts {
-				pos, norm := skin_vertex(vtx, skin[int(lo) + i], joints)
-				w.skinned[i] = {pos, norm, vtx.uv}
+				vi := lo + u32(i)
+				v := vtx
+				if morphed {
+					v.position, v.normal = morph_vertex(v, vi, deltas, active)
+				}
+				if skinned {
+					v.position, v.normal = skin_vertex(v, skin[vi], joints)
+				}
+				w.skinned[i] = v
 			}
 			src_verts = w.skinned[:count]
 		}

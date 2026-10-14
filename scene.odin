@@ -67,30 +67,60 @@ Material_Flag :: enum u8 {
 	// is its own.
 	Cast_Shadow,
 	Receive_Shadow,
+	// Discards fragments with alpha below `alpha_cutoff` (glTF alphaMode: MASK,
+	// three.js alphaTest), including in the shadow pass.
+	Alpha_Mask,
 }
 
 Material_Flags :: bit_set[Material_Flag; u8]
+
+Texture_Slot :: enum u8 {
+	Color     = 0,
+	Normal    = 1,
+	Roughness = 2,
+	Emissive  = 3,
+	Metalness = 4,
+	Ao        = 5,
+}
+
+// UV set (0 or 1) and KHR_texture_transform for a texture slot; zero is the
+// identity transform on UV set 0 (`scale = {0, 0}` means `{1, 1}`).
+Texture_Transform :: struct {
+	offset:    Vec2,
+	rotation:  f32,
+	scale:     Vec2,
+	tex_coord: u8,
+}
 
 // MeshStandardMaterial (or MeshBasicMaterial with `.Basic`), or a
 // ShaderMaterial with `shader` (shader.odin): then only `side`,
 // `.Transparent` and `uniforms` apply.
 Material :: struct {
-	color:              Vec3, // sRGB
-	metalness:          f32,
-	roughness:          f32,
-	emissive:           Vec3, // sRGB
-	emissive_intensity: f32,
-	opacity:            f32,
-	side:               Side,
-	flags:              Material_Flags,
-	color_map:          Texture_Id,
-	normal_map:         Texture_Id,
-	roughness_map:      Texture_Id, // its green channel (three.js's roughnessMap)
-	emissive_map:       Texture_Id,
-	metalness_map:      Texture_Id, // its blue channel (metalnessMap; glTF packs both in one)
-	shader:             Shader_Id,
+	color:               Vec3, // sRGB
+	metalness:           f32,
+	roughness:           f32,
+	emissive:            Vec3, // sRGB
+	emissive_intensity:  f32,
+	opacity:             f32,
+	alpha_cutoff:        f32,
+	ao_map_intensity:    f32,
+	side:                Side,
+	flags:               Material_Flags,
+	color_map:           Texture_Id,
+	normal_map:          Texture_Id,
+	roughness_map:       Texture_Id, // its green channel (three.js's roughnessMap)
+	emissive_map:        Texture_Id,
+	metalness_map:       Texture_Id, // its blue channel (metalnessMap; glTF packs both in one)
+	ao_map:              Texture_Id, // its red channel (three.js's aoMap; indirect light only)
+	color_transform:     Texture_Transform,
+	normal_transform:    Texture_Transform,
+	roughness_transform: Texture_Transform,
+	emissive_transform:  Texture_Transform,
+	metalness_transform: Texture_Transform,
+	ao_transform:        Texture_Transform,
+	shader:              Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
-	uniforms:           Uniform_Range,
+	uniforms:            Uniform_Range,
 }
 
 // A ShaderMaterial uniform, three.js's `uniforms: { name: { value } }`: its
@@ -112,7 +142,19 @@ Joint_Range :: struct {
 	first, count: u32,
 }
 
-MATERIAL_DEFAULT :: Material{color = {1, 1, 1}, metalness = 0, roughness = 1, emissive_intensity = 1, opacity = 1}
+Morph_Range :: struct {
+	first, count: u32,
+}
+
+MATERIAL_DEFAULT :: Material{
+	color              = {1, 1, 1},
+	metalness          = 0,
+	roughness          = 1,
+	emissive_intensity = 1,
+	opacity            = 1,
+	alpha_cutoff       = 0.5,
+	ao_map_intensity   = 1,
+}
 
 Draw :: struct {
 	geometry: Geometry_Id,
@@ -140,6 +182,9 @@ Scene :: struct {
 	// Skinned draws' joint matrices: draw i's are joints[draw_joints[i].first:][:draw_joints[i].count].
 	draw_joints:           [dynamic]Joint_Range,
 	joints:                [dynamic]Mat4,
+	// Morphed draws' target weights: draw i's are morph_weights[draw_morphs[i].first:][:draw_morphs[i].count].
+	draw_morphs:           [dynamic]Morph_Range,
+	morph_weights:         [dynamic]f32,
 }
 
 scene_clear :: proc(s: ^Scene) {
@@ -155,6 +200,8 @@ scene_clear :: proc(s: ^Scene) {
 	clear(&s.uniform_floats)
 	clear(&s.draw_joints)
 	clear(&s.joints)
+	clear(&s.draw_morphs)
+	clear(&s.morph_weights)
 }
 
 // Keeps uniforms for a material (`Material.uniforms`) this frame.
@@ -205,6 +252,51 @@ scene_draw_joints :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []
 	return s.joints[r.first:][:r.count]
 }
 
+// Keeps morph target weights in `s.morph_weights` this frame.
+scene_morphs :: proc(s: ^Scene, weights: []f32) -> Morph_Range {
+	has_nonzero := false
+	for w in weights {
+		if w != 0 {
+			has_nonzero = true
+			break
+		}
+	}
+	if !has_nonzero {
+		return {}
+	}
+	first := len(s.morph_weights)
+	table_grow_non_zero(&s.morph_weights, first + len(weights))
+	copy(s.morph_weights[first:], weights)
+	return {u32(first), u32(len(weights))}
+}
+
+// Associates morph weights `r` with draw `di` for this frame.
+scene_set_draw_morphs :: proc(s: ^Scene, di: int, r: Morph_Range) {
+	if r.count == 0 {
+		return
+	}
+	if len(s.draw_morphs) <= di {
+		old := len(s.draw_morphs)
+		table_grow_non_zero(&s.draw_morphs, di + 1)
+		for i in old ..< di {
+			s.draw_morphs[i] = {}
+		}
+	}
+	s.draw_morphs[di] = r
+}
+
+// Draw `di`'s morph target weights (nil when unmorphed).
+scene_draw_morphs :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []f32 {
+	if di < 0 || di >= len(s.draw_morphs) {
+		return nil
+	}
+	r := s.draw_morphs[di]
+	if r.count == 0 || int(r.first + r.count) > len(s.morph_weights) {
+		return nil
+	}
+	return s.morph_weights[r.first:][:r.count]
+}
+
 // The draws' materials, one column of the table.
 scene_materials :: proc "contextless" (s: ^Scene) -> []Material {
 	return s.draws.material[:len(s.draws)]
@@ -217,6 +309,8 @@ scene_destroy :: proc(s: ^Scene) {
 	delete(s.uniform_floats)
 	delete(s.draw_joints)
 	delete(s.joints)
+	delete(s.draw_morphs)
+	delete(s.morph_weights)
 	s^ = {}
 }
 
@@ -247,13 +341,13 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	geometries := scene.draws.geometry[:n]
 	view_proj := proj * view
 	for m, i in materials {
-		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i)) {
+		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i)) {
 			append(order, i)
 		}
 	}
 	first := len(order)
 	for m, i in materials {
-		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i)) {
+		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i)) {
 			append(order, i)
 		}
 	}
@@ -337,15 +431,20 @@ shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int 
 Shading_Material :: struct {
 	base:          Vec3, // linear
 	emissive:      Vec3, // linear, times intensity
-	opacity:       f32, // 1 unless blended
+	opacity:       f32, // 1 unless blended or alpha-masked
+	alpha_cutoff:  f32,
 	metalness:     f32,
 	roughness:     f32,
+	ao_intensity:  f32,
 	flags:         Shading_Flags,
+	uv_sets:       u32, // bit per Texture_Slot: 1 when reading uv1
+	uv_transforms: [Texture_Slot][2]Vec3,
 	color_map:     Texture_Id,
 	normal_map:    Texture_Id,
 	roughness_map: Texture_Id,
 	emissive_map:  Texture_Id,
 	metalness_map: Texture_Id,
+	ao_map:        Texture_Id,
 	shader:        Shader_Id, // 0: the standard material
 }
 
@@ -362,11 +461,25 @@ Shading_Flag :: enum u8 {
 	Roughness_Map,
 	Emissive_Map,
 	Metalness_Map,
+	Ao_Map,
+	Alpha_Mask,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
 
-TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map}
+TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map, .Ao_Map}
+
+// 2x3 affine matrix in o3d's UV space (v = 1 at top) for KHR_texture_transform
+// (defined in glTF's top-left UV space, v_gltf = 1 - v_o3d).
+uv_transform :: proc "contextless" (t: Texture_Transform) -> [2]Vec3 {
+	sx := t.scale.x if t.scale != {} else 1
+	sy := t.scale.y if t.scale != {} else 1
+	c, s := math.cos(t.rotation), math.sin(t.rotation)
+	return {
+		{c * sx, -s * sy, t.offset.x + s * sy},
+		{s * sx,  c * sy, 1 - t.offset.y - c * sy},
+	}
+}
 
 // From the draws' material column: `scene_materials(scene)`.
 shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material, textures: ^Textures = nil) {
@@ -392,6 +505,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		if .Receive_Shadow in m.flags {
 			f += {.Receive_Shadow}
 		}
+		if .Alpha_Mask in m.flags {
+			f += {.Alpha_Mask}
+		}
 		if has_tex(textures, m.color_map) {
 			f += {.Color_Map}
 		}
@@ -407,18 +523,43 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		if has_tex(textures, m.metalness_map) && .Basic not_in m.flags {
 			f += {.Metalness_Map}
 		}
+		if has_tex(textures, m.ao_map) && .Basic not_in m.flags {
+			f += {.Ao_Map}
+		}
+		tforms := [Texture_Slot]Texture_Transform{
+			.Color     = m.color_transform,
+			.Normal    = m.normal_transform,
+			.Roughness = m.roughness_transform,
+			.Emissive  = m.emissive_transform,
+			.Metalness = m.metalness_transform,
+			.Ao        = m.ao_transform,
+		}
+		uv_sets: u32
+		uv_xforms: [Texture_Slot][2]Vec3
+		for slot in Texture_Slot {
+			tf := tforms[slot]
+			if tf.tex_coord != 0 {
+				uv_sets |= 1 << u32(slot)
+			}
+			uv_xforms[slot] = uv_transform(tf)
+		}
 		out[i] = {
 			base          = linear(m.color),
 			emissive      = linear(m.emissive) * m.emissive_intensity,
-			opacity       = clamp(m.opacity, 0, 1) if .Blended in f else 1,
+			opacity       = clamp(m.opacity, 0, 1) if (.Blended in f || .Alpha_Mask in f) else 1,
+			alpha_cutoff  = m.alpha_cutoff,
 			metalness     = m.metalness,
 			roughness     = m.roughness,
+			ao_intensity  = m.ao_map_intensity,
 			flags         = f,
+			uv_sets       = uv_sets,
+			uv_transforms = uv_xforms,
 			color_map     = m.color_map,
 			normal_map    = m.normal_map,
 			roughness_map = m.roughness_map,
 			emissive_map  = m.emissive_map,
 			metalness_map = m.metalness_map,
+			ao_map        = m.ao_map,
 			shader        = m.shader,
 		}
 	}
@@ -428,8 +569,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
 // specular with Smith correlated visibility and Schlick Fresnel), direct
 // lights plus ambient, hemisphere and equirectangular environment lighting.
-// `shadow` scales the shadow light's direct light (shadow_factor; 1: lit).
-shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}) -> Vec3 {
+// `shadow` scales the shadow light's direct light (shadow_factor; 1: lit);
+// `ao` scales indirect light (ambient, hemisphere, environment; three.js's aoMap).
+shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1) -> Vec3 {
 	base := m.base
 	if .Basic in m.flags {
 		return base
@@ -448,10 +590,10 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 	for &l in lights {
 		switch l.kind {
 		case .Ambient:
-			out += l.color * diffuse / math.PI
+			out += l.color * diffuse * (ao / math.PI)
 		case .Hemisphere:
 			w := 0.5 * n.y + 0.5
-			out += linalg.lerp(l.ground, l.color, w) * diffuse / math.PI
+			out += linalg.lerp(l.ground, l.color, w) * diffuse * (ao / math.PI)
 		case .Directional, .Point:
 			ldir := l.vector
 			light := l.color
@@ -499,7 +641,7 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 		a004 := min(rv.x * rv.x, linalg.exp2(-9.28 * nv)) * rv.x + rv.y
 		fab := Vec2{-1.04, 1.04} * a004 + rv.zw
 		spec := f0 * fab.x + fab.y
-		out += env.intensity * (irr * diffuse * (1 - spec) + rad * spec)
+		out += (ao * env.intensity) * (irr * diffuse * (1 - spec) + rad * spec)
 	}
 	return out
 }

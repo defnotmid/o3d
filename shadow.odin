@@ -84,7 +84,7 @@ shadow_casters :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, sh: 
 		if .Cast_Shadow not_in m.flags || (m.shader != 0 && shader_get(shaders, m.shader) == nil) {
 			continue
 		}
-		if draw_seen(geos, geometries[i], models[i], sh.view_proj, scene_draw_joints(scene, i)) {
+		if draw_seen(geos, geometries[i], models[i], sh.view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i)) {
 			append(order, i)
 		}
 	}
@@ -146,14 +146,21 @@ mat_scale :: #force_inline proc "contextless" (m: Mat4) -> f32 {
 }
 
 // Whether a draw can be seen through `view_proj`: it has geometry and its
-// bounding sphere (covering its posed joints when skinned, and scaled with
-// the draw) is at least partly inside.
-draw_seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4, joints: []Mat4 = nil) -> bool {
+// bounding sphere (covering its morph deltas and posed joints, and scaled
+// with the draw) is at least partly inside.
+draw_seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4, joints: []Mat4 = nil, morphs: []f32 = nil) -> bool {
 	geo := geometry_get(geos, id) or_return
 	if geo.index_count == 0 {
 		return false
 	}
 	r := geo.radius
+	if len(morphs) > 0 && geo.morph_radius > 0 {
+		weight_sum: f32
+		for w in morphs[:min(len(morphs), int(geo.morph_targets))] {
+			weight_sum += abs(w)
+		}
+		r += weight_sum * geo.morph_radius
+	}
 	if len(joints) > 0 {
 		posed: f32
 		for j in joints {

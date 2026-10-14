@@ -3,81 +3,177 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 89 "o3d.slang"
+#line 113 "shaders/o3d.slang"
 struct vs_main_Result_0
 {
     float4 position_0 [[position]];
     float3 world_0 [[user(TEXCOORD)]];
     float3 normal_0 [[user(TEXCOORD_1)]];
     float2 uv_0 [[user(TEXCOORD_2)]];
+    float2 uv1_0 [[user(TEXCOORD_3)]];
 };
 
 
-#line 89
+#line 113
 struct vertexInput_0
 {
     float3 position_1 [[attribute(0)]];
     float3 normal_1 [[attribute(1)]];
     float2 uv_1 [[attribute(2)]];
+    float2 uv1_1 [[attribute(3)]];
 };
 
 
-#line 89
+#line 113
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 89
+#line 43
 struct Draw_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 mvp_0;
     _MatrixStorage_float4x4_ColMajornatural_0 model_0;
     _MatrixStorage_float4x4_ColMajornatural_0 normal_2;
+    array<uint4, int(2)> morph_bases_0;
+    array<float4, int(2)> morph_weights_0;
+    uint4 morph_info_0;
 };
 
 
-#line 103
+#line 43
+struct Morph_Delta_natural_0
+{
+    packed_float4 position_2;
+    packed_float4 normal_3;
+};
+
+
+#line 129
 struct VS_Out_0
 {
-    float4 position_2;
+    float4 position_3;
     float3 world_1;
-    float3 normal_3;
+    float3 normal_4;
     float2 uv_2;
+    float2 uv1_2;
 };
 
 
-#line 103
-[[vertex]] vs_main_Result_0 vs_main(vertexInput_0 _S1 [[stage_in]], Draw_VS_natural_0 constant* draw_0 [[buffer(0)]])
+#line 98
+struct KernelContext_0
+{
+    Draw_VS_natural_0 constant* draw_0;
+    Morph_Delta_natural_0 device* morphDeltas_0;
+};
+
+
+#line 98
+[[vertex]] vs_main_Result_0 vs_main(vertexInput_0 _S1 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_1 [[buffer(0)]], Morph_Delta_natural_0 device* morphDeltas_1 [[buffer(1)]])
 {
 
-#line 112
-    thread VS_Out_0 o_0;
-    float4 _S2 = float4(_S1.position_1, 1.0f);
+#line 98
+    VS_Out_0 _S2;
 
-#line 113
-    (&o_0)->position_2 = (((_S2) * (matrix<float,int(4),int(4)> (draw_0->mvp_0.data_0[int(0)][int(0)], draw_0->mvp_0.data_0[int(1)][int(0)], draw_0->mvp_0.data_0[int(2)][int(0)], draw_0->mvp_0.data_0[int(3)][int(0)], draw_0->mvp_0.data_0[int(0)][int(1)], draw_0->mvp_0.data_0[int(1)][int(1)], draw_0->mvp_0.data_0[int(2)][int(1)], draw_0->mvp_0.data_0[int(3)][int(1)], draw_0->mvp_0.data_0[int(0)][int(2)], draw_0->mvp_0.data_0[int(1)][int(2)], draw_0->mvp_0.data_0[int(2)][int(2)], draw_0->mvp_0.data_0[int(3)][int(2)], draw_0->mvp_0.data_0[int(0)][int(3)], draw_0->mvp_0.data_0[int(1)][int(3)], draw_0->mvp_0.data_0[int(2)][int(3)], draw_0->mvp_0.data_0[int(3)][int(3)]))));
-    (&o_0)->world_1 = (((_S2) * (matrix<float,int(4),int(4)> (draw_0->model_0.data_0[int(0)][int(0)], draw_0->model_0.data_0[int(1)][int(0)], draw_0->model_0.data_0[int(2)][int(0)], draw_0->model_0.data_0[int(3)][int(0)], draw_0->model_0.data_0[int(0)][int(1)], draw_0->model_0.data_0[int(1)][int(1)], draw_0->model_0.data_0[int(2)][int(1)], draw_0->model_0.data_0[int(3)][int(1)], draw_0->model_0.data_0[int(0)][int(2)], draw_0->model_0.data_0[int(1)][int(2)], draw_0->model_0.data_0[int(2)][int(2)], draw_0->model_0.data_0[int(3)][int(2)], draw_0->model_0.data_0[int(0)][int(3)], draw_0->model_0.data_0[int(1)][int(3)], draw_0->model_0.data_0[int(2)][int(3)], draw_0->model_0.data_0[int(3)][int(3)])))).xyz;
-    (&o_0)->normal_3 = (((float4(_S1.normal_1, 0.0f)) * (matrix<float,int(4),int(4)> (draw_0->normal_2.data_0[int(0)][int(0)], draw_0->normal_2.data_0[int(1)][int(0)], draw_0->normal_2.data_0[int(2)][int(0)], draw_0->normal_2.data_0[int(3)][int(0)], draw_0->normal_2.data_0[int(0)][int(1)], draw_0->normal_2.data_0[int(1)][int(1)], draw_0->normal_2.data_0[int(2)][int(1)], draw_0->normal_2.data_0[int(3)][int(1)], draw_0->normal_2.data_0[int(0)][int(2)], draw_0->normal_2.data_0[int(1)][int(2)], draw_0->normal_2.data_0[int(2)][int(2)], draw_0->normal_2.data_0[int(3)][int(2)], draw_0->normal_2.data_0[int(0)][int(3)], draw_0->normal_2.data_0[int(1)][int(3)], draw_0->normal_2.data_0[int(2)][int(3)], draw_0->normal_2.data_0[int(3)][int(3)])))).xyz;
-    (&o_0)->uv_2 = _S1.uv_1;
+#line 98
+    thread KernelContext_0 kernelContext_0;
 
-#line 116
-    thread vs_main_Result_0 _S3;
+#line 98
+    (&kernelContext_0)->draw_0 = draw_1;
 
-#line 116
-    (&_S3)->position_0 = o_0.position_2;
+#line 98
+    (&kernelContext_0)->morphDeltas_0 = morphDeltas_1;
 
-#line 116
-    (&_S3)->world_0 = o_0.world_1;
+#line 98
+    for(;;)
+    {
 
-#line 116
-    (&_S3)->normal_0 = o_0.normal_3;
+#line 98
+        uint k_0 = 0U;
 
-#line 116
-    (&_S3)->uv_0 = o_0.uv_2;
+#line 98
+        float3 pos_0 = _S1.position_1;
 
-#line 116
-    return _S3;
+#line 98
+        float3 norm_0 = _S1.normal_1;
+
+#line 141
+        for(;;)
+        {
+
+#line 141
+            if(k_0 < ((&kernelContext_0)->draw_0->morph_info_0.x))
+            {
+            }
+            else
+            {
+
+#line 141
+                break;
+            }
+
+#line 142
+            uint _S3 = k_0 >> 2U;
+
+#line 142
+            uint _S4 = k_0 & 3U;
+
+            Morph_Delta_natural_0 d_0 = (&kernelContext_0)->morphDeltas_0[(&kernelContext_0)->draw_0->morph_bases_0[_S3][_S4] + vid_0];
+
+#line 144
+            float3 _S5 = float3((&kernelContext_0)->draw_0->morph_weights_0[_S3][_S4]) ;
+            float3 pos_1 = pos_0 + (float4(d_0.position_2) ).xyz * _S5;
+            float3 norm_1 = norm_0 + (float4(d_0.normal_3) ).xyz * _S5;
+
+#line 141
+            k_0 = k_0 + 1U;
+
+#line 141
+            pos_0 = pos_1;
+
+#line 141
+            norm_0 = norm_1;
+
+#line 141
+        }
+
+#line 148
+        thread VS_Out_0 o_0;
+        float4 _S6 = float4(pos_0, 1.0f);
+
+#line 149
+        (&o_0)->position_3 = (((_S6) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(3)]))));
+        (&o_0)->world_1 = (((_S6) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(3)])))).xyz;
+        (&o_0)->normal_4 = (((float4(norm_0, 0.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(3)])))).xyz;
+        (&o_0)->uv_2 = _S1.uv_1;
+        (&o_0)->uv1_2 = _S1.uv1_1;
+
+#line 153
+        _S2 = o_0;
+        break;
+    }
+
+#line 154
+    thread vs_main_Result_0 _S7;
+
+#line 154
+    (&_S7)->position_0 = _S2.position_3;
+
+#line 154
+    (&_S7)->world_0 = _S2.world_1;
+
+#line 154
+    (&_S7)->normal_0 = _S2.normal_4;
+
+#line 154
+    (&_S7)->uv_0 = _S2.uv_2;
+
+#line 154
+    (&_S7)->uv1_0 = _S2.uv1_2;
+
+#line 154
+    return _S7;
 }
 

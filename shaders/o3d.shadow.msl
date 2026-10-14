@@ -2,18 +2,128 @@
 #include <metal_math>
 #include <metal_texture>
 using namespace metal;
+
+#line 90 "core"
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 306 "o3d.slang"
-[[fragment]] pixelOutput_0 fs_shadow(float4 position_0 [[position]])
+#line 90
+struct pixelInput_0
+{
+    float3 world_0 [[user(TEXCOORD)]];
+    float3 normal_0 [[user(TEXCOORD_1)]];
+    float2 uv_0 [[user(TEXCOORD_2)]];
+    float2 uv1_0 [[user(TEXCOORD_3)]];
+};
+
+
+#line 54 "shaders/o3d.slang"
+struct Material_0
+{
+    float4 color_0;
+    float4 emissive_0;
+    float metalness_0;
+    float roughness_0;
+    float ao_intensity_0;
+    uint flags_0;
+    float alpha_cutoff_0;
+    uint uv_sets_0;
+    uint2 pad_0;
+    array<float4, int(12)> uv_transforms_0;
+};
+
+
+#line 100
+struct KernelContext_0
+{
+    Material_0 constant* material_0;
+    texture2d<float, access::sample> colorMap_texture_0;
+    sampler colorMap_sampler_0;
+};
+
+
+#line 400
+[[fragment]] pixelOutput_0 fs_shadow(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], Material_0 constant* material_1 [[buffer(0)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]])
 {
 
-#line 306
-    pixelOutput_0 _S1 = { position_0.z };
-    return _S1;
+#line 400
+    thread KernelContext_0 kernelContext_0;
+
+#line 400
+    (&kernelContext_0)->material_0 = material_1;
+
+#line 400
+    (&kernelContext_0)->colorMap_texture_0 = colorMap_texture_1;
+
+#line 400
+    (&kernelContext_0)->colorMap_sampler_0 = colorMap_sampler_1;
+    if(((material_1->flags_0) & 2048U) != 0U)
+    {
+
+#line 402
+        float a_0 = (&kernelContext_0)->material_0->color_0.w;
+
+#line 402
+        float a_1;
+        if(((material_1->flags_0) & 32U) != 0U)
+        {
+
+#line 403
+            float2 raw_0;
+            if(((((&kernelContext_0)->material_0->uv_sets_0) >> 0U) & 1U) != 0U)
+            {
+
+#line 404
+                raw_0 = _S1.uv1_0;
+
+#line 404
+            }
+            else
+            {
+
+#line 404
+                raw_0 = _S1.uv_0;
+
+#line 404
+            }
+
+
+            float3 _S2 = float3(raw_0, 1.0f);
+
+#line 407
+            a_1 = a_0 * (((&kernelContext_0)->colorMap_texture_0).sample(((&kernelContext_0)->colorMap_sampler_0), (float2(dot((&kernelContext_0)->material_0->uv_transforms_0[0U].xyz, _S2), 1.0f - dot((&kernelContext_0)->material_0->uv_transforms_0[1U].xyz, _S2))), level((0.0f)))).w;
+
+#line 403
+        }
+        else
+        {
+
+#line 403
+            a_1 = a_0;
+
+#line 403
+        }
+
+#line 410
+        if(a_1 < ((&kernelContext_0)->material_0->alpha_cutoff_0))
+        {
+
+#line 411
+            discard_fragment();
+
+#line 410
+        }
+
+#line 401
+    }
+
+#line 401
+    pixelOutput_0 _S3 = { position_0.z };
+
+#line 414
+    return _S3;
 }
 

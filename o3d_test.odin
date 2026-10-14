@@ -664,3 +664,119 @@ test_generations :: proc(t: ^testing.T) {
 	defer geometries_destroy(&g)
 	testing.expect(t, g.generation != 0 && g.generation != first, "a new table, a new generation")
 }
+
+// Alpha_Mask discards fragments and shadow casters below alpha_cutoff (cut-out
+// shadows); ao_map occludes indirect light only (ambient/hemisphere/environment,
+// not direct lights) and reads uv1 when tex_coord == 1; Texture_Transform shifts,
+// rotates, and scales UVs.
+@(test)
+test_alpha_mask_ao_and_uv_transform :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+
+	// 1. Cut-out shadow and main-pass discard: a 32x32 texture whose left half has
+	//    alpha = 0 and right half has alpha = 255.
+	T :: 32
+	mask_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			if x >= T / 2 {
+				mask_px[i], mask_px[i + 1], mask_px[i + 2], mask_px[i + 3] = 220, 60, 60, 255
+			}
+		}
+	}
+	mask_id := texture_add(&textures, mask_px[:], T, T)
+
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 45, near = 0.1, far = 50}
+	append(&scene.lights, Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.25})
+	append(&scene.lights, Light{
+		kind        = .Directional,
+		color       = {1, 1, 1},
+		intensity   = 3,
+		position    = {0, 0, 5},
+		cast_shadow = true,
+		shadow      = {map_size = 256, height = 4, bias = -0.002},
+	})
+	floor := MATERIAL_DEFAULT
+	floor.color, floor.flags = {0.8, 0.8, 0.8}, {.Receive_Shadow}
+	cutout := MATERIAL_DEFAULT
+	cutout.color_map = mask_id
+	cutout.alpha_cutoff = 0.5
+	cutout.flags = {.Alpha_Mask, .Cast_Shadow}
+	cutout.side = .Double
+	append(&scene.draws, Draw{plane(&g, 3, 3), compose({0, 0, -1}), floor})
+	append(&scene.draws, Draw{plane(&g, 2, 2), compose({0, 0, 0}), cutout})
+
+	W :: 64
+	px := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	// Left side of cutout (x = 22, y = 32): discarded in both passes -> floor is directly lit by directional light!
+	// Right side of cutout (x = 42, y = 32): opaque red cutout.
+	left_px := px[(32 * W + 22) * 4:][:4]
+	right_px := px[(32 * W + 42) * 4:][:4]
+	testing.expectf(t, left_px[1] > 180 && left_px[2] > 180, "left half discarded in main+shadow passes, floor stays bright: %v", left_px)
+	testing.expectf(t, right_px[0] > 180 && right_px[1] < 100, "right half opaque red cutout: %v", right_px)
+
+	// Now view the floor directly (move cutout toward light so it only casts shadow on right half of floor):
+	scene.draws.model[1] = compose({0, 0, 2.5}) // behind camera's near or between light and floor
+	scene.camera.position = {0, 0, 1.5}
+	px_sh := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	floor_left := px_sh[(32 * W + 20) * 4]
+	floor_right := px_sh[(32 * W + 44) * 4]
+	testing.expectf(t, floor_left > floor_right + 60, "cut-out shadow: left floor (%d) unshadowed, right floor (%d) shadowed", floor_left, floor_right)
+
+	// 2. AO map on UV1 occludes indirect light (Ambient) only, leaving direct light intact,
+	//    and Texture_Transform offset shifts UVs.
+	ao_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			// UV1 u < 0.5 has AO = 0 (fully occluded indirect), u >= 0.5 has AO = 255 (unoccluded).
+			r := u8(0) if x < T / 2 else u8(255)
+			ao_px[i], ao_px[i + 1], ao_px[i + 2], ao_px[i + 3] = r, 255, 255, 255
+		}
+	}
+	ao_id := texture_add(&textures, ao_px[:], T, T)
+
+	// Custom quad where uv is constant {0, 0} (so UV0 would always read AO=0), while uv1 spans [0, 1] horizontally.
+	q_verts := [4]Vertex {
+		{{-1, -1, 0}, {0, 0, 1}, {0, 0}, {0, 0}},
+		{{ 1, -1, 0}, {0, 0, 1}, {0, 0}, {1, 0}},
+		{{ 1,  1, 0}, {0, 0, 1}, {0, 0}, {1, 1}},
+		{{-1,  1, 0}, {0, 0, 1}, {0, 0}, {0, 1}},
+	}
+	q_idx := [6]u32{0, 1, 2, 0, 2, 3}
+	quad_id := geometry_add(&g, q_verts[:], q_idx[:])
+
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 3}, fov = 45, near = 0.1, far = 50}
+	append(&scene.lights, Light{kind = .Ambient, color = {1, 1, 1}, intensity = 2.0})
+	ao_mat := MATERIAL_DEFAULT
+	ao_mat.ao_map = ao_id
+	ao_mat.ao_map_intensity = 1.0
+	ao_mat.ao_transform = {scale = {1, 1}, tex_coord = 1}
+	append(&scene.draws, Draw{quad_id, compose(), ao_mat})
+	px_ao := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	testing.expectf(t, px_ao[(32 * W + 20) * 4] < 10 && px_ao[(32 * W + 44) * 4] > 200, "AO on UV1 occludes left ambient (%d) and keeps right (%d)", px_ao[(32 * W + 20) * 4], px_ao[(32 * W + 44) * 4])
+
+	// With direct light only (no ambient), AO map does not darken the left half.
+	clear(&scene.lights)
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {0, 0, 5}})
+	px_dir := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	testing.expectf(t, abs(int(px_dir[(32 * W + 20) * 4]) - int(px_dir[(32 * W + 44) * 4])) <= 2, "AO does not occlude direct light")
+
+	// Shifting UV1 by offset = {0.5, 0} swaps the two halves under ambient light.
+	clear(&scene.lights)
+	append(&scene.lights, Light{kind = .Ambient, color = {1, 1, 1}, intensity = 2.0})
+	scene.draws.material[0].ao_transform.offset = {0.5, 0}
+	px_shift := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	testing.expectf(t, px_shift[(32 * W + 20) * 4] > 200 && px_shift[(32 * W + 44) * 4] < 10, "KHR_texture_transform offset={0.5,0} swaps AO halves")
+}
+

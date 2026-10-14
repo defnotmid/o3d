@@ -494,3 +494,321 @@ test_gltf_skinning :: proc(t: ^testing.T) {
 	testing.expect(t, px_sh[(32 * 64 + 22) * 4 + 1] > 200, "ShaderMaterial on skinned draw renders bent bar on left")
 }
 
+// Hand-made two-target cube (8 vertices, 12 triangles):
+// - Target 0 ("Tall"): stretches top 4 vertices (y > 0) by +1.2 in Y.
+// - Target 1 ("Wide"): stretches right/left vertices by +/-1.2 in X and tilts normals.
+// - Animation "morph_anim": LINEAR weights from [0, 0] at t=0 to [1, 0] at t=1.
+@(private = "file")
+make_morph_cube_gltf :: proc(allocator := context.temp_allocator) -> string {
+	Bin :: struct #packed {
+		pos:     [8][3]f32,
+		norm:    [8][3]f32,
+		d_pos0:  [8][3]f32,
+		d_norm0: [8][3]f32,
+		d_pos1:  [8][3]f32,
+		d_norm1: [8][3]f32,
+		idx:     [36]u16,
+		times:   [2]f32,
+		weights: [4]f32,
+	}
+	b := Bin {
+		pos = {
+			{-0.4, -0.4,  0.4}, { 0.4, -0.4,  0.4}, { 0.4,  0.4,  0.4}, {-0.4,  0.4,  0.4},
+			{-0.4, -0.4, -0.4}, { 0.4, -0.4, -0.4}, { 0.4,  0.4, -0.4}, {-0.4,  0.4, -0.4},
+		},
+		norm = {
+			{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1},
+			{0, 0, -1}, {0, 0, -1}, {0, 0, -1}, {0, 0, -1},
+		},
+		d_pos0 = {
+			{0, 0, 0}, {0, 0, 0}, {0, 1.2, 0}, {0, 1.2, 0},
+			{0, 0, 0}, {0, 0, 0}, {0, 1.2, 0}, {0, 1.2, 0},
+		},
+		d_norm0 = {
+			{0, 0, 0}, {0, 0, 0}, {0, 0.2, 0}, {0, 0.2, 0},
+			{0, 0, 0}, {0, 0, 0}, {0, 0.2, 0}, {0, 0.2, 0},
+		},
+		d_pos1 = {
+			{-1.0, 0, 0}, {1.0, 0, 0}, {1.0, 0, 0}, {-1.0, 0, 0},
+			{-1.0, 0, 0}, {1.0, 0, 0}, {1.0, 0, 0}, {-1.0, 0, 0},
+		},
+		d_norm1 = {
+			{-0.2, 0, 0}, {0.2, 0, 0}, {0.2, 0, 0}, {-0.2, 0, 0},
+			{-0.2, 0, 0}, {0.2, 0, 0}, {0.2, 0, 0}, {-0.2, 0, 0},
+		},
+		idx = {
+			0, 1, 2, 0, 2, 3, // front
+			5, 4, 7, 5, 7, 6, // back
+			4, 0, 3, 4, 3, 7, // left
+			1, 5, 6, 1, 6, 2, // right
+			3, 2, 6, 3, 6, 7, // top
+			4, 5, 1, 4, 1, 0, // bottom
+		},
+		times   = {0, 1},
+		weights = {0, 0, 1, 0},
+	}
+	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = allocator)
+	return fmt.aprintf(
+		`{{
+  "asset": {{"version": "2.0"}},
+  "buffers": [{{"uri": "data:application/octet-stream;base64,%s", "byteLength": %d}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0,   "byteLength": 96}},
+    {{"buffer": 0, "byteOffset": 96,  "byteLength": 96}},
+    {{"buffer": 0, "byteOffset": 192, "byteLength": 96}},
+    {{"buffer": 0, "byteOffset": 288, "byteLength": 96}},
+    {{"buffer": 0, "byteOffset": 384, "byteLength": 96}},
+    {{"buffer": 0, "byteOffset": 480, "byteLength": 96}},
+    {{"buffer": 0, "byteOffset": 576, "byteLength": 72}},
+    {{"buffer": 0, "byteOffset": 648, "byteLength": 8}},
+    {{"buffer": 0, "byteOffset": 656, "byteLength": 16}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 8, "type": "VEC3", "min": [-0.4, -0.4, -0.4], "max": [0.4, 0.4, 0.4]}},
+    {{"bufferView": 1, "componentType": 5126, "count": 8, "type": "VEC3"}},
+    {{"bufferView": 2, "componentType": 5126, "count": 8, "type": "VEC3"}},
+    {{"bufferView": 3, "componentType": 5126, "count": 8, "type": "VEC3"}},
+    {{"bufferView": 4, "componentType": 5126, "count": 8, "type": "VEC3"}},
+    {{"bufferView": 5, "componentType": 5126, "count": 8, "type": "VEC3"}},
+    {{"bufferView": 6, "componentType": 5123, "count": 36, "type": "SCALAR"}},
+    {{"bufferView": 7, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1]}},
+    {{"bufferView": 8, "componentType": 5126, "count": 4, "type": "SCALAR"}}
+  ],
+  "materials": [{{
+    "pbrMetallicRoughness": {{"baseColorFactor": [0.9, 0.3, 0.2, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.5}},
+    "doubleSided": true
+  }}],
+  "meshes": [{{
+    "weights": [0.0, 0.0],
+    "extras": {{"targetNames": ["Tall", "Wide"]}},
+    "primitives": [{{
+      "attributes": {{"POSITION": 0, "NORMAL": 1}},
+      "targets": [
+        {{"POSITION": 2, "NORMAL": 3}},
+        {{"POSITION": 4, "NORMAL": 5}}
+      ],
+      "indices": 6,
+      "material": 0
+    }}]
+  }}],
+  "nodes": [{{"name": "cube", "mesh": 0}}],
+  "scenes": [{{"nodes": [0]}}],
+  "scene": 0,
+  "animations": [{{
+    "name": "morph_anim",
+    "samplers": [{{"input": 7, "output": 8, "interpolation": "LINEAR"}}],
+    "channels": [{{"sampler": 0, "target": {{"node": 0, "path": "weights"}}}}]
+  }}]
+}}`,
+		b64,
+		size_of(Bin),
+		allocator = allocator,
+	)
+}
+
+@(test)
+test_gltf_morph_targets :: proc(t: ^testing.T) {
+	src := make_morph_cube_gltf(context.temp_allocator)
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	model, err := gltf_parse(transmute([]u8)src, &geos)
+	defer model_destroy(&model)
+	testing.expect_value(t, err, Gltf_Error.None)
+	testing.expect_value(t, gltf_morph_count(&model), 2)
+	testing.expect_value(t, gltf_morph_target(&model, "Tall"), 0)
+	testing.expect_value(t, gltf_morph_target(&model, "Wide"), 1)
+	testing.expect_value(t, gltf_morph_target(&model, "Missing"), -1)
+
+	geo, ok := geometry_get(&geos, model.primitives[0].geometry)
+	testing.expect(t, ok && geo.morph_targets == 2 && geo.morph_radius >= 1.19)
+
+	scene: Scene
+	defer scene_destroy(&scene)
+	sw: Software
+	defer software_destroy(&sw)
+
+	setup_cam :: proc(scene: ^Scene) {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0.4, 3.8}, target = {0, 0.4, 0}, fov = 50, near = 0.1, far = 20}
+		append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 1, 5}})
+	}
+
+	// 1. Weights 0: cube goes up to y = 0.4, so y ~ 1.2 (row 12) is empty and x ~ -1.1 (col 12) is empty.
+	setup_cam(&scene)
+	gltf_draw(&scene, &model)
+	px0 := software_render(&sw, &scene, &geos, nil, 64, 64)
+	top_0 := px0[(12 * 64 + 32) * 4 + 3]
+	side_0 := px0[(40 * 64 + 12) * 4 + 3]
+	center_0 := px0[(40 * 64 + 32) * 4 + 3]
+	testing.expect(t, center_0 > 200 && top_0 == 0 && side_0 == 0, "weights 0: compact cube at center only")
+
+	// 2. Weight 1 on target 0 (by index): top stretches to y = 1.6, covering row 12.
+	setup_cam(&scene)
+	gltf_draw(&scene, &model, morphs = {{index = 0, weight = 1}})
+	px_tall := software_render(&sw, &scene, &geos, nil, 64, 64)
+	testing.expect(t, px_tall[(12 * 64 + 32) * 4 + 3] > 200 && px_tall[(40 * 64 + 12) * 4 + 3] == 0, "Tall=1 reaches top")
+
+	// 3. Animated at t = 1.0: morph_anim drives target 0 to 1.0.
+	setup_cam(&scene)
+	gltf_draw(&scene, &model, anim = 0, time = 1.0, loop = false)
+	px_anim := software_render(&sw, &scene, &geos, nil, 64, 64)
+	testing.expect(t, px_anim[(12 * 64 + 32) * 4 + 3] > 200, "animated weights at t=1 reach top")
+
+	// 4. Overridden by name after animation, with zero warm-frame allocations:
+	//    suppress "Tall" to 0 and set "Wide" to 1.
+	pose: Model_Pose
+	defer model_pose_destroy(&pose)
+	gltf_draw(&scene, &model, anim = 0, time = 1.0, loop = false, pose = &pose, morphs = {{name = "Tall", weight = 0}, {name = "Wide", weight = 1}})
+	_ = software_render(&sw, &scene, &geos, nil, 64, 64)
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		setup_cam(&scene)
+		gltf_draw(&scene, &model, anim = 0, time = 1.0, loop = false, pose = &pose, morphs = {{name = "Tall", weight = 0}, {name = "Wide", weight = 1}})
+		px_wide := software_render(&sw, &scene, &geos, nil, 64, 64)
+		testing.expect(t, px_wide[(12 * 64 + 32) * 4 + 3] == 0 && px_wide[(40 * 64 + 12) * 4 + 3] > 200, "override Tall=0, Wide=1 stretches horizontally")
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, track.total_memory_allocated, 0)
+
+	// 5. Bounding sphere covers morphed height: place the cube below the view frustum so
+	//    unmorphed (radius ~0.69) is culled, while Tall=1.5 expands radius into the view.
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, target = {0, 0, 0}, fov = 30, near = 0.1, far = 20}
+	view, proj := camera_matrices(scene.camera, 64, 64)
+	order: [dynamic]int
+	defer delete(order)
+	gltf_draw(&scene, &model, transform = compose({0, -1.9, 0}))
+	draw_order(&scene, &geos, nil, view, proj, &order)
+	testing.expect_value(t, len(order), 0)
+
+	scene_clear(&scene)
+	gltf_draw(&scene, &model, transform = compose({0, -1.9, 0}), morphs = {{name = "Tall", weight = 1.5}})
+	draw_order(&scene, &geos, nil, view, proj, &order)
+	testing.expect_value(t, len(order), 1)
+}
+
+@(test)
+test_gltf_extensions_and_materials :: proc(t: ^testing.T) {
+	// Quantized mesh with TEXCOORD_0 (normalized u16), TEXCOORD_1 (float),
+	// KHR_materials_emissive_strength, KHR_texture_transform, occlusionTexture on UV1,
+	// and alphaMode: MASK with alphaCutoff.
+	Bin :: struct #packed {
+		pos_i16: [4][4]i16, // 4 vertices, 3D i16 padded to 4
+		norm_i8: [4][4]i8,  // 4 vertices, 3D normalized i8 padded to 4
+		uv0_u16: [4][2]u16, // normalized u16
+		uv1_f32: [4][2]f32,
+		idx:     [6]u16,
+		_pad:    [1]u16,
+	}
+	b := Bin {
+		pos_i16 = {{-1, -1, 0, 0}, {1, -1, 0, 0}, {1, 1, 0, 0}, {-1, 1, 0, 0}},
+		norm_i8 = {{0, 0, 127, 0}, {0, 0, 127, 0}, {0, 0, 127, 0}, {0, 0, 127, 0}},
+		uv0_u16 = {{0, 65535}, {65535, 65535}, {65535, 0}, {0, 0}},
+		uv1_f32 = {{0, 0}, {1, 0}, {1, 1}, {0, 1}},
+		idx     = {0, 1, 2, 0, 2, 3},
+	}
+	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	PNG_1X1 :: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg=="
+	src := fmt.tprintf(
+		`{{
+  "asset": {{"version": "2.0"}},
+  "extensionsUsed": ["KHR_mesh_quantization", "KHR_materials_emissive_strength", "KHR_texture_transform"],
+  "extensionsRequired": ["KHR_mesh_quantization"],
+  "buffers": [{{"uri": "data:application/octet-stream;base64,%s", "byteLength": %d}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0,  "byteLength": 32, "byteStride": 8}},
+    {{"buffer": 0, "byteOffset": 32, "byteLength": 16, "byteStride": 4}},
+    {{"buffer": 0, "byteOffset": 48, "byteLength": 16}},
+    {{"buffer": 0, "byteOffset": 64, "byteLength": 32}},
+    {{"buffer": 0, "byteOffset": 96, "byteLength": 12}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5122, "count": 4, "type": "VEC3"}},
+    {{"bufferView": 1, "componentType": 5120, "count": 4, "type": "VEC3", "normalized": true}},
+    {{"bufferView": 2, "componentType": 5123, "count": 4, "type": "VEC2", "normalized": true}},
+    {{"bufferView": 3, "componentType": 5126, "count": 4, "type": "VEC2"}},
+    {{"bufferView": 4, "componentType": 5123, "count": 6, "type": "SCALAR"}}
+  ],
+  "images": [{{"uri": "data:image/png;base64,%s"}}],
+  "textures": [{{"source": 0}}],
+  "materials": [{{
+    "alphaMode": "MASK",
+    "alphaCutoff": 0.65,
+    "emissiveFactor": [0.2, 0.4, 0.8],
+    "extensions": {{
+      "KHR_materials_emissive_strength": {{"emissiveStrength": 3.5}}
+    }},
+    "pbrMetallicRoughness": {{
+      "baseColorTexture": {{
+        "index": 0,
+        "extensions": {{
+          "KHR_texture_transform": {{"offset": [0.25, 0.5], "rotation": 0.5, "scale": [2.0, 3.0], "texCoord": 1}}
+        }}
+      }}
+    }},
+    "occlusionTexture": {{"index": 0, "texCoord": 1, "strength": 0.75}},
+    "doubleSided": true
+  }}],
+  "meshes": [{{
+    "primitives": [{{
+      "attributes": {{"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2, "TEXCOORD_1": 3}},
+      "indices": 4,
+      "material": 0
+    }}]
+  }}],
+  "nodes": [{{"mesh": 0}}],
+  "scenes": [{{"nodes": [0]}}],
+  "scene": 0
+}}`,
+		b64,
+		size_of(Bin),
+		PNG_1X1,
+	)
+
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	textures: Textures
+	defer textures_destroy(&textures)
+	model, err := gltf_parse(transmute([]u8)src, &geos, &textures)
+	defer model_destroy(&model)
+	testing.expect_value(t, err, Gltf_Error.None)
+	verts, _, ok := geometry_mesh(&geos, model.primitives[0].geometry)
+	testing.expect(t, ok && len(verts) == 4)
+	testing.expect(t, linalg.length(verts[2].position - Vec3{1, 1, 0}) < 1e-4, "quantized i16 position")
+	testing.expect(t, linalg.length(verts[2].normal - Vec3{0, 0, 1}) < 1e-2, "quantized normalized i8 normal")
+	testing.expect(t, linalg.length(verts[2].uv - Vec2{1, 1}) < 1e-4, "quantized normalized u16 uv0 flipped")
+	testing.expect(t, linalg.length(verts[2].uv1 - Vec2{1, 0}) < 1e-4, "uv1 flipped")
+
+	mat := model.primitives[0].material
+	testing.expect(t, .Alpha_Mask in mat.flags && abs(mat.alpha_cutoff - 0.65) < 1e-5, "MASK mode and alphaCutoff")
+	testing.expect(t, abs(mat.emissive_intensity - 3.5) < 1e-5, "KHR_materials_emissive_strength")
+	testing.expect(t, mat.ao_map != 0 && abs(mat.ao_map_intensity - 0.75) < 1e-5 && mat.ao_transform.tex_coord == 1, "occlusionTexture on UV1")
+	testing.expect(t, mat.color_transform.offset == {0.25, 0.5} && mat.color_transform.scale == {2, 3} && mat.color_transform.tex_coord == 1, "KHR_texture_transform")
+}
+
+@(test)
+test_gltf_unsupported_extensions :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+
+	for ext in ([]string{"KHR_draco_mesh_compression", "EXT_meshopt_compression", "KHR_texture_basisu"}) {
+		src := fmt.tprintf(`{{"asset":{{"version":"2.0"}},"extensionsUsed":[%q],"extensionsRequired":[%q]}}`, ext, ext)
+		m, err := gltf_parse(transmute([]u8)src, &geos)
+		defer model_destroy(&m)
+		testing.expect_value(t, err, Gltf_Error.Unsupported_Extension)
+		testing.expect_value(t, m.unsupported_extension, ext)
+		testing.expect(t, GLTF_ERROR_TEXT[err] != "")
+	}
+
+	// Optional extensions in extensionsUsed (not in extensionsRequired) are ignored.
+	opt := `{"asset":{"version":"2.0"},"extensionsUsed":["KHR_materials_ior","KHR_lights_punctual","KHR_materials_transmission"],"scenes":[{"nodes":[]}],"scene":0}`
+	m_opt, err_opt := gltf_parse(transmute([]u8)opt, &geos)
+	defer model_destroy(&m_opt)
+	testing.expect_value(t, err_opt, Gltf_Error.None)
+}
+
+

@@ -25,6 +25,7 @@ Vertex :: struct {
 	position: Vec3,
 	normal:   Vec3,
 	uv:       Vec2,
+	uv1:      Vec2,
 }
 
 // A skinned vertex's four joint indices (into the draw's joint matrices) and
@@ -33,6 +34,74 @@ Vertex :: struct {
 Skin_Vertex :: struct {
 	joints:  [4]u16,
 	weights: Vec4,
+}
+
+MAX_MORPH_TARGETS :: 8
+
+// A morph target's vertex delta (kept in `Geometries.morph_deltas`, target by
+// target, `vertex_count` deltas per target, so meshes without morphs pay
+// nothing). Padded to 16-byte vectors so the GPU's storage buffer layout
+// matches across Vulkan and Metal.
+Morph_Delta :: struct {
+	position: [4]f32,
+	normal:   [4]f32,
+}
+#assert(size_of(Morph_Delta) == 32)
+
+// A non-zero morph target active on a draw: `base` is the target's first
+// delta in `Geometries.morph_deltas` (`first_morph + target * vertex_count`).
+Active_Morph :: struct {
+	base:   u32,
+	weight: f32,
+}
+
+// Selects up to `MAX_MORPH_TARGETS` non-zero morph targets for `geo` from
+// `weights` (the strongest when more than `MAX_MORPH_TARGETS` are non-zero,
+// kept in target order), shared by the software vertex stage and the GPU.
+active_morphs :: proc "contextless" (geo: Geometry, weights: []f32, out: ^[MAX_MORPH_TARGETS]Active_Morph) -> int {
+	limit := min(int(geo.morph_targets), len(weights))
+	if limit <= 0 || geo.vertex_count == 0 {
+		return 0
+	}
+	n := 0
+	for t in 0 ..< limit {
+		w := weights[t]
+		if w == 0 {
+			continue
+		}
+		base := geo.first_morph + u32(t) * geo.vertex_count
+		if n < MAX_MORPH_TARGETS {
+			out[n] = {base, w}
+			n += 1
+			continue
+		}
+		min_idx := 0
+		for k in 1 ..< MAX_MORPH_TARGETS {
+			if abs(out[k].weight) < abs(out[min_idx].weight) {
+				min_idx = k
+			}
+		}
+		if abs(w) > abs(out[min_idx].weight) {
+			for k in min_idx ..< MAX_MORPH_TARGETS - 1 {
+				out[k] = out[k + 1]
+			}
+			out[MAX_MORPH_TARGETS - 1] = {base, w}
+		}
+	}
+	return n
+}
+
+// Applies morph target deltas `active` to `v` (vertex `vi` within its
+// geometry) in local space, before skinning, the same math as `vs_main` and
+// `vs_skinned` in shaders/o3d.slang.
+morph_vertex :: #force_inline proc "contextless" (v: Vertex, vi: u32, deltas: []Morph_Delta, active: []Active_Morph) -> (pos, norm: Vec3) {
+	pos, norm = v.position, v.normal
+	for a in active {
+		d := deltas[a.base + vi]
+		pos += Vec3{d.position.x, d.position.y, d.position.z} * a.weight
+		norm += Vec3{d.normal.x, d.normal.y, d.normal.z} * a.weight
+	}
+	return
 }
 
 // Applies linear blend skinning from `joints` to `v` in the draw's local
@@ -56,9 +125,11 @@ Geometry :: struct {
 	first_vertex, vertex_count: u32,
 	first_index, index_count:   u32,
 	first_skin:                 u32,
+	first_morph, morph_targets: u32,
 	skinned:                    bool,
-	// Distance from the origin to the farthest vertex (culling, sorting).
-	radius:                     f32,
+	// Distance from the origin to the farthest vertex (culling, sorting),
+	// and the largest morph position delta length across targets.
+	radius, morph_radius:       f32,
 }
 
 // 0 is no geometry.
@@ -98,6 +169,7 @@ Geometries :: struct {
 	generation:    Generation, // of these contents, for the GPU's mirror
 	vertices:      [dynamic]Vertex,
 	skin_vertices: [dynamic]Skin_Vertex,
+	morph_deltas:  [dynamic]Morph_Delta,
 	indices:       [dynamic]u32,
 	list:          [dynamic]Geometry,
 	keys:          map[Geometry_Key]Geometry_Id,
@@ -111,6 +183,7 @@ Geometries :: struct {
 geometries_destroy :: proc(g: ^Geometries) {
 	delete(g.vertices)
 	delete(g.skin_vertices)
+	delete(g.morph_deltas)
 	delete(g.indices)
 	delete(g.list)
 	delete(g.keys)
@@ -148,7 +221,7 @@ geometries_made :: proc "contextless" (g: ^Geometries) -> int {
 	return len(g.list)
 }
 
-geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: []Skin_Vertex = nil) -> Geometry_Id {
+geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: []Skin_Vertex = nil, morph_deltas: []Morph_Delta = nil) -> Geometry_Id {
 	generation_take(&g.generation)
 	r: f32
 	for v in vertices {
@@ -156,18 +229,34 @@ geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: [
 	}
 	skinned := len(skin) == len(vertices) && len(skin) > 0
 	first_skin := u32(len(g.skin_vertices)) if skinned else 0
+	morph_targets: u32
+	first_morph: u32
+	morph_r: f32
+	if len(vertices) > 0 && len(morph_deltas) > 0 && len(morph_deltas) % len(vertices) == 0 {
+		morph_targets = u32(len(morph_deltas) / len(vertices))
+		first_morph = u32(len(g.morph_deltas))
+		for d in morph_deltas {
+			morph_r = max(morph_r, linalg.length(Vec3{d.position.x, d.position.y, d.position.z}))
+		}
+	}
 	append(&g.list, Geometry{
-		first_vertex = u32(len(g.vertices)),
-		vertex_count = u32(len(vertices)),
-		first_index  = u32(len(g.indices)),
-		index_count  = u32(len(indices)),
-		first_skin   = first_skin,
-		skinned      = skinned,
-		radius       = r,
+		first_vertex  = u32(len(g.vertices)),
+		vertex_count  = u32(len(vertices)),
+		first_index   = u32(len(g.indices)),
+		index_count   = u32(len(indices)),
+		first_skin    = first_skin,
+		first_morph   = first_morph,
+		morph_targets = morph_targets,
+		skinned       = skinned,
+		radius        = r,
+		morph_radius  = morph_r,
 	})
 	append(&g.vertices, ..vertices)
 	if skinned {
 		append(&g.skin_vertices, ..skin)
+	}
+	if morph_targets > 0 {
+		append(&g.morph_deltas, ..morph_deltas)
 	}
 	append(&g.indices, ..indices)
 	return Geometry_Id(len(g.list))
@@ -238,7 +327,7 @@ build_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 				p[w] = depth / 2
 				n: Vec3
 				n[w] = 1 if depth > 0 else -1
-				append(verts, Vertex{p, n, {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}})
+				append(verts, Vertex{p, n, {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}, {}})
 			}
 		}
 		for iy in 0 ..< gy {
@@ -269,7 +358,7 @@ build_sphere :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32
 			// three.js: x = -cos(phi) sin(theta), y = cos(theta), z = sin(phi) sin(theta).
 			phi, theta := u * 2 * math.PI, v * math.PI
 			n := Vec3{-math.cos(phi) * math.sin(theta), math.cos(theta), math.sin(phi) * math.sin(theta)}
-			append(verts, Vertex{n * r, n, {u, 1 - v}})
+			append(verts, Vertex{n * r, n, {u, 1 - v}, {}})
 		}
 	}
 	for iy in 0 ..< hs {
@@ -295,7 +384,7 @@ build_plane :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 		y := f32(iy) * h / f32(gy) - h / 2
 		for ix in 0 ..= gx {
 			x := f32(ix) * w / f32(gx) - w / 2
-			append(verts, Vertex{{x, -y, 0}, {0, 0, 1}, {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}})
+			append(verts, Vertex{{x, -y, 0}, {0, 0, 1}, {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}, {}})
 		}
 	}
 	for iy in 0 ..< gy {
@@ -322,7 +411,7 @@ build_cylinder :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u
 			theta := u * 2 * math.PI
 			s, c := math.sin(theta), math.cos(theta)
 			n := linalg.normalize(Vec3{s, slope, c})
-			append(verts, Vertex{{r * s, -v * h + h / 2, r * c}, n, {u, 1 - v}})
+			append(verts, Vertex{{r * s, -v * h + h / 2, r * c}, n, {u, 1 - v}, {}})
 		}
 	}
 	for ix in 0 ..< rs {
@@ -343,11 +432,11 @@ build_cylinder :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u
 		}
 		sign: f32 = 1 if top else -1
 		centre := u32(len(verts))
-		append(verts, Vertex{{0, h / 2 * sign, 0}, {0, sign, 0}, {0.5, 0.5}})
+		append(verts, Vertex{{0, h / 2 * sign, 0}, {0, sign, 0}, {0.5, 0.5}, {}})
 		for ix in 0 ..= rs {
 			theta := f32(ix) / f32(rs) * 2 * math.PI
 			s, c := math.sin(theta), math.cos(theta)
-			append(verts, Vertex{{r * s, h / 2 * sign, r * c}, {0, sign, 0}, {c * 0.5 + 0.5, s * 0.5 * sign + 0.5}})
+			append(verts, Vertex{{r * s, h / 2 * sign, r * c}, {0, sign, 0}, {c * 0.5 + 0.5, s * 0.5 * sign + 0.5}, {}})
 		}
 		for ix in 0 ..< rs {
 			i := centre + 1 + u32(ix)
@@ -371,7 +460,7 @@ build_torus :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 			v := f32(j) / f32(rs) * 2 * math.PI
 			pos := Vec3{(R + r * math.cos(v)) * math.cos(u), (R + r * math.cos(v)) * math.sin(u), r * math.sin(v)}
 			centre := Vec3{R * math.cos(u), R * math.sin(u), 0}
-			append(verts, Vertex{pos, linalg.normalize(pos - centre), {f32(i) / f32(ts), f32(j) / f32(rs)}})
+			append(verts, Vertex{pos, linalg.normalize(pos - centre), {f32(i) / f32(ts), f32(j) / f32(rs)}, {}})
 		}
 	}
 	for j in 1 ..= rs {

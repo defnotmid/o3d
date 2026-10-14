@@ -13,7 +13,7 @@ import o3d ".."
 @(private = "file")
 sync_mirrors :: proc(g: ^GPU, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, textures: ^o3d.Textures) {
 	if geos != nil && geos.generation != g.mirrored.geometry {
-		g.vertices.uploaded, g.skin_vertices.uploaded, g.indices.uploaded = 0, 0, 0
+		g.vertices.uploaded, g.skin_vertices.uploaded, g.morph_deltas.uploaded, g.indices.uploaded = 0, 0, 0, 0
 		g.mirrored.geometry = geos.generation
 	}
 	if textures != nil && textures.generation != g.mirrored.textures {
@@ -37,21 +37,23 @@ sync_mirrors :: proc(g: ^GPU, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, text
 upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
 	vertices := mem.slice_to_bytes(geos.vertices[:])
 	skin_vertices := mem.slice_to_bytes(geos.skin_vertices[:])
+	morph_deltas := mem.slice_to_bytes(geos.morph_deltas[:])
 	indices := mem.slice_to_bytes(geos.indices[:])
-	if u32(len(vertices)) == g.vertices.uploaded && u32(len(skin_vertices)) == g.skin_vertices.uploaded && u32(len(indices)) == g.indices.uploaded {
+	if u32(len(vertices)) == g.vertices.uploaded && u32(len(skin_vertices)) == g.skin_vertices.uploaded && u32(len(morph_deltas)) == g.morph_deltas.uploaded && u32(len(indices)) == g.indices.uploaded {
 		return nil
 	}
 	pass := sdl.BeginGPUCopyPass(cmd)
 	defer sdl.EndGPUCopyPass(pass)
 	upload_pool(g, &g.vertices, {.VERTEX}, vertices, pass) or_return
 	upload_pool(g, &g.skin_vertices, {.VERTEX}, skin_vertices, pass) or_return
+	upload_pool(g, &g.morph_deltas, {.GRAPHICS_STORAGE_READ}, morph_deltas, pass) or_return
 	upload_pool(g, &g.indices, {.INDEX}, indices, pass) or_return
 	return nil
 }
 
-// When a skinned draw uses a ShaderMaterial, skins its vertices into
-// `g.custom_skinned` before the render pass so the user's vertex shader
-// receives posed positions and normals.
+// When a morphed or skinned draw uses a ShaderMaterial, morphs and skins its
+// vertices into `g.custom_skinned` before the render pass so the user's vertex
+// shader receives posed positions and normals.
 @(private = "file")
 upload_custom_skinned :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
 	clear(&g.custom_skinned_verts)
@@ -64,20 +66,32 @@ upload_custom_skinned :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries,
 			continue
 		}
 		d := &scene.draws[di]
-		skin := o3d.geometry_skin(geos, d.geometry)
-		joints := o3d.scene_draw_joints(scene, di)
-		if len(skin) == 0 || len(joints) == 0 {
-			continue
-		}
-		verts, _, ok := o3d.geometry_mesh(geos, d.geometry)
+		geo, ok := o3d.geometry_get(geos, d.geometry)
 		if !ok {
 			continue
 		}
+		morphs: [o3d.MAX_MORPH_TARGETS]o3d.Active_Morph
+		nm := o3d.active_morphs(geo, o3d.scene_draw_morphs(scene, di), &morphs)
+		morphed := nm > 0 && len(geos.morph_deltas) > 0
+		skin := o3d.geometry_skin(geos, d.geometry)
+		joints := o3d.scene_draw_joints(scene, di)
+		skinned := len(skin) > 0 && len(joints) > 0
+		if !morphed && !skinned {
+			continue
+		}
+		verts, _, _ := o3d.geometry_mesh(geos, d.geometry)
 		first := len(g.custom_skinned_verts)
 		o3d.table_grow_non_zero(&g.custom_skinned_verts, first + len(verts))
+		deltas := geos.morph_deltas[:]
 		for vtx, i in verts {
-			pos, norm := o3d.skin_vertex(vtx, skin[i], joints)
-			g.custom_skinned_verts[first + i] = {pos, norm, vtx.uv}
+			v := vtx
+			if morphed {
+				v.position, v.normal = o3d.morph_vertex(v, u32(i), deltas, morphs[:nm])
+			}
+			if skinned {
+				v.position, v.normal = o3d.skin_vertex(v, skin[i], joints)
+			}
+			g.custom_skinned_verts[first + i] = v
 		}
 		g.custom_skinned_first[di] = i32(first)
 	}
@@ -88,6 +102,41 @@ upload_custom_skinned :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries,
 	pass := sdl.BeginGPUCopyPass(cmd)
 	defer sdl.EndGPUCopyPass(pass)
 	return upload_pool(g, &g.custom_skinned, {.VERTEX}, mem.slice_to_bytes(g.custom_skinned_verts[:]), pass)
+}
+
+@(private = "file")
+make_draw_uniforms :: #force_inline proc "contextless" (mvp, model: o3d.Mat4, geo: o3d.Geometry, weights: []f32) -> (du: Draw_Uniforms) {
+	du.mvp = mvp
+	du.model = model
+	du.normal = o3d.normal_matrix(model)
+	morphs: [o3d.MAX_MORPH_TARGETS]o3d.Active_Morph
+	nm := o3d.active_morphs(geo, weights, &morphs)
+	for i in 0 ..< nm {
+		du.morph_bases[i >> 2][i & 3] = morphs[i].base
+		du.morph_weights[i >> 2][i & 3] = morphs[i].weight
+	}
+	du.morph_info = {u32(nm), 0, 0, 0}
+	return
+}
+
+@(private = "file")
+make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Material) -> (mu: Material_Uniforms) {
+	mu = {
+		color        = {m.base.r, m.base.g, m.base.b, m.opacity},
+		emissive     = {m.emissive.r, m.emissive.g, m.emissive.b, 0},
+		metalness    = m.metalness,
+		roughness    = m.roughness,
+		ao_intensity = m.ao_intensity,
+		flags        = m.flags,
+		alpha_cutoff = m.alpha_cutoff,
+		uv_sets      = m.uv_sets,
+	}
+	for s, i in o3d.Texture_Slot {
+		t := m.uv_transforms[s]
+		mu.uv_transforms[i * 2] = {t[0].x, t[0].y, t[0].z, 0}
+		mu.uv_transforms[i * 2 + 1] = {t[1].x, t[1].y, t[1].z, 0}
+	}
+	return
 }
 
 // Uploads `data` past what `b` holds, into a buffer twice as large when it
@@ -140,9 +189,14 @@ draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: 
 	}
 	sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
 	sdl.BindGPUIndexBuffer(pass, {buffer = g.indices.buffer}, ._32BIT)
+	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	bound: ^sdl.GPUGraphicsPipeline
 	vb_zero := true
 	for di in g.casters {
+		m := &g.materials[di]
+		if .Alpha_Mask in m.flags && .Color_Map not_in m.flags && m.opacity < m.alpha_cutoff {
+			continue
+		}
 		d := &scene.draws[di]
 		geo, _ := o3d.geometry_get(geos, d.geometry) // shadow_casters kept only draws with geometry
 		joints := o3d.scene_draw_joints(scene, di)
@@ -152,8 +206,12 @@ draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: 
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
 		}
-		du := Draw_Uniforms{shadow.view_proj * d.model, d.model, o3d.normal_matrix(d.model)}
+		color_sampler := tex_binding(g, m.color_map)
+		sdl.BindGPUFragmentSamplers(pass, 0, &color_sampler, 1)
+		du := make_draw_uniforms(shadow.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
+		mu := make_material_uniforms(m)
+		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {
 			vbs := [2]sdl.GPUBufferBinding {
 				{buffer = g.vertices.buffer, offset = geo.first_vertex * size_of(o3d.Vertex)},
@@ -164,6 +222,10 @@ draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: 
 			ju: [o3d.MAX_JOINTS]o3d.Mat4
 			copy(ju[:], joints)
 			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
+			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
+		} else if du.morph_info.x > 0 && geo.first_vertex > 0 {
+			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
+			vb_zero = false
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
 		} else {
 			if !vb_zero {
@@ -317,6 +379,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	}
 	sdl.PushGPUFragmentUniformData(cmd, 1, &lu, size_of(lu))
+	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	vb_zero := false
 	if g.vertices.buffer != nil && g.indices.buffer != nil {
 		sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
@@ -369,26 +432,21 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
 		}
-		samplers := [8]sdl.GPUTextureSamplerBinding {
-			{texture = g.shadow_map, sampler = g.shadow_sampler},
+		samplers := [9]sdl.GPUTextureSamplerBinding {
 			tex_binding(g, m.color_map),
+			{texture = g.shadow_map, sampler = g.shadow_sampler},
 			tex_binding(g, m.normal_map),
 			tex_binding(g, m.roughness_map),
 			tex_binding(g, m.emissive_map),
 			tex_binding(g, env.radiance, g.env_sampler),
 			tex_binding(g, env.irradiance, g.env_sampler),
 			tex_binding(g, m.metalness_map),
+			tex_binding(g, m.ao_map),
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], len(samplers))
-		du := Draw_Uniforms{view_proj * d.model, d.model, o3d.normal_matrix(d.model)}
+		du := make_draw_uniforms(view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
-		mu := Material_Uniforms {
-			color     = {m.base.r, m.base.g, m.base.b, m.opacity},
-			emissive  = {m.emissive.r, m.emissive.g, m.emissive.b, 0},
-			metalness = m.metalness,
-			roughness = m.roughness,
-			flags     = m.flags,
-		}
+		mu := make_material_uniforms(m)
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {
 			vbs := [2]sdl.GPUBufferBinding {
@@ -400,6 +458,10 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			ju: [o3d.MAX_JOINTS]o3d.Mat4
 			copy(ju[:], joints)
 			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
+			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
+		} else if du.morph_info.x > 0 && geo.first_vertex > 0 {
+			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
+			vb_zero = false
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
 		} else {
 			if !vb_zero {

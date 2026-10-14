@@ -21,11 +21,14 @@ What is known about three.js carries over:
 - Colours are sRGB; lighting is linear; the output is sRGB with no tone
   mapping.
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
-  `emissive`, `emissive_intensity`, `opacity`, `side`, texture maps
-  `color_map`, `normal_map`, `roughness_map` (green), `metalness_map`
-  (blue; glTF packs both in one texture), `emissive_map`, and the
-  booleans as a bit set: `flags = {.Transparent, .Flat_Shading}`) or
-  MeshBasicMaterial (`.Basic`), or ShaderMaterial: your own vertex and
+  `emissive`, `emissive_intensity`, `ao_map_intensity`, `opacity`,
+  `alpha_cutoff`, `side`, texture maps `color_map`, `normal_map`,
+  `roughness_map` (green), `metalness_map` (blue; glTF packs both in one
+  texture), `emissive_map`, `ao_map` (red, applied to indirect light only as
+  three.js's `aoMap` does), per-slot UV transforms `*_transform` (`offset`,
+  `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`), and the
+  booleans as a bit set: `flags = {.Transparent, .Alpha_Mask, .Flat_Shading}`)
+  or MeshBasicMaterial (`.Basic`), or ShaderMaterial: your own vertex and
   fragment shaders in GLSL ES (three.js's GLSL 1 style with `attribute`,
   `varying` and `gl_FragColor`, or GLSL 3 with `glsl3 = true`), with
   three.js's built-in uniforms (`modelMatrix`, `modelViewMatrix`,
@@ -35,8 +38,8 @@ What is known about three.js carries over:
   leaves it; `.Transparent` blends it, `side` culls as for any material.
   `projectionMatrix` maps depth to 0..1 (SDL_GPU's clip space) rather than
   WebGL's -1..1, which matters only to shaders that build their own. On a
-  skinned mesh, `position` and `normal` arrive already posed by the skin's
-  joints.
+  morphed or skinned mesh, `position` and `normal` arrive already morphed and
+  posed by the skin's joints.
 - Lights are AmbientLight, HemisphereLight, DirectionalLight (from
   `position` toward `target`) and PointLight (`distance`, `decay`), in
   three.js's units: a white directional light of intensity 1 lights a white
@@ -47,8 +50,10 @@ What is known about three.js carries over:
   `normal_bias`; zero takes three.js's 512, 10, 0.5, 500), draws with
   `.Cast_Shadow` and `.Receive_Shadow` in their material's flags (three.js
   has them on the mesh; a draw's material is its own). Casters draw their
-  other side (three.js's default shadowSide) and plain geometry;
-  ShaderMaterials cast (including skinned meshes) but do not receive.
+  other side (three.js's default shadowSide) and morphed/skinned geometry,
+  discarding shadow texels below `alpha_cutoff` when `.Alpha_Mask` is set
+  (cut-out shadows); ShaderMaterials cast (including morphed and skinned
+  meshes) but do not receive.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
   (radiusTop 0 is a cone), `torus`. The same parameters give the same id,
@@ -82,6 +87,8 @@ append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, 
 // glTF 2.0 / GLB: loaded once into flat tables, drawn per frame at time t
 duck, err := o3d.gltf_load("duck.glb", &geos, &textures)   // err: .None, or why (GLTF_ERROR_TEXT[err])
 o3d.gltf_draw(&scene, &duck, o3d.compose({-1.5, 0, 0}), anim = 0, time = t)
+// Morph target overrides by target name or 0-based index (applied after animation):
+// o3d.gltf_draw(&scene, &face, anim = 0, time = t, morphs = {{name = "Smile", weight = 0.8}, {index = 1, weight = 0.5}})
 // From several threads, each with its own pose (the model is then only read):
 // o3d.gltf_draw(&scene, &duck, anim = 0, time = t, pose = &thread_pose)
 
@@ -123,42 +130,63 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
 ## Design
 
 - **Data:** the scene is flat tables (lights, draws: geometry id, model
-  matrix, material, plus optional joint ranges for skinned draws) refilled
+  matrix, material, plus optional joint and morph-weight ranges) refilled
   each frame, the draws a structure of arrays (`#soa`) since the per-frame
   passes read a column or two; geometry is the only retained state: one
-  array of interleaved position / normal / uv vertices, one of 32-bit
-  indices, and a separate array of `Skin_Vertex` (4 joint indices and
-  normalized weights) for skinned meshes so unskinned vertices stay 32 bytes.
-  The GPU mirrors the arrays in buffers, uploading what is new at the start
-  of a frame.
+  array of interleaved position / normal / uv / uv1 vertices (40 bytes), one
+  of 32-bit indices, a separate array of `Skin_Vertex` (4 joint indices and
+  normalized weights) for skinned meshes, and a separate array of
+  `Morph_Delta` (position and normal deltas, 32 bytes) for morphed meshes so
+  meshes without skinning or morph targets pay nothing. The GPU mirrors the
+  arrays in vertex, index, and storage buffers, uploading what is new at the
+  start of a frame.
 - **glTF (`gltf.odin`):** `gltf_load` and `gltf_parse` (`vendor:cgltf`)
-  unpack meshes (and `JOINTS_0` / `WEIGHTS_0` with weights normalized) into
-  `Geometries`, images into `Textures`, metallic-roughness materials into
-  `Material`, the node hierarchy into a topologically sorted `#soa` array
-  (`parent < i`), skins (`joints` and `inverseBindMatrices`, up to
-  `MAX_JOINTS = 64`) into flat arrays, and keyframe animations (`STEP`,
-  `LINEAR`, `CUBICSPLINE`) into flat time/value arrays. `gltf_draw`
-  evaluates the hierarchy, animation, and joint matrices
-  (`inv_mesh * world[joint] * ibm`) at time `t` with zero heap allocations
-  on warm frames, posing into the caller's `Model_Pose` (one per thread lets
-  threads pose one model at once) or the model's own. Skinned meshes are
-  skinned in the per-chunk vertex stage on the software renderer and in
-  `vs_skinned` (`shaders/o3d.slang`) on the GPU (including the shadow pass,
-  and before a `ShaderMaterial`'s vertex stage); their bounding sphere covers
-  the posed joints. A failed load returns a `Gltf_Error` (the file, an
-  external buffer, validation) with `GLTF_ERROR_TEXT` for messages. As
-  three.js's GLTFLoader: the default scene; OPAQUE ignores alpha, BLEND
-  blends, MASK draws opaque (no alpha cutoff yet); the metallicRoughness
-  texture is both roughness and metalness map; no normals means flat shading.
-  Files are validated (`cgltf.validate`) and out-of-range indices rejected.
-  Not imported: morph targets, cameras, lights, `KHR_*` extensions, texture
-  transforms, a second uv set.
+  unpack meshes (`POSITION`, `NORMAL`, `TEXCOORD_0`, `TEXCOORD_1`,
+  `JOINTS_0`, `WEIGHTS_0` with weights normalized, including normalized and
+  non-normalized integer attributes from `KHR_mesh_quantization`, plus morph
+  target `POSITION` and `NORMAL` deltas — `TANGENT` deltas are ignored as
+  tangents are derived from screen derivatives) into `Geometries`, mesh
+  default `weights` and `extras.targetNames` into `Model`, images into
+  `Textures`, metallic-roughness materials (`alphaMode`: `OPAQUE`, `MASK`
+  with `alphaCutoff` default 0.5, `BLEND`; `occlusionTexture` red channel +
+  `strength`; `KHR_materials_unlit`; `KHR_materials_emissive_strength`;
+  `KHR_texture_transform` `offset`, `rotation`, `scale` and `texCoord` 0 or
+  1 per texture reference) into `Material`, the node hierarchy into a
+  topologically sorted `#soa` array (`parent < i`), skins (`joints` and
+  `inverseBindMatrices`, up to `MAX_JOINTS = 64`) into flat arrays, and
+  keyframe animations (`STEP`, `LINEAR`, `CUBICSPLINE`, including morph
+  `"weights"` channels) into flat time/value arrays. `gltf_draw` evaluates
+  the hierarchy, animation, morph weights (with optional `Morph_Weight`
+  overrides by target name or 0-based index applied after animation), and
+  joint matrices (`inv_mesh * world[joint] * ibm`) at time `t` with zero
+  heap allocations on warm frames, posing into the caller's `Model_Pose`
+  (one per thread lets threads pose one model at once) or the model's own.
+  Morphs (up to `MAX_MORPH_TARGETS = 8` active non-zero targets per draw) are
+  applied before skinning in the per-chunk vertex stage on the software
+  renderer and in `vs_main` / `vs_skinned` (`shaders/o3d.slang`, reading the
+  `Morph_Delta` storage buffer via `SV_VertexID`) on the GPU, including the
+  shadow pass and before a `ShaderMaterial`'s vertex stage. A failed load
+  returns a `Gltf_Error` with `GLTF_ERROR_TEXT` for messages. If
+  `extensionsRequired` names an extension o3d does not implement, loading
+  fails with `Gltf_Error.Unsupported_Extension` and records the extension
+  name in `Model.unsupported_extension`. Optional extensions listed only in
+  `extensionsUsed` (`KHR_materials_ior`, `KHR_materials_transmission`,
+  `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
+  `KHR_materials_specular`, `KHR_materials_iridescence`,
+  `KHR_materials_anisotropy`, `KHR_lights_punctual`, `EXT_texture_webp`, …)
+  are ignored, as the spec allows. Remaining unsupported required extensions
+  (rejected with `.Unsupported_Extension`): `KHR_draco_mesh_compression`,
+  `EXT_meshopt_compression`, `KHR_texture_basisu`, `EXT_texture_webp`, and
+  any other extension outside `KHR_materials_unlit`,
+  `KHR_materials_emissive_strength`, `KHR_texture_transform`, and
+  `KHR_mesh_quantization`. Also not imported: glTF cameras and lights.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, the
-  opacity drawn, `Shading_Flags`) once; both renderers read those, and the
-  GPU's uniforms are them, packed. Boolean sets are bit sets
-  (`Material_Flags`, `Shading_Flags`, a pixel's covered samples).
+  opacity drawn, 2x3 UV transform matrices in o3d UV space, UV set bits,
+  `Shading_Flags`) once; both renderers read those, and the GPU's uniforms
+  are them, packed. Boolean sets are bit sets (`Material_Flags`,
+  `Shading_Flags`, `Texture_Slots`, a pixel's covered samples).
 - **Shader contract:** `Light_Kind`'s values and `Shading_Flag`'s bits are
   the shader's `LIGHT_*` and `FLAG_*` constants; a test reads
   `shaders/o3d.slang` and checks them.
@@ -168,7 +196,9 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   environment lighting (`scene.environment`, `scene.environment_intensity`)
   and background (`scene.background`, `scene.background_intensity`,
   `scene.background_blurriness`), as three.js's MeshStandardMaterial
-  computes it. When a texture is used as `scene.environment` (or blurred
+  computes it, with `ao_map` (`1 + (r - 1) * ao_map_intensity`) multiplying
+  indirect light only (ambient, hemisphere, environment irradiance and
+  radiance). When a texture is used as `scene.environment` (or blurred
   `scene.background`), the texture has derived maps, as it has mipmaps: a
   GGX-prefiltered radiance mip chain (roughness 0..1) and a
   cosine-convolved diffuse irradiance map in `Textures`, sampled alike by
@@ -196,20 +226,23 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   as one buffer and the rasterizer gathers whole vertices by index.
 - **Shadows** (shadow.odin) are drawn first: the casters' depth from the
   light (`shadow_casters`, culled to its view), one sample per texel
-  centre, nearest kept; the software renderer runs the same phases in a
-  depth-only mode at the map's size, the GPU renders into an R32_FLOAT
-  colour target (sampleable on every backend) with a depth buffer. A
-  receiver's pixel scales the shadow light's direct light by
+  centre, nearest kept (discarding texels below `alpha_cutoff` for
+  `.Alpha_Mask` casters with a `color_map`); the software renderer runs the
+  same phases in a depth-only mode at the map's size, the GPU renders into
+  an R32_FLOAT colour target (sampleable on every backend) with a depth
+  buffer. A receiver's pixel scales the shadow light's direct light by
   `shadow_factor`: a 3x3 grid of bilinear depth comparisons (a 4x4 block
   of texels weighed 1 - f, 1, 1, f per axis), edges repeated, outside the
   light's view lit. The shader has the same arithmetic (`shadow_factor` in
-  `shaders/o3d.slang`); `FLAG_RECEIVE_SHADOW` joins the shader contract.
-- **Order:** draws whose bounding sphere (the geometry's radius, scaled
-  with the draw, or covering the posed joints for a skinned draw) is outside
-  the view, or whose shader failed, are skipped;
-  then opaque draws as listed, then blended ones (transparent with opacity
-  under 1, or a transparent ShaderMaterial) farthest first, without writing
-  depth (`draw_order`, shared by both renderers).
+  `shaders/o3d.slang`); `FLAG_RECEIVE_SHADOW` and `FLAG_ALPHA_MASK` join the
+  shader contract.
+- **Order:** draws whose bounding sphere (the geometry's radius plus
+  `(sum |w_t|) * morph_radius`, scaled with the draw, or covering the posed
+  joints for a skinned draw) is outside the view, or whose shader failed,
+  are skipped; then opaque and alpha-masked draws as listed, then blended
+  ones (transparent with opacity under 1, or a transparent ShaderMaterial)
+  farthest first, without writing depth (`draw_order`, shared by both
+  renderers).
 - **Shaders:** the standard material's are Slang compiled offline
   (`shaders/build.sh`) to committed SPIR-V and MSL, as ovg's are.
   ShaderMaterials are compiled at run time by oksl, which is plain Odin in
@@ -239,38 +272,35 @@ using it, most important first.
 
 For models people download:
 
-1. **Morph targets** (glTF blend shapes; `targets` and animated `weights`):
-   facial animation and shape keys.
-2. **Small, common material and mesh extensions:** `alphaCutoff` for
-   `MASK` materials (cut-out foliage and hair draw opaque today),
-   `KHR_materials_emissive_strength`, `KHR_texture_transform`,
-   `KHR_mesh_quantization`, a second UV set (ambient-occlusion and light
-   maps).
-3. **Compressed models:** Draco (`KHR_draco_mesh_compression`), meshopt
-   (`EXT_meshopt_compression`) and KTX2 / Basis textures
-   (`KHR_texture_basisu`) are common in downloaded models and need
-   decoders. Until then, `gltf_load` should fail with a `Gltf_Error` naming
-   the unsupported required extension instead of loading something broken.
+1. **Compressed models and remaining glTF extensions:** decoders for Draco
+   (`KHR_draco_mesh_compression`), meshopt (`EXT_meshopt_compression`),
+   KTX2 / Basis textures (`KHR_texture_basisu`) and WebP textures
+   (`EXT_texture_webp`), which today fail cleanly with
+   `Gltf_Error.Unsupported_Extension` when required; and optional PBR
+   extensions (`KHR_materials_transmission`, `KHR_materials_ior`,
+   `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
+   `KHR_materials_specular`, `KHR_lights_punctual`), which today are ignored
+   when listed in `extensionsUsed`.
 
 For typical three.js scenes:
 
-4. **Tone mapping and exposure** (three.js's `ACESFilmicToneMapping` /
+2. **Tone mapping and exposure** (three.js's `ACESFilmicToneMapping` /
    `AgXToneMapping`, `toneMappingExposure`): most three.js scenes use one,
    and lit models look flat or blown out without it.
-5. **SpotLight**, and shadows from more than the first directional light
+3. **SpotLight**, and shadows from more than the first directional light
    (point and spot light shadows).
-6. **Fog** (`Fog`, `FogExp2`).
+4. **Fog** (`Fog`, `FogExp2`).
 
 For onimite:
 
-7. **Textures that change every frame:** a video clip or a group's 2D
+5. **Textures that change every frame:** a video clip or a group's 2D
    drawing mapped onto a surface. Today a texture is added once
    (`texture_add`); this needs an update path the host fills per frame
    (on the GPU: a texture the host renders into).
-8. **ShaderMaterial textures** (small here): `uniform sampler2D` bound to
+6. **ShaderMaterial textures** (small here): `uniform sampler2D` bound to
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
-9. **Instancing, lines and points:** `InstancedMesh` for many copies of one
+7. **Instancing, lines and points:** `InstancedMesh` for many copies of one
    mesh, `LineSegments` and `Points` for data visualisation.
 
 Metal: v0.0.1's standard shader did not compile there (a texel `Load` on

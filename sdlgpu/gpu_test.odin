@@ -71,6 +71,10 @@ test_environment_matches_software :: proc(t: ^testing.T) {expect_parity(t, "envi
 @(test)
 test_gltf_matches_software :: proc(t: ^testing.T) {expect_parity(t, "gltf")}
 
+// Morph targets and morph + skinning.
+@(test)
+test_morph_matches_software :: proc(t: ^testing.T) {expect_parity(t, "morph")}
+
 // One GPU through every case in turn, as tools/gpu_check and a host that
 // remakes its tables use it: each case's new tables (ids and sizes reused)
 // replace what the GPU mirrored, so nothing stale is drawn or read.

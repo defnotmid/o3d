@@ -41,6 +41,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"environment", 200, 150, build_environment},
 	{"gltf", 160, 120, build_gltf},
 	{"skinned", 160, 120, build_skinned},
+	{"morph", 160, 120, build_morph},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -228,12 +229,31 @@ build_custom :: proc(a: ^Parity_Assets) -> string {
 
 // The custom case with the key light casting a shadow, every draw casting
 // and receiving (ShaderMaterials cast with their plain geometry and do not
-// receive).
+// receive), plus an alpha-masked cutout casting a cut-out shadow.
 @(private = "file")
 build_shadow :: proc(a: ^Parity_Assets) -> string {
 	if e := build_custom(a); e != "" {
 		return e
 	}
+	T :: 32
+	mask_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			dx, dy := f32(x) - 15.5, f32(y) - 15.5
+			r := math.sqrt(dx * dx + dy * dy)
+			// Annulus cutout: opaque ring, transparent hole and corners.
+			alpha := u8(255) if r >= 5.5 && r <= 13.5 else u8(0)
+			mask_px[i + 0], mask_px[i + 1], mask_px[i + 2], mask_px[i + 3] = 230, 140, 50, alpha
+		}
+	}
+	mask_id := o3d.texture_add(&a.textures, mask_px[:], T, T)
+	cutout := o3d.MATERIAL_DEFAULT
+	cutout.color_map = mask_id
+	cutout.alpha_cutoff = 0.5
+	cutout.flags = {.Alpha_Mask, .Cast_Shadow, .Receive_Shadow}
+	cutout.side = .Double
+	append(&a.scene.draws, o3d.Draw{o3d.plane(&a.geos, 1.3, 1.3), o3d.compose({0.1, 1.1, 0.3}, {-0.6, 0.3, 0}), cutout})
 	for &l in a.scene.lights {
 		if l.kind == .Directional {
 			l.cast_shadow = true
@@ -246,8 +266,8 @@ build_shadow :: proc(a: ^Parity_Assets) -> string {
 	return ""
 }
 
-// Colour, normal, roughness and emissive maps with mipmaps on the standard
-// scene.
+// Colour, normal, roughness, emissive and AO maps with mipmaps, UV1,
+// KHR_texture_transform, and alpha masking on the standard scene.
 @(private = "file")
 build_textures :: proc(a: ^Parity_Assets) -> string {
 	TW, TH :: 32, 32
@@ -255,6 +275,7 @@ build_textures :: proc(a: ^Parity_Assets) -> string {
 	normal_px: [TW * TH * 4]u8
 	rough_px: [TW * TH * 4]u8
 	emissive_px: [TW * TH * 4]u8
+	ao_px: [TW * TH * 4]u8
 	for y in 0 ..< TH {
 		for x in 0 ..< TW {
 			i := (y * TW + x) * 4
@@ -284,23 +305,48 @@ build_textures :: proc(a: ^Parity_Assets) -> string {
 			emissive_px[i + 1] = u8(clamp(0.2 * v * 255, 0, 255))
 			emissive_px[i + 2] = u8(clamp(0.5 * (1 - u) * 255, 0, 255))
 			emissive_px[i + 3] = 255
+
+			ao_val := u8(clamp((0.25 + 0.75 * (0.5 + 0.5 * math.cos((u - v) * math.TAU))) * 255, 0, 255))
+			ao_px[i + 0], ao_px[i + 1], ao_px[i + 2], ao_px[i + 3] = ao_val, ao_val, ao_val, 255
 		}
 	}
 	color_id := o3d.texture_add(&a.textures, color_px[:], TW, TH)
 	normal_id := o3d.texture_add(&a.textures, normal_px[:], TW, TH)
 	rough_id := o3d.texture_add(&a.textures, rough_px[:], TW, TH)
 	emissive_id := o3d.texture_add(&a.textures, emissive_px[:], TW, TH)
+	ao_id := o3d.texture_add(&a.textures, ao_px[:], TW, TH)
 
 	test_scene(&a.scene, &a.geos)
 	a.scene.draws.material[0].color_map = color_id
+	a.scene.draws.material[0].color_transform = {offset = {0.15, 0.25}, rotation = 0.35, scale = {1.5, 1.5}}
 	a.scene.draws.material[0].roughness_map = rough_id
+	a.scene.draws.material[0].ao_map = ao_id
+	a.scene.draws.material[0].ao_map_intensity = 0.85
 	a.scene.draws.material[1].color_map = color_id
 	a.scene.draws.material[1].normal_map = normal_id
 	a.scene.draws.material[1].roughness_map = rough_id
+	a.scene.draws.material[1].ao_map = ao_id
+	a.scene.draws.material[1].ao_map_intensity = 0.9
 	a.scene.draws.material[2].normal_map = normal_id
 	a.scene.draws.material[2].emissive = {1, 1, 1}
 	a.scene.draws.material[2].emissive_intensity = 0.6
 	a.scene.draws.material[2].emissive_map = emissive_id
+	a.scene.draws.material[2].emissive_transform = {offset = {0.1, 0.2}, rotation = -0.25, scale = {1.2, 0.8}}
+
+	// A quad with distinct UV0 and UV1 using AO on UV1 (tex_coord = 1).
+	q_verts := [4]o3d.Vertex {
+		{{-0.7, -0.5, 0}, {0, 0, 1}, {0, 0}, {0, 1}},
+		{{ 0.7, -0.5, 0}, {0, 0, 1}, {1, 0}, {1, 0}},
+		{{ 0.7,  0.5, 0}, {0, 0, 1}, {1, 1}, {0, 0}},
+		{{-0.7,  0.5, 0}, {0, 0, 1}, {0, 1}, {1, 1}},
+	}
+	q_idx := [6]u32{0, 1, 2, 0, 2, 3}
+	uv1_mat := o3d.MATERIAL_DEFAULT
+	uv1_mat.color_map = color_id
+	uv1_mat.ao_map = ao_id
+	uv1_mat.ao_map_intensity = 0.95
+	uv1_mat.ao_transform = {offset = {0.1, 0.05}, rotation = 0.2, scale = {1.3, 1.3}, tex_coord = 1}
+	append(&a.scene.draws, o3d.Draw{o3d.geometry_add(&a.geos, q_verts[:], q_idx[:]), o3d.compose({-1.4, 1.2, 0.5}, {0, 0.4, 0}), uv1_mat})
 
 	return ""
 }
@@ -457,4 +503,115 @@ build_skinned :: proc(a: ^Parity_Assets) -> string {
 	o3d.gltf_draw(&a.scene, &a.model, anim = 0, time = 0.65, flags = {.Cast_Shadow, .Receive_Shadow})
 	return ""
 }
+
+// Morph targets + skinning parity case: a glTF scene with a two-target morphed
+// prism on the left and a morphed + skinned bar on the right (morph applied
+// before skinning), both casting shadows onto a floor.
+@(private = "file")
+build_morph :: proc(a: ^Parity_Assets) -> string {
+	Bin :: struct #packed {
+		pos:      [6][3]f32,
+		norm:     [6][3]f32,
+		d_pos0:   [6][3]f32,
+		d_norm0:  [6][3]f32,
+		d_pos1:   [6][3]f32,
+		d_norm1:  [6][3]f32,
+		joints:   [6][4]u16,
+		weights:  [6][4]f32,
+		idx:      [12]u16,
+		ibm:      [2]o3d.Mat4,
+		times:    [2]f32,
+		rot:      [2][4]f32,
+		mweights: [4]f32,
+	}
+	s45 := math.sqrt_f32(0.5)
+	ibm0 := o3d.Mat4(1)
+	ibm1 := o3d.Mat4(1)
+	ibm1[1, 3] = -1
+	b := Bin {
+		pos = {
+			{-0.3, 0, 0}, {0.3, 0, 0},
+			{-0.3, 1, 0}, {0.3, 1, 0},
+			{-0.3, 2, 0}, {0.3, 2, 0},
+		},
+		norm = {
+			{0, 0, 1}, {0, 0, 1},
+			{0, 0, 1}, {0, 0, 1},
+			{0, 0, 1}, {0, 0, 1},
+		},
+		// Target 0 ("Flare"): flares the middle and top vertices outward and tilts normals.
+		d_pos0 = {
+			{0, 0, 0}, {0, 0, 0},
+			{-0.25, 0, 0.25}, {0.25, 0, 0.25},
+			{-0.45, 0.3, -0.2}, {0.45, 0.3, -0.2},
+		},
+		d_norm0 = {
+			{0, 0, 0}, {0, 0, 0},
+			{-0.3, 0.1, 0}, {0.3, 0.1, 0},
+			{-0.4, 0.2, 0}, {0.4, 0.2, 0},
+		},
+		// Target 1 ("Twist"): shifts top vertices in X/Z.
+		d_pos1 = {
+			{0, 0, 0}, {0, 0, 0},
+			{0.15, 0.1, 0.1}, {0.15, 0.1, -0.1},
+			{0.35, 0.2, 0.25}, {0.35, 0.2, -0.25},
+		},
+		d_norm1 = {
+			{0, 0, 0}, {0, 0, 0},
+			{0.2, 0, 0.2}, {0.2, 0, -0.2},
+			{0.3, 0, 0.3}, {0.3, 0, -0.3},
+		},
+		joints = {
+			{0, 0, 0, 0}, {0, 0, 0, 0},
+			{0, 1, 0, 0}, {0, 1, 0, 0},
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+		},
+		weights = {
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+			{0.5, 0.5, 0, 0}, {0.5, 0.5, 0, 0},
+			{1, 0, 0, 0}, {1, 0, 0, 0},
+		},
+		idx      = {0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4},
+		ibm      = {ibm0, ibm1},
+		times    = {0, 1},
+		rot      = {{0, 0, 0, 1}, {0, 0, s45, s45}},
+		mweights = {0, 0, 1, 0.5},
+	}
+	encoded := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	src := fmt.tprintf(
+		`{{"asset":{{"version":"2.0"}},"buffers":[{{"uri":"data:application/octet-stream;base64,%s","byteLength":%d}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":72}},{{"buffer":0,"byteOffset":72,"byteLength":72}},{{"buffer":0,"byteOffset":144,"byteLength":72}},{{"buffer":0,"byteOffset":216,"byteLength":72}},{{"buffer":0,"byteOffset":288,"byteLength":72}},{{"buffer":0,"byteOffset":360,"byteLength":72}},{{"buffer":0,"byteOffset":432,"byteLength":48}},{{"buffer":0,"byteOffset":480,"byteLength":96}},{{"buffer":0,"byteOffset":576,"byteLength":24}},{{"buffer":0,"byteOffset":600,"byteLength":128}},{{"buffer":0,"byteOffset":728,"byteLength":8}},{{"buffer":0,"byteOffset":736,"byteLength":32}},{{"buffer":0,"byteOffset":768,"byteLength":16}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":1,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":2,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":3,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":4,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":5,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":6,"componentType":5123,"count":6,"type":"VEC4"}},{{"bufferView":7,"componentType":5126,"count":6,"type":"VEC4"}},{{"bufferView":8,"componentType":5123,"count":12,"type":"SCALAR"}},{{"bufferView":9,"componentType":5126,"count":2,"type":"MAT4"}},{{"bufferView":10,"componentType":5126,"count":2,"type":"SCALAR"}},{{"bufferView":11,"componentType":5126,"count":2,"type":"VEC4"}},{{"bufferView":12,"componentType":5126,"count":4,"type":"SCALAR"}}],"materials":[{{"pbrMetallicRoughness":{{"baseColorFactor":[0.25,0.75,0.85,1],"metallicFactor":0.15,"roughnessFactor":0.35}},"doubleSided":true}},{{"pbrMetallicRoughness":{{"baseColorFactor":[0.9,0.45,0.2,1],"metallicFactor":0.1,"roughnessFactor":0.4}},"doubleSided":true}}],"meshes":[{{"weights":[0,0],"extras":{{"targetNames":["Flare","Twist"]}},"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1}},"targets":[{{"POSITION":2,"NORMAL":3}},{{"POSITION":4,"NORMAL":5}}],"indices":8,"material":0}}]}},{{"weights":[0,0],"extras":{{"targetNames":["Flare","Twist"]}},"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"JOINTS_0":6,"WEIGHTS_0":7}},"targets":[{{"POSITION":2,"NORMAL":3}},{{"POSITION":4,"NORMAL":5}}],"indices":8,"material":1}}]}}],"skins":[{{"inverseBindMatrices":9,"joints":[2,3]}}],"nodes":[{{"mesh":0,"translation":[-0.85,0,0]}},{{"mesh":1,"skin":0,"translation":[0.85,0,0]}},{{"children":[3]}},{{"translation":[0,1,0]}}],"scenes":[{{"nodes":[0,1,2]}}],"scene":0,"animations":[{{"name":"morph_and_bend","samplers":[{{"input":10,"output":12,"interpolation":"LINEAR"}},{{"input":10,"output":11,"interpolation":"LINEAR"}}],"channels":[{{"sampler":0,"target":{{"node":0,"path":"weights"}}}},{{"sampler":0,"target":{{"node":1,"path":"weights"}}}},{{"sampler":1,"target":{{"node":3,"path":"rotation"}}}}]}}]}}`,
+		encoded,
+		size_of(Bin),
+	)
+	err: o3d.Gltf_Error
+	a.model, err = o3d.gltf_parse(transmute([]u8)src, &a.geos, &a.textures)
+	if err != .None {
+		return o3d.GLTF_ERROR_TEXT[err]
+	}
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {0.2, 1.5, 4.2}, target = {0, 0.9, 0}, fov = 45, near = 0.1, far = 30}
+	append(&a.scene.lights, o3d.Light{
+		kind        = .Directional,
+		color       = {1, 0.95, 0.85},
+		intensity   = 2.6,
+		position    = {2, 4, 3},
+		target      = {0, 0.5, 0},
+		cast_shadow = true,
+		shadow      = {map_size = 512, height = 6, bias = -0.002, normal_bias = 0.01},
+	})
+	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness, floor.flags = {0.45, 0.48, 0.52}, 0.9, {.Receive_Shadow}
+	append(&a.scene.draws, o3d.Draw{geometry = o3d.plane(&a.geos, 5, 5), model = o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), material = floor})
+	o3d.gltf_draw(
+		&a.scene,
+		&a.model,
+		anim   = 0,
+		time   = 0.7,
+		flags  = {.Cast_Shadow, .Receive_Shadow},
+		morphs = {{name = "Twist", weight = 0.8}},
+	)
+	return ""
+}
+
 
