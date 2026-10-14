@@ -222,16 +222,48 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
 
 ## Next
 
-Tagged for onimite's integration (v0.0.2 is the first that runs on Metal).
-In order, with the size of each next to shadows (one sizeable change):
+Integrated in onimite (`view3d{}`, v0.0.3). What is still missing, found by
+using it, most important first.
 
-1. onimite (medium to large, mostly in onimite): a `view3d{}` node drawing
-   into its own texture, composited like any layer; a group's 2D drawing as
-   a texture on a surface; the Lua API in three.js's names; inspect
-   checks; the docs page mapping three.js terms.
-2. ShaderMaterial textures (small here): `uniform sampler2D` bound to
+For models people download:
+
+1. **Skinning** (glTF `skins` / `joints` / `weights`, on both renderers).
+   Not imported yet, so an animated character's skeleton moves but its
+   mesh stays in the bind pose (the Khronos Fox "walks" without moving its
+   legs). Most animated characters are skinned: the biggest gap.
+2. **Morph targets** (glTF blend shapes; `targets` and animated `weights`):
+   facial animation and shape keys.
+3. **Small, common material and mesh extensions:** `alphaCutoff` for
+   `MASK` materials (cut-out foliage and hair draw opaque today),
+   `KHR_materials_emissive_strength`, `KHR_texture_transform`,
+   `KHR_mesh_quantization`, a second UV set (ambient-occlusion and light
+   maps).
+4. **Compressed models:** Draco (`KHR_draco_mesh_compression`), meshopt
+   (`EXT_meshopt_compression`) and KTX2 / Basis textures
+   (`KHR_texture_basisu`) are common in downloaded models and need
+   decoders. Until then, `gltf_load` should fail with a `Gltf_Error` naming
+   the unsupported required extension instead of loading something broken.
+
+For typical three.js scenes:
+
+5. **Tone mapping and exposure** (three.js's `ACESFilmicToneMapping` /
+   `AgXToneMapping`, `toneMappingExposure`): most three.js scenes use one,
+   and lit models look flat or blown out without it.
+6. **SpotLight**, and shadows from more than the first directional light
+   (point and spot light shadows).
+7. **Fog** (`Fog`, `FogExp2`).
+
+For onimite:
+
+8. **Textures that change every frame:** a video clip or a group's 2D
+   drawing mapped onto a surface. Today a texture is added once
+   (`texture_add`); this needs an update path the host fills per frame
+   (on the GPU: a texture the host renders into).
+9. **ShaderMaterial textures** (small here): `uniform sampler2D` bound to
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
+10. **Instancing, lines and points:** `InstancedMesh` for many copies of one
+    mesh, `LineSegments` and `Points` for data visualisation.
 
 Metal: v0.0.1's standard shader did not compile there (a texel `Load` on
 a combined texture-sampler, which Slang emits wrongly for MSL; the shadow
