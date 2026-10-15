@@ -53,6 +53,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 				if rem > 0 {
 					dir := linalg.normalize(ray0 + f32(x) * ray_step)
 					c := linear(sample_lod(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod).rgb) * job.bg_intensity
+					c = tone_map(c, job.tone_mapping, job.tone_exposure)
 					bg := pack(c, 1)
 					bg_rgb := [3]u32{bg & 0xff, (bg >> 8) & 0xff, (bg >> 16) & 0xff}
 					acc.rgb += (bg_rgb * rem + 127) / 255
@@ -83,10 +84,11 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 draw_depth_band :: proc(data: rawptr, band, _: int) {
 	job := (^Frame_Job)(data)
 	s := job.s
+	smap := s.shadow_maps[job.shadow_index]
 	size := job.width
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, job.height)
-	slice.fill(s.shadow_map[y0 * size:y1 * size], 1)
+	slice.fill(smap[y0 * size:y1 * size], 1)
 	for ref in s.band_tris[s.band_start[band]:s.band_start[band + 1]] {
 		t := s.chunks[ref.chunk].tris[ref.tri]
 		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
@@ -115,7 +117,7 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 				b2 := 1 - b0 - b1
 				z := b0 * t.p[0].z + b1 * t.p[1].z + b2 * t.p[2].z
 				i := y * size + x
-				if z >= 0 && z <= 1 && z < s.shadow_map[i] {
+				if z >= 0 && z <= 1 && z < smap[i] {
 					if masked {
 						iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
 						raw := (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) / iw
@@ -128,7 +130,7 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 							continue
 						}
 					}
-					s.shadow_map[i] = z
+					smap[i] = z
 				}
 			}
 		}
@@ -167,7 +169,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 	s := job.s
 	m := &s.materials[t.draw]
 	blend := .Blended in m.flags
-	receive := .Receive_Shadow in m.flags && job.shadow.light >= 0
+	receive := .Receive_Shadow in m.flags && job.shadow_count > 0
 	area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
 	if area == 0 {
 		return
@@ -211,11 +213,14 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			if .Flat_Shading not_in m.flags {
 				n = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
 			}
-			shadow: f32 = 1
+			shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
 			if receive {
-				shadow = shadow_factor(s.shadow_map, &job.shadow, p, n)
+				for si in 0 ..< job.shadow_count {
+					shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
+				}
 			}
-			lit := shade(m, p, n, job.eye, job.lights, shadow, job.env) + m.emissive
+			lit := shade(m, p, n, job.eye, job.lights, 1, job.env, 1, shadows) + m.emissive
+			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
 			write_samples(s, t, x, y, area, covered, pack(lit, out_alpha), blend)
 		}
 	}
@@ -307,9 +312,11 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					ao = (sample(job.textures, m.ao_map, a_uv, a_dx, a_dy).r - 1) * m.ao_intensity + 1
 				}
 				n := flat_n if .Flat_Shading in m.flags else norms[l]
-				shadow: f32 = 1
+				shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
 				if receive {
-					shadow = shadow_factor(s.shadow_map, &job.shadow, worlds[l], n)
+					for si in 0 ..< job.shadow_count {
+						shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], worlds[l], n)
+					}
 				}
 				if .Normal_Map in m.flags {
 					if linalg.dot(n, job.eye - worlds[l]) < 0 && .Two_Sided in pm.flags {
@@ -321,12 +328,14 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					map_n := sample(job.textures, m.normal_map, n_uv, n_dx, n_dy).rgb * 2 - 1
 					n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
 				}
-				lit := shade(&pm, worlds[l], n, job.eye, job.lights, shadow, job.env, ao) + emissive
+				lit := shade(&pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
+				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
 				write_samples(s, t, x, y, area, lanes[l], pack(lit, opacity), blend)
 			}
 		}
 	}
 }
+
 
 // Screen-space horizontal and vertical finite differences across a 2x2 quad.
 @(private = "file")

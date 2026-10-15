@@ -29,23 +29,43 @@ Light_Kind :: enum u8 {
 	Hemisphere  = 1, // HemisphereLight(skyColor, groundColor, intensity)
 	Directional = 2, // DirectionalLight(color, intensity): from `position` toward `target`
 	Point       = 3, // PointLight(color, intensity, distance, decay)
+	Spot        = 4, // SpotLight(color, intensity, distance, angle, penumbra, decay): from `position` toward `target`
 }
 
 Light :: struct {
-	kind:      Light_Kind,
-	color:     Vec3, // sRGB (the sky's for a hemisphere light)
-	ground:    Vec3, // a hemisphere light's ground colour, sRGB
-	intensity: f32,
-	position:  Vec3,
-	target:    Vec3,
-	// Point lights: the range (0: none) and the falloff exponent (2 is
-	// physical, three.js's default).
+	kind:        Light_Kind,
+	color:       Vec3, // sRGB (the sky's for a hemisphere light)
+	ground:      Vec3, // a hemisphere light's ground colour, sRGB
+	intensity:   f32,
+	position:    Vec3,
+	target:      Vec3,
+	// Point and spot lights: the range (0: none) and the falloff exponent
+	// (2 is physical, three.js's default).
 	distance:    f32,
 	decay:       f32,
-	// Directional lights: casts a shadow (three.js's castShadow; the first
-	// such light does, shadow.odin) with these settings.
+	// Spot lights: cone half-angle in radians (0: PI / 3, max PI / 2) and
+	// soft edge fraction (0..1; 0 is sharp).
+	angle:       f32,
+	penumbra:    f32,
+	// Directional and spot lights: casts a shadow (three.js's castShadow;
+	// up to MAX_SHADOWS such lights do, shadow.odin) with these settings.
 	cast_shadow: bool,
 	shadow:      Light_Shadow,
+}
+
+// three.js's Fog (linear from `near` to `far`) and FogExp2 (exponential-squared
+// with `density`), blending drawn surfaces toward `color` by view distance.
+Fog_Kind :: enum u8 {
+	None   = 0,
+	Linear = 1, // Fog(color, near, far)
+	Exp2   = 2, // FogExp2(color, density)
+}
+
+Fog :: struct {
+	kind:      Fog_Kind,
+	color:     Vec3, // sRGB
+	near, far: f32, // Linear (far <= near defaults to 1..1000)
+	density:   f32, // Exp2 (0 defaults to 0.00025)
 }
 
 Side :: enum u8 {
@@ -56,7 +76,7 @@ Side :: enum u8 {
 
 // three.js's boolean material properties.
 Material_Flag :: enum u8 {
-	// Unlit: the colour as is (MeshBasicMaterial).
+	// Unlit: the colour as is (MeshBasicMaterial, LineBasicMaterial, PointsMaterial).
 	Basic,
 	// One normal per triangle (flatShading).
 	Flat_Shading,
@@ -70,6 +90,9 @@ Material_Flag :: enum u8 {
 	// Discards fragments with alpha below `alpha_cutoff` (glTF alphaMode: MASK,
 	// three.js alphaTest), including in the shadow pass.
 	Alpha_Mask,
+	// LineSegments / Points: `size` is in screen pixels rather than world
+	// units (three.js's `sizeAttenuation: false`).
+	No_Size_Attenuation,
 }
 
 Material_Flags :: bit_set[Material_Flag; u8]
@@ -104,6 +127,10 @@ Material :: struct {
 	opacity:             f32,
 	alpha_cutoff:        f32,
 	ao_map_intensity:    f32,
+	// Line width (`.Lines`) or point size (`.Points`); 0 takes defaults
+	// (0.03 world / 2 px for lines, 0.08 world / 4 px for points).
+	size:                f32,
+	mode:                Draw_Mode,
 	side:                Side,
 	flags:               Material_Flags,
 	color_map:           Texture_Id,
@@ -146,6 +173,19 @@ Morph_Range :: struct {
 	first, count: u32,
 }
 
+// One instance of an instanced draw (three.js's InstancedMesh): its local
+// transform (multiplied on the right of `Draw.model`) and optional sRGB tint
+// (`color != {}` or `has_color` multiplies `Material.color` in linear space).
+Instance :: struct {
+	transform: Mat4,
+	color:     Vec3,
+	has_color: bool,
+}
+
+Instance_Range :: struct {
+	first, count: u32,
+}
+
 MATERIAL_DEFAULT :: Material{
 	color              = {1, 1, 1},
 	metalness          = 0,
@@ -172,6 +212,10 @@ Scene :: struct {
 	background:            Texture_Id,
 	background_intensity:  f32, // 0 means 1
 	background_blurriness: f32, // 0..1
+	// Tone mapping (default .None) and exposure (0 means 1), plus scene fog.
+	tone_mapping:          Tone_Mapping,
+	tone_mapping_exposure: f32,
+	fog:                   Fog,
 	// ShaderMaterials' uniforms: each a name and its floats'
 	// uniform_floats[first:][:count].
 	uniforms:              [dynamic]struct {
@@ -185,6 +229,13 @@ Scene :: struct {
 	// Morphed draws' target weights: draw i's are morph_weights[draw_morphs[i].first:][:draw_morphs[i].count].
 	draw_morphs:           [dynamic]Morph_Range,
 	morph_weights:         [dynamic]f32,
+	// Instanced draws' instances: draw i's are instances[draw_instances[i].first:][:draw_instances[i].count].
+	draw_instances:        [dynamic]Instance_Range,
+	instances:             [dynamic]Instance,
+	// Per-frame line/point geometries (SCENE_GEO_BIT + index).
+	path_geos:             [dynamic]Geometry,
+	path_vertices:         [dynamic]Vertex,
+	path_indices:          [dynamic]u32,
 }
 
 scene_clear :: proc(s: ^Scene) {
@@ -194,6 +245,9 @@ scene_clear :: proc(s: ^Scene) {
 	s.background = 0
 	s.background_intensity = 0
 	s.background_blurriness = 0
+	s.tone_mapping = .None
+	s.tone_mapping_exposure = 0
+	s.fog = {}
 	clear(&s.lights)
 	clear(&s.draws)
 	clear(&s.uniforms)
@@ -202,6 +256,100 @@ scene_clear :: proc(s: ^Scene) {
 	clear(&s.joints)
 	clear(&s.draw_morphs)
 	clear(&s.morph_weights)
+	clear(&s.draw_instances)
+	clear(&s.instances)
+	clear(&s.path_geos)
+	clear(&s.path_vertices)
+	clear(&s.path_indices)
+}
+
+// Per-frame LineSegments geometry in `s` from pairs of endpoints `(positions[2*i], positions[2*i+1])`.
+scene_line_segments :: proc(s: ^Scene, positions: []Vec3) -> Geometry_Id {
+	n := (len(positions) / 2) * 2
+	if n < 2 {
+		return 0
+	}
+	first_v := u32(len(s.path_vertices))
+	first_i := u32(len(s.path_indices))
+	table_grow(&s.path_vertices, int(first_v) + n)
+	table_grow_non_zero(&s.path_indices, int(first_i) + n)
+	r: f32
+	for i in 0 ..< n {
+		p := positions[i]
+		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}}
+		s.path_indices[int(first_i) + i] = u32(i)
+		r = max(r, linalg.length(p))
+	}
+	id := SCENE_GEO_BIT + Geometry_Id(len(s.path_geos))
+	append(&s.path_geos, Geometry{
+		first_vertex = first_v,
+		vertex_count = u32(n),
+		first_index  = first_i,
+		index_count  = u32(n),
+		mode         = .Lines,
+		radius       = r,
+	})
+	return id
+}
+
+// Per-frame connected polyline geometry in `s` as LineSegments.
+scene_polyline :: proc(s: ^Scene, positions: []Vec3, closed := false) -> Geometry_Id {
+	n := len(positions)
+	if n < 2 {
+		return 0
+	}
+	segs := n if closed else n - 1
+	first_v := u32(len(s.path_vertices))
+	first_i := u32(len(s.path_indices))
+	table_grow(&s.path_vertices, int(first_v) + n)
+	table_grow_non_zero(&s.path_indices, int(first_i) + segs * 2)
+	r: f32
+	for p, i in positions {
+		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}}
+		r = max(r, linalg.length(p))
+	}
+	for i in 0 ..< segs {
+		s.path_indices[int(first_i) + i * 2] = u32(i)
+		s.path_indices[int(first_i) + i * 2 + 1] = u32((i + 1) % n)
+	}
+	id := SCENE_GEO_BIT + Geometry_Id(len(s.path_geos))
+	append(&s.path_geos, Geometry{
+		first_vertex = first_v,
+		vertex_count = u32(n),
+		first_index  = first_i,
+		index_count  = u32(segs * 2),
+		mode         = .Lines,
+		radius       = r,
+	})
+	return id
+}
+
+// Per-frame Points geometry in `s` from 3D positions.
+scene_points :: proc(s: ^Scene, positions: []Vec3) -> Geometry_Id {
+	n := len(positions)
+	if n == 0 {
+		return 0
+	}
+	first_v := u32(len(s.path_vertices))
+	first_i := u32(len(s.path_indices))
+	table_grow(&s.path_vertices, int(first_v) + n)
+	table_grow_non_zero(&s.path_indices, int(first_i) + n)
+	r: f32
+	for p, i in positions {
+		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}}
+		s.path_indices[int(first_i) + i] = u32(i)
+		r = max(r, linalg.length(p))
+	}
+	id := SCENE_GEO_BIT + Geometry_Id(len(s.path_geos))
+	append(&s.path_geos, Geometry{
+		first_vertex = first_v,
+		vertex_count = u32(n),
+		first_index  = first_i,
+		index_count  = u32(n),
+		mode         = .Points,
+		radius       = r,
+	})
+	return id
 }
 
 // Keeps uniforms for a material (`Material.uniforms`) this frame.
@@ -297,6 +445,44 @@ scene_draw_morphs :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []
 	return s.morph_weights[r.first:][:r.count]
 }
 
+// Keeps instance transforms and colours in `s.instances` this frame.
+scene_instances :: proc(s: ^Scene, items: []Instance) -> Instance_Range {
+	if len(items) == 0 {
+		return {}
+	}
+	first := len(s.instances)
+	table_grow_non_zero(&s.instances, first + len(items))
+	copy(s.instances[first:], items)
+	return {u32(first), u32(len(items))}
+}
+
+// Associates instances `r` with draw `di` for this frame.
+scene_set_draw_instances :: proc(s: ^Scene, di: int, r: Instance_Range) {
+	if r.count == 0 {
+		return
+	}
+	if len(s.draw_instances) <= di {
+		old := len(s.draw_instances)
+		table_grow_non_zero(&s.draw_instances, di + 1)
+		for i in old ..< di {
+			s.draw_instances[i] = {}
+		}
+	}
+	s.draw_instances[di] = r
+}
+
+// Draw `di`'s instances (nil when not instanced).
+scene_draw_instances :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []Instance {
+	if di < 0 || di >= len(s.draw_instances) {
+		return nil
+	}
+	r := s.draw_instances[di]
+	if r.count == 0 || int(r.first + r.count) > len(s.instances) {
+		return nil
+	}
+	return s.instances[r.first:][:r.count]
+}
+
 // The draws' materials, one column of the table.
 scene_materials :: proc "contextless" (s: ^Scene) -> []Material {
 	return s.draws.material[:len(s.draws)]
@@ -311,7 +497,310 @@ scene_destroy :: proc(s: ^Scene) {
 	delete(s.joints)
 	delete(s.draw_morphs)
 	delete(s.morph_weights)
+	delete(s.draw_instances)
+	delete(s.instances)
+	delete(s.path_geos)
+	delete(s.path_vertices)
+	delete(s.path_indices)
 	s^ = {}
+}
+
+// Per-frame expanded draws and camera-facing quad geometries for instanced
+// draws, LineSegments, and Points, shared by the software renderer and
+// o3d/sdlgpu (zero warm-frame allocations).
+Expanded_Draws :: struct {
+	scene:       Scene,
+	geos:        [dynamic]Geometry,
+	vertices:    [dynamic]Vertex,
+	indices:     [dynamic]u32,
+	posed_verts: [dynamic]Vertex,
+}
+
+expanded_draws_destroy :: proc(e: ^Expanded_Draws) {
+	scene_destroy(&e.scene)
+	delete(e.geos)
+	delete(e.vertices)
+	delete(e.indices)
+	delete(e.posed_verts)
+	e^ = {}
+}
+
+geometry_get_any :: proc "contextless" (g: ^Geometries, exp: ^Expanded_Draws, id: Geometry_Id) -> (Geometry, bool) {
+	if id >= DYNAMIC_GEO_BIT {
+		idx := int(id - DYNAMIC_GEO_BIT)
+		if exp == nil || idx < 0 || idx >= len(exp.geos) {
+			return {}, false
+		}
+		return exp.geos[idx], true
+	}
+	return geometry_get(g, id)
+}
+
+geometry_mesh_any :: proc "contextless" (g: ^Geometries, exp: ^Expanded_Draws, id: Geometry_Id) -> (vertices: []Vertex, indices: []u32, ok: bool) {
+	if id >= DYNAMIC_GEO_BIT {
+		geo := geometry_get_any(g, exp, id) or_return
+		return exp.vertices[geo.first_vertex:][:geo.vertex_count], exp.indices[geo.first_index:][:geo.index_count], true
+	}
+	return geometry_mesh(g, id)
+}
+
+@(private = "file")
+scene_geometry_get :: proc "contextless" (scene: ^Scene, g: ^Geometries, id: Geometry_Id) -> (Geometry, bool) {
+	if id >= SCENE_GEO_BIT && id < DYNAMIC_GEO_BIT {
+		idx := int(id - SCENE_GEO_BIT)
+		if idx < 0 || idx >= len(scene.path_geos) {
+			return {}, false
+		}
+		return scene.path_geos[idx], true
+	}
+	return geometry_get(g, id)
+}
+
+@(private = "file")
+scene_geometry_mesh :: proc "contextless" (scene: ^Scene, g: ^Geometries, id: Geometry_Id) -> (vertices: []Vertex, indices: []u32, ok: bool) {
+	if id >= SCENE_GEO_BIT && id < DYNAMIC_GEO_BIT {
+		geo := scene_geometry_get(scene, g, id) or_return
+		return scene.path_vertices[geo.first_vertex:][:geo.vertex_count], scene.path_indices[geo.first_index:][:geo.index_count], true
+	}
+	return geometry_mesh(g, id)
+}
+
+@(private = "file")
+effective_draw_mode :: #force_inline proc "contextless" (m: Material, geo: Geometry) -> Draw_Mode {
+	return m.mode if m.mode != .Triangles else geo.mode
+}
+
+// Expands instanced draws into individual draws and `.Lines` / `.Points`
+// draws into camera-facing quad triangles in `exp`, returning `scene`
+// unchanged when no draw uses instancing, lines, or points.
+expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, view, proj: Mat4, width, height: int) -> ^Scene {
+	clear(&exp.geos)
+	clear(&exp.vertices)
+	clear(&exp.indices)
+	need_expand := len(scene.instances) > 0 || len(scene.path_geos) > 0
+	if !need_expand {
+		for i in 0 ..< len(scene.draws) {
+			d := &scene.draws[i]
+			if geo, ok := scene_geometry_get(scene, geos, d.geometry); ok && effective_draw_mode(d.material, geo) != .Triangles {
+				need_expand = true
+				break
+			}
+		}
+	}
+	if !need_expand {
+		return scene
+	}
+	out := &exp.scene
+	scene_clear(out)
+	out.camera = scene.camera
+	out.environment = scene.environment
+	out.environment_intensity = scene.environment_intensity
+	out.background = scene.background
+	out.background_intensity = scene.background_intensity
+	out.background_blurriness = scene.background_blurriness
+	out.tone_mapping = scene.tone_mapping
+	out.tone_mapping_exposure = scene.tone_mapping_exposure
+	out.fog = scene.fog
+	append(&out.lights, ..scene.lights[:])
+	append(&out.uniforms, ..scene.uniforms[:])
+	append(&out.uniform_floats, ..scene.uniform_floats[:])
+	append(&out.joints, ..scene.joints[:])
+	append(&out.morph_weights, ..scene.morph_weights[:])
+
+	view_proj := proj * view
+	cam_right := Vec3{view[0, 0], view[0, 1], view[0, 2]}
+	cam_up := Vec3{view[1, 0], view[1, 1], view[1, 2]}
+	cam_back := Vec3{view[2, 0], view[2, 1], view[2, 2]} // points toward camera in view space
+	scale_px := 2.0 / (f32(max(height, 1)) * max(proj[1, 1], 1e-6))
+
+	for di in 0 ..< len(scene.draws) {
+		d := scene.draws[di]
+		geo, ok := scene_geometry_get(scene, geos, d.geometry)
+		if !ok {
+			continue
+		}
+		j_range := scene.draw_joints[di] if di < len(scene.draw_joints) else Joint_Range{}
+		m_range := scene.draw_morphs[di] if di < len(scene.draw_morphs) else Morph_Range{}
+		insts := scene_draw_instances(scene, di)
+		mode := effective_draw_mode(d.material, geo)
+		if mode == .Triangles {
+			if len(insts) == 0 {
+				ei := len(out.draws)
+				append(&out.draws, d)
+				scene_set_draw_joints(out, ei, j_range)
+				scene_set_draw_morphs(out, ei, m_range)
+			} else {
+				base_lin := linear(d.material.color)
+				for inst in insts {
+					idraw := d
+					idraw.model = d.model * inst.transform
+					if inst.has_color || inst.color != {} {
+						idraw.material.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
+					}
+					ei := len(out.draws)
+					append(&out.draws, idraw)
+					scene_set_draw_joints(out, ei, j_range)
+					scene_set_draw_morphs(out, ei, m_range)
+				}
+			}
+			continue
+		}
+
+		// .Lines or .Points: pose local vertices (morph, then skin) once per draw.
+		raw_verts, raw_idx, _ := scene_geometry_mesh(scene, geos, d.geometry)
+		skin := geometry_skin(geos, d.geometry) if d.geometry < SCENE_GEO_BIT else nil
+		joints := scene_draw_joints(scene, di)
+		skinned := len(skin) > 0 && len(joints) > 0
+		active_buf: [MAX_MORPH_TARGETS]Active_Morph = ---
+		na := active_morphs(geo, scene_draw_morphs(scene, di), &active_buf) if d.geometry < SCENE_GEO_BIT else 0
+		morphed := na > 0 && geos != nil && len(geos.morph_deltas) > 0
+		src_verts := raw_verts
+		if morphed || skinned {
+			table_grow_non_zero(&exp.posed_verts, len(raw_verts))
+			deltas := geos.morph_deltas[:] if geos != nil else nil
+			for vtx, vi in raw_verts {
+				v := vtx
+				if morphed {
+					v.position, v.normal = morph_vertex(v, u32(vi), deltas, active_buf[:na])
+				}
+				if skinned {
+					v.position, v.normal = skin_vertex(v, skin[vi], joints)
+				}
+				exp.posed_verts[vi] = v
+			}
+			src_verts = exp.posed_verts[:len(raw_verts)]
+		}
+
+		default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
+		run_insts := insts if len(insts) > 0 else default_inst[:]
+		base_lin := linear(d.material.color)
+		px_space := .No_Size_Attenuation in d.material.flags
+
+		for inst in run_insts {
+			M := d.model * inst.transform if len(insts) > 0 else d.model
+			m_scale := mat_scale(M)
+			first_v := u32(len(exp.vertices))
+			first_i := u32(len(exp.indices))
+			r_max: f32
+			if mode == .Points {
+				raw_s := d.material.size if d.material.size > 0 else (4.0 if px_space else 0.08)
+				for v in src_verts {
+					p := (M * Vec4{v.position.x, v.position.y, v.position.z, 1}).xyz
+					half: f32
+					if px_space {
+						w_clip := (view_proj * Vec4{p.x, p.y, p.z, 1}).w if !scene.camera.orthographic else 1
+						half = 0.5 * raw_s * max(w_clip, 1e-4) * scale_px
+					} else {
+						half = 0.5 * raw_s * m_scale
+					}
+					rx := cam_right * half
+					uy := cam_up * half
+					q0 := p - rx - uy
+					q1 := p + rx - uy
+					q2 := p + rx + uy
+					q3 := p - rx + uy
+					base_u := u32(len(exp.vertices)) - first_v
+					append(
+						&exp.vertices,
+						Vertex{q0, cam_back, {0, 0}, {}},
+						Vertex{q1, cam_back, {1, 0}, {}},
+						Vertex{q2, cam_back, {1, 1}, {}},
+						Vertex{q3, cam_back, {0, 1}, {}},
+					)
+					append(&exp.indices, base_u + 0, base_u + 1, base_u + 2, base_u + 0, base_u + 2, base_u + 3)
+					r_max = max(r_max, linalg.length(p) + half * 1.5)
+				}
+			} else {
+				raw_w := d.material.size if d.material.size > 0 else (2.0 if px_space else 0.03)
+				emit_seg :: proc(exp: ^Expanded_Draws, first_v: u32, p0, p1, cam_back, cam_up, cam_right: Vec3, view_proj: Mat4, ortho, px_space: bool, raw_w, m_scale, scale_px: f32, r_max: ^f32) {
+					seg := p1 - p0
+					seg_len := linalg.length(seg)
+					if seg_len < 1e-7 {
+						return
+					}
+					dir := seg / seg_len
+					side_v := linalg.cross(dir, cam_back)
+					if linalg.length(side_v) < 1e-5 {
+						side_v = linalg.cross(dir, cam_up)
+						if linalg.length(side_v) < 1e-5 {
+							side_v = cam_right
+						}
+					}
+					side_dir := linalg.normalize(side_v)
+					n := linalg.normalize(linalg.cross(side_dir, dir))
+					h0, h1: f32
+					if px_space {
+						w0 := (view_proj * Vec4{p0.x, p0.y, p0.z, 1}).w if !ortho else 1
+						w1 := (view_proj * Vec4{p1.x, p1.y, p1.z, 1}).w if !ortho else 1
+						h0 = 0.5 * raw_w * max(w0, 1e-4) * scale_px
+						h1 = 0.5 * raw_w * max(w1, 1e-4) * scale_px
+					} else {
+						h0 = 0.5 * raw_w * m_scale
+						h1 = h0
+					}
+					q0 := p0 - side_dir * h0
+					q1 := p0 + side_dir * h0
+					q2 := p1 + side_dir * h1
+					q3 := p1 - side_dir * h1
+					base_u := u32(len(exp.vertices)) - first_v
+					append(
+						&exp.vertices,
+						Vertex{q0, n, {0, 0}, {}},
+						Vertex{q1, n, {1, 0}, {}},
+						Vertex{q2, n, {1, 1}, {}},
+						Vertex{q3, n, {0, 1}, {}},
+					)
+					append(&exp.indices, base_u + 0, base_u + 1, base_u + 2, base_u + 0, base_u + 2, base_u + 3)
+					r_max^ = max(r_max^, linalg.length(p0) + h0, linalg.length(p1) + h1)
+				}
+				if geo.mode == .Lines {
+					for s := 0; s + 1 < len(raw_idx); s += 2 {
+						ia, ib := raw_idx[s], raw_idx[s + 1]
+						if int(ia) >= len(src_verts) || int(ib) >= len(src_verts) {
+							continue
+						}
+						p0 := (M * Vec4{src_verts[ia].position.x, src_verts[ia].position.y, src_verts[ia].position.z, 1}).xyz
+						p1 := (M * Vec4{src_verts[ib].position.x, src_verts[ib].position.y, src_verts[ib].position.z, 1}).xyz
+						emit_seg(exp, first_v, p0, p1, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+					}
+				} else {
+					for t := 0; t + 2 < len(raw_idx); t += 3 {
+						i0, i1, i2 := raw_idx[t], raw_idx[t + 1], raw_idx[t + 2]
+						if int(i0) >= len(src_verts) || int(i1) >= len(src_verts) || int(i2) >= len(src_verts) {
+							continue
+						}
+						p0 := (M * Vec4{src_verts[i0].position.x, src_verts[i0].position.y, src_verts[i0].position.z, 1}).xyz
+						p1 := (M * Vec4{src_verts[i1].position.x, src_verts[i1].position.y, src_verts[i1].position.z, 1}).xyz
+						p2 := (M * Vec4{src_verts[i2].position.x, src_verts[i2].position.y, src_verts[i2].position.z, 1}).xyz
+						emit_seg(exp, first_v, p0, p1, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+						emit_seg(exp, first_v, p1, p2, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+						emit_seg(exp, first_v, p2, p0, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+					}
+				}
+			}
+			v_count := u32(len(exp.vertices)) - first_v
+			i_count := u32(len(exp.indices)) - first_i
+			if i_count == 0 {
+				continue
+			}
+			dyn_id := DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos))
+			append(&exp.geos, Geometry{
+				first_vertex = first_v,
+				vertex_count = v_count,
+				first_index  = first_i,
+				index_count  = i_count,
+				radius       = r_max,
+			})
+			mat := d.material
+			mat.mode = .Triangles
+			mat.side = .Double
+			if len(insts) > 0 && (inst.has_color || inst.color != {}) {
+				mat.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
+			}
+			append(&out.draws, Draw{geometry = dyn_id, model = linalg.MATRIX4F32_IDENTITY, material = mat})
+		}
+	}
+	return out
 }
 
 // The camera's view and projection for a `width x height` target.
@@ -333,7 +822,7 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 // compiled shader if they ask for one, the bounding sphere at least partly
 // in the view), the opaque ones as listed, then the blended ones farthest
 // from the camera first.
-draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, proj: Mat4, order: ^[dynamic]int) {
+draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, proj: Mat4, order: ^[dynamic]int, exp: ^Expanded_Draws = nil) {
 	clear(order)
 	n := len(scene.draws)
 	materials := scene_materials(scene)
@@ -341,13 +830,13 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	geometries := scene.draws.geometry[:n]
 	view_proj := proj * view
 	for m, i in materials {
-		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i)) {
+		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
 			append(order, i)
 		}
 	}
 	first := len(order)
 	for m, i in materials {
-		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i)) {
+		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
 			append(order, i)
 		}
 	}
@@ -390,39 +879,89 @@ blended :: proc "contextless" (m: Material) -> bool {
 // The lights in shading form: linear colours times intensity, directions
 // normalized. Both renderers shade with these (the GPU gets them packed).
 Shading_Light :: struct {
-	kind:     Light_Kind,
-	color:    Vec3, // linear, times intensity
-	ground:   Vec3, // linear, times intensity (hemisphere)
-	// Directional: the direction toward the light; point: its position.
-	vector:   Vec3,
-	distance: f32,
-	decay:    f32,
-	// The shadow light: its direct light is scaled by the shadow factor.
-	shadowed: bool,
+	kind:      Light_Kind,
+	color:     Vec3, // linear, times intensity
+	// Hemisphere: ground linear times intensity; Spot: unit axis toward the light.
+	ground:    Vec3,
+	// Directional: the direction toward the light; point/spot: its position.
+	vector:    Vec3,
+	distance:  f32,
+	decay:     f32,
+	cos_outer: f32,
+	cos_inner: f32,
+	// 0: not shadowed; 1..MAX_SHADOWS: shadow slot index + 1.
+	shadowed:  u32,
 }
 
 MAX_LIGHTS :: 8
 
 shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int {
 	n := 0
-	shadow := shadow_light(lights)
-	for l, i in lights {
+	shadow_count: u32 = 0
+	for l in lights {
 		if n == MAX_LIGHTS {
 			break
 		}
-		sl := Shading_Light{kind = l.kind, color = linear(l.color) * l.intensity, ground = linear(l.ground) * l.intensity, distance = l.distance, decay = l.decay, shadowed = i == shadow}
+		shadowed: u32 = 0
+		if (l.kind == .Directional || l.kind == .Spot) && l.cast_shadow && shadow_count < MAX_SHADOWS {
+			shadow_count += 1
+			shadowed = shadow_count
+		}
+		sl := Shading_Light{
+			kind     = l.kind,
+			color    = linear(l.color) * l.intensity,
+			ground   = linear(l.ground) * l.intensity,
+			distance = l.distance,
+			decay    = l.decay,
+			shadowed = shadowed,
+		}
 		switch l.kind {
 		case .Directional:
 			d := l.position - l.target
 			sl.vector = linalg.normalize(d) if linalg.length(d) > 1e-9 else Vec3{0, 1, 0}
 		case .Point:
 			sl.vector = l.position
+		case .Spot:
+			sl.vector = l.position
+			d := l.position - l.target
+			sl.ground = linalg.normalize(d) if linalg.length(d) > 1e-9 else Vec3{0, 1, 0}
+			angle := clamp(l.angle if l.angle > 0 else math.PI / 3, 1e-4, math.PI / 2)
+			penumbra := clamp(l.penumbra, 0, 1)
+			sl.cos_outer = math.cos(angle)
+			sl.cos_inner = math.cos(angle * (1 - penumbra))
 		case .Ambient, .Hemisphere:
 		}
 		out[n] = sl
 		n += 1
 	}
 	return n
+}
+
+// Fog blend factor 0..1 at Euclidean camera distance `dist` (`shaders/o3d.slang`).
+fog_factor :: #force_inline proc "contextless" (fog: Fog, dist: f32) -> f32 {
+	switch fog.kind {
+	case .None:
+		return 0
+	case .Linear:
+		near := fog.near if fog.far > fog.near else 1
+		far := fog.far if fog.far > fog.near else 1000
+		return clamp((dist - near) / max(far - near, 1e-6), 0, 1)
+	case .Exp2:
+		d := fog.density if fog.density > 0 else 0.00025
+		dd := d * dist
+		return clamp(1 - math.exp(-dd * dd), 0, 1)
+	}
+	return 0
+}
+
+// Applies tone mapping and fog in linear space before sRGB encoding, matching
+// `fs_main` in shaders/o3d.slang.
+finish_color :: #force_inline proc "contextless" (c, world, eye: Vec3, tone_mapping: Tone_Mapping, exposure: f32, fog: Fog, fog_color_linear: Vec3) -> Vec3 {
+	out := tone_map(c, tone_mapping, exposure)
+	if fog.kind != .None {
+		out = linalg.lerp(out, fog_color_linear, fog_factor(fog, linalg.length(world - eye)))
+	}
+	return out
 }
 
 // The materials in shading form, one per draw: linear colours, the opacity
@@ -569,9 +1108,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
 // specular with Smith correlated visibility and Schlick Fresnel), direct
 // lights plus ambient, hemisphere and equirectangular environment lighting.
-// `shadow` scales the shadow light's direct light (shadow_factor; 1: lit);
-// `ao` scales indirect light (ambient, hemisphere, environment; three.js's aoMap).
-shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1) -> Vec3 {
+// `shadow` / `shadows` scale each shadow light's direct light (`shadow_factor`;
+// 1: lit); `ao` scales indirect light (ambient, hemisphere, environment).
+shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}) -> Vec3 {
 	base := m.base
 	if .Basic in m.flags {
 		return base
@@ -594,10 +1133,10 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 		case .Hemisphere:
 			w := 0.5 * n.y + 0.5
 			out += linalg.lerp(l.ground, l.color, w) * diffuse * (ao / math.PI)
-		case .Directional, .Point:
+		case .Directional, .Point, .Spot:
 			ldir := l.vector
 			light := l.color
-			if l.kind == .Point {
+			if l.kind == .Point || l.kind == .Spot {
 				d := l.vector - world
 				dist := linalg.length(d)
 				ldir = d / max(dist, 1e-6)
@@ -607,10 +1146,18 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 					t := clamp(1 - math.pow(dist / l.distance, 4), 0, 1)
 					falloff *= t * t
 				}
+				if l.kind == .Spot {
+					angle_cos := linalg.dot(ldir, l.ground)
+					spot_t := clamp((angle_cos - l.cos_outer) / max(l.cos_inner - l.cos_outer, 1e-5), 0, 1)
+					falloff *= spot_t * spot_t * (3 - 2 * spot_t)
+				}
+				if falloff <= 0 {
+					continue
+				}
 				light *= falloff
 			}
-			if l.shadowed {
-				light *= shadow
+			if l.shadowed > 0 {
+				light *= shadow * shadows[min(int(l.shadowed - 1), MAX_SHADOWS - 1)]
 			}
 			nl := clamp(linalg.dot(n, ldir), 0, 1)
 			if nl <= 0 {
@@ -645,3 +1192,4 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 	}
 	return out
 }
+

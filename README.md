@@ -18,46 +18,63 @@ What is known about three.js carries over:
   transform is position, rotation and scale (`compose`), like Object3D.
 - The camera's field of view is vertical, in degrees (PerspectiveCamera);
   an orthographic camera takes the view's height.
-- Colours are sRGB; lighting is linear; the output is sRGB with no tone
-  mapping.
+- Colours are sRGB; lighting is linear; the output is tone-mapped
+  (`scene.tone_mapping`: `.None` default, `.Linear`, `.Reinhard`, `.Cineon`,
+  `.ACES_Filmic`, `.AgX`, `.Neutral`, scaled by `scene.tone_mapping_exposure`,
+  default 1), blended toward `scene.fog` (`.Linear` between `near` and `far`,
+  or `.Exp2` with `density`, by Euclidean camera distance on drawn fragments),
+  and encoded to sRGB.
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
   `emissive`, `emissive_intensity`, `ao_map_intensity`, `opacity`,
-  `alpha_cutoff`, `side`, texture maps `color_map`, `normal_map`,
-  `roughness_map` (green), `metalness_map` (blue; glTF packs both in one
-  texture), `emissive_map`, `ao_map` (red, applied to indirect light only as
-  three.js's `aoMap` does), per-slot UV transforms `*_transform` (`offset`,
-  `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`), and the
-  booleans as a bit set: `flags = {.Transparent, .Alpha_Mask, .Flat_Shading}`)
-  or MeshBasicMaterial (`.Basic`), or ShaderMaterial: your own vertex and
-  fragment shaders in GLSL ES (three.js's GLSL 1 style with `attribute`,
-  `varying` and `gl_FragColor`, or GLSL 3 with `glsl3 = true`), with
-  three.js's built-in uniforms (`modelMatrix`, `modelViewMatrix`,
-  `projectionMatrix`, `viewMatrix`, `normalMatrix`, `cameraPosition`,
-  `isOrthographic`) and attributes (`position`, `normal`, `uv`), compiled by
-  [oksl](https://github.com/defnotmid/oksl) on both renderers. The output is written as the shader
-  leaves it; `.Transparent` blends it, `side` culls as for any material.
-  `projectionMatrix` maps depth to 0..1 (SDL_GPU's clip space) rather than
-  WebGL's -1..1, which matters only to shaders that build their own. On a
-  morphed or skinned mesh, `position` and `normal` arrive already morphed and
-  posed by the skin's joints.
+  `alpha_cutoff`, `size`, `mode`, `side`, texture maps `color_map`,
+  `normal_map`, `roughness_map` (green), `metalness_map` (blue; glTF packs
+  both in one texture), `emissive_map`, `ao_map` (red, applied to indirect
+  light only as three.js's `aoMap` does), per-slot UV transforms `*_transform`
+  (`offset`, `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`),
+  and the booleans as a bit set: `flags = {.Transparent, .Alpha_Mask,
+  .Flat_Shading, .No_Size_Attenuation}`) or MeshBasicMaterial (`.Basic`), or
+  ShaderMaterial: your own vertex and fragment shaders in GLSL ES (three.js's
+  GLSL 1 style with `attribute`, `varying` and `gl_FragColor`, or GLSL 3 with
+  `glsl3 = true`), with three.js's built-in uniforms (`modelMatrix`,
+  `modelViewMatrix`, `projectionMatrix`, `viewMatrix`, `normalMatrix`,
+  `cameraPosition`, `isOrthographic`) and attributes (`position`, `normal`,
+  `uv`), compiled by [oksl](https://github.com/defnotmid/oksl) on both
+  renderers. The output is written as the shader leaves it; `.Transparent`
+  blends it, `side` culls as for any material. `projectionMatrix` maps depth to
+  0..1 (SDL_GPU's clip space) rather than WebGL's -1..1, which matters only to
+  shaders that build their own. On a morphed or skinned mesh, `position` and
+  `normal` arrive already morphed and posed by the skin's joints.
 - Lights are AmbientLight, HemisphereLight, DirectionalLight (from
-  `position` toward `target`) and PointLight (`distance`, `decay`), in
-  three.js's units: a white directional light of intensity 1 lights a white
-  surface facing it to 1/pi of white, so scenes use intensities around 2 to 3.
-- Shadows are DirectionalLightShadow's with PCF: a directional light with
-  `cast_shadow` (the first) and its `shadow` settings (`map_size`,
-  `height` of its square orthographic view, `near`, `far`, `bias`,
-  `normal_bias`; zero takes three.js's 512, 10, 0.5, 500), draws with
-  `.Cast_Shadow` and `.Receive_Shadow` in their material's flags (three.js
-  has them on the mesh; a draw's material is its own). Casters draw their
-  other side (three.js's default shadowSide) and morphed/skinned geometry,
-  discarding shadow texels below `alpha_cutoff` when `.Alpha_Mask` is set
-  (cut-out shadows); ShaderMaterials cast (including morphed and skinned
-  meshes) but do not receive.
+  `position` toward `target`), PointLight (`distance`, `decay`), and SpotLight
+  (`position`, `target`, `distance`, `decay`, outer half-angle `angle` default
+  `pi/3`, `penumbra` 0..1 default 0), in three.js's units: a white directional
+  light of intensity 1 lights a white surface facing it to 1/pi of white, so
+  scenes use intensities around 2 to 3.
+- Shadows are DirectionalLightShadow's (orthographic) and SpotLightShadow's
+  (perspective, `fov = 2 * angle`) with PCF, for up to `MAX_SHADOWS = 4`
+  shadow-casting directional or spot lights per frame: a light with
+  `cast_shadow` and its `shadow` settings (`map_size`, `height` of a
+  directional light's square orthographic view, `near`, `far`, `bias`,
+  `normal_bias`; zero takes three.js's 512, 10, 0.5, 500 or the spot light's
+  `distance`), draws with `.Cast_Shadow` and `.Receive_Shadow` in their
+  material's flags (three.js has them on the mesh; a draw's material is its
+  own). Casters draw their other side (three.js's default shadowSide) and
+  morphed/skinned geometry, discarding shadow texels below `alpha_cutoff` when
+  `.Alpha_Mask` is set (cut-out shadows); ShaderMaterials cast (including
+  morphed and skinned meshes) but do not receive.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
-  (radiusTop 0 is a cone), `torus`. The same parameters give the same id,
-  so a frame may ask for `box(1, 1, 1)` every time; `primitive(key)` makes
+  (radiusTop 0 is a cone), `torus`, plus `line_segments(positions)` (pairs of
+  endpoints), `polyline(positions, closed)` (connected path),
+  `wireframe(src)` (edges of a triangle mesh), and `points(positions)` (point
+  clouds). Any triangle geometry can also be drawn as wireframe lines or
+  vertex points by setting `material.mode = .Lines` or `.Points`. Line width
+  and point size are controlled by `material.size` in world units (perspective
+  foreshortened) or in screen pixels when `.No_Size_Attenuation` is in
+  `material.flags`. Any draw can be instanced (`InstancedMesh`) via
+  `scene_instances` and `scene_set_draw_instances` with per-instance
+  `transform` and optional `color`. The same primitive parameters give the same
+  id, so a frame may ask for `box(1, 1, 1)` every time; `primitive(key)` makes
   one from its `Geometry_Key` alone. Geometry is kept (never freed), so a
   shape changes over time through the draw's transform, as three.js
   animates `mesh.scale`: `sphere(geos, 1)` scaled by `compose`, not
@@ -76,6 +93,8 @@ albedo, _ := o3d.texture_load(&textures, "brick.png")
 scene: o3d.Scene                           // filled every frame
 o3d.scene_clear(&scene)
 scene.camera = {position = {0, 2, 6}, target = {0, 0.5, 0}, fov = 40, near = 0.1, far = 100}
+scene.tone_mapping, scene.tone_mapping_exposure = .ACES_Filmic, 1.0
+scene.fog = {kind = .Exp2, color = {0.05, 0.06, 0.08}, density = 0.04}
 append(&scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.2, 0.15, 0.2}, intensity = 1.5})
 append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {3, 5, 2},
 	cast_shadow = true, shadow = {map_size = 1024, bias = -0.0005}})
@@ -130,16 +149,21 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
 ## Design
 
 - **Data:** the scene is flat tables (lights, draws: geometry id, model
-  matrix, material, plus optional joint and morph-weight ranges) refilled
-  each frame, the draws a structure of arrays (`#soa`) since the per-frame
-  passes read a column or two; geometry is the only retained state: one
-  array of interleaved position / normal / uv / uv1 vertices (40 bytes), one
-  of 32-bit indices, a separate array of `Skin_Vertex` (4 joint indices and
-  normalized weights) for skinned meshes, and a separate array of
+  matrix, material, plus optional joint, morph-weight, and instance ranges)
+  refilled each frame, the draws a structure of arrays (`#soa`) since the
+  per-frame passes read a column or two; geometry is the only retained state:
+  one array of interleaved position / normal / uv / uv1 vertices (40 bytes),
+  one of 32-bit indices, a separate array of `Skin_Vertex` (4 joint indices
+  and normalized weights) for skinned meshes, and a separate array of
   `Morph_Delta` (position and normal deltas, 32 bytes) for morphed meshes so
-  meshes without skinning or morph targets pay nothing. The GPU mirrors the
-  arrays in vertex, index, and storage buffers, uploading what is new at the
-  start of a frame.
+  meshes without skinning or morph targets pay nothing. Before rendering a
+  frame, `expand_draws` expands instanced draws (`scene.instances`) and turns
+  `.Lines` / `.Points` draws into camera-facing quad triangles in reusable
+  scratch buffers (`Expanded_Draws`, zero warm-frame allocations), returning
+  `scene` unchanged when no draw uses instancing, lines, or points. The GPU
+  mirrors the static geometry arrays in vertex, index, and storage buffers
+  (uploading only what is new) and uploads any expanded line/point vertices
+  into reusable dynamic vertex/index buffers.
 - **glTF (`gltf.odin`):** `gltf_load` and `gltf_parse` (`vendor:cgltf`)
   unpack meshes (`POSITION`, `NORMAL`, `TEXCOORD_0`, `TEXCOORD_1`,
   `JOINTS_0`, `WEIGHTS_0` with weights normalized, including normalized and
@@ -151,54 +175,66 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   with `alphaCutoff` default 0.5, `BLEND`; `occlusionTexture` red channel +
   `strength`; `KHR_materials_unlit`; `KHR_materials_emissive_strength`;
   `KHR_texture_transform` `offset`, `rotation`, `scale` and `texCoord` 0 or
-  1 per texture reference) into `Material`, the node hierarchy into a
-  topologically sorted `#soa` array (`parent < i`), skins (`joints` and
-  `inverseBindMatrices`, up to `MAX_JOINTS = 64`) into flat arrays, and
-  keyframe animations (`STEP`, `LINEAR`, `CUBICSPLINE`, including morph
-  `"weights"` channels) into flat time/value arrays. `gltf_draw` evaluates
-  the hierarchy, animation, morph weights (with optional `Morph_Weight`
-  overrides by target name or 0-based index applied after animation), and
-  joint matrices (`inv_mesh * world[joint] * ibm`) at time `t` with zero
-  heap allocations on warm frames, posing into the caller's `Model_Pose`
-  (one per thread lets threads pose one model at once) or the model's own.
-  Morphs (up to `MAX_MORPH_TARGETS = 8` active non-zero targets per draw) are
-  applied before skinning in the per-chunk vertex stage on the software
-  renderer and in `vs_main` / `vs_skinned` (`shaders/o3d.slang`, reading the
-  `Morph_Delta` storage buffer via `SV_VertexID`) on the GPU, including the
-  shadow pass and before a `ShaderMaterial`'s vertex stage. A failed load
-  returns a `Gltf_Error` with `GLTF_ERROR_TEXT` for messages. If
-  `extensionsRequired` names an extension o3d does not implement, loading
-  fails with `Gltf_Error.Unsupported_Extension` and records the extension
-  name in `Model.unsupported_extension`. Optional extensions listed only in
+  1 per texture reference) into `Material`, punctual lights
+  (`KHR_lights_punctual`: directional, point, and spot lights with `color`,
+  `intensity`, `range`, and cone angles `innerConeAngle` / `outerConeAngle`)
+  into `Model.lights`, the node hierarchy into a topologically sorted `#soa`
+  array (`parent < i`), skins (`joints` and `inverseBindMatrices`, up to
+  `MAX_JOINTS = 64`) into flat arrays, and keyframe animations (`STEP`,
+  `LINEAR`, `CUBICSPLINE`, including morph `"weights"` channels) into flat
+  time/value arrays. `gltf_draw` evaluates the hierarchy, animation, morph
+  weights (with optional `Morph_Weight` overrides by target name or 0-based
+  index applied after animation), node punctual lights (transformed by the
+  node's world matrix with directional/spot lights aiming along local `-Z`,
+  appended to `scene.lights`), and joint matrices (`inv_mesh * world[joint] *
+  ibm`) at time `t` with zero heap allocations on warm frames, posing into
+  the caller's `Model_Pose` (one per thread lets threads pose one model at
+  once) or the model's own. Morphs (up to `MAX_MORPH_TARGETS = 8` active
+  non-zero targets per draw) are applied before skinning in the per-chunk
+  vertex stage on the software renderer and in `vs_main` / `vs_skinned`
+  (`shaders/o3d.slang`, reading the `Morph_Delta` storage buffer via
+  `SV_VertexID`) on the GPU, including the shadow pass and before a
+  `ShaderMaterial`'s vertex stage. A failed load returns a `Gltf_Error` with
+  `GLTF_ERROR_TEXT` for messages. If `extensionsRequired` names an extension
+  o3d does not implement, loading fails with
+  `Gltf_Error.Unsupported_Extension` and records the extension name in
+  `Model.unsupported_extension`. Optional extensions listed only in
   `extensionsUsed` (`KHR_materials_ior`, `KHR_materials_transmission`,
   `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
   `KHR_materials_specular`, `KHR_materials_iridescence`,
-  `KHR_materials_anisotropy`, `KHR_lights_punctual`, `EXT_texture_webp`, …)
-  are ignored, as the spec allows. Remaining unsupported required extensions
-  (rejected with `.Unsupported_Extension`): `KHR_draco_mesh_compression`,
+  `KHR_materials_anisotropy`, `EXT_texture_webp`, …) are ignored, as the spec
+  allows. Remaining unsupported required extensions (rejected with
+  `.Unsupported_Extension`): `KHR_draco_mesh_compression`,
   `EXT_meshopt_compression`, `KHR_texture_basisu`, `EXT_texture_webp`, and
   any other extension outside `KHR_materials_unlit`,
-  `KHR_materials_emissive_strength`, `KHR_texture_transform`, and
-  `KHR_mesh_quantization`. Also not imported: glTF cameras and lights.
+  `KHR_materials_emissive_strength`, `KHR_texture_transform`,
+  `KHR_mesh_quantization`, and `KHR_lights_punctual`. Also not imported: glTF
+  cameras.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
-  the draws' materials into their shading form (linear colours, the
-  opacity drawn, 2x3 UV transform matrices in o3d UV space, UV set bits,
-  `Shading_Flags`) once; both renderers read those, and the GPU's uniforms
-  are them, packed. Boolean sets are bit sets (`Material_Flags`,
-  `Shading_Flags`, `Texture_Slots`, a pixel's covered samples).
+  the draws' materials into their shading form (linear colours, spot cone
+  cosines and axis, the opacity drawn, 2x3 UV transform matrices in o3d UV
+  space, UV set bits, `Shading_Flags`) once; both renderers read those, and
+  the GPU's uniforms are them, packed. Boolean sets are bit sets
+  (`Material_Flags`, `Shading_Flags`, `Texture_Slots`, a pixel's covered
+  samples).
 - **Shader contract:** `Light_Kind`'s values and `Shading_Flag`'s bits are
   the shader's `LIGHT_*` and `FLAG_*` constants; a test reads
   `shaders/o3d.slang` and checks them.
-- **Shading** is one model in two places, `shade` in scene.odin and
-  `shaders/o3d.slang`: Lambert diffuse plus GGX specular with Smith
+- **Shading** is one model in two places, `shade` / `finish_color` in
+  `scene.odin` (`tone_map` in `o3d.odin`) and `shaders/o3d.slang`
+  (`shaders/common.slang`): Lambert diffuse plus GGX specular with Smith
   correlated visibility and Schlick Fresnel, plus equirectangular
   environment lighting (`scene.environment`, `scene.environment_intensity`)
   and background (`scene.background`, `scene.background_intensity`,
   `scene.background_blurriness`), as three.js's MeshStandardMaterial
   computes it, with `ao_map` (`1 + (r - 1) * ao_map_intensity`) multiplying
   indirect light only (ambient, hemisphere, environment irradiance and
-  radiance). When a texture is used as `scene.environment` (or blurred
+  radiance), followed by `tone_map` (`None`, `Linear`, `Reinhard`, `Cineon`,
+  `ACES_Filmic`, `AgX`, `Neutral` with `tone_mapping_exposure`, applied to
+  both drawn materials and the equirectangular background) and `fog_factor`
+  (`.Linear` or `.Exp2` blending toward `linear(fog.color)` before sRGB
+  encoding). When a texture is used as `scene.environment` (or blurred
   `scene.background`), the texture has derived maps, as it has mipmaps: a
   GGX-prefiltered radiance mip chain (roughness 0..1) and a
   cosine-convolved diffuse irradiance map in `Textures`, sampled alike by
@@ -224,16 +260,18 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   (tested). Triangles are a structure of arrays, as counting and listing
   read only their row spans. Vertices stay interleaved: the GPU reads them
   as one buffer and the rasterizer gathers whole vertices by index.
-- **Shadows** (shadow.odin) are drawn first: the casters' depth from the
-  light (`shadow_casters`, culled to its view), one sample per texel
-  centre, nearest kept (discarding texels below `alpha_cutoff` for
-  `.Alpha_Mask` casters with a `color_map`); the software renderer runs the
-  same phases in a depth-only mode at the map's size, the GPU renders into
-  an R32_FLOAT colour target (sampleable on every backend) with a depth
-  buffer. A receiver's pixel scales the shadow light's direct light by
-  `shadow_factor`: a 3x3 grid of bilinear depth comparisons (a 4x4 block
-  of texels weighed 1 - f, 1, 1, f per axis), edges repeated, outside the
-  light's view lit. The shader has the same arithmetic (`shadow_factor` in
+- **Shadows** (shadow.odin) are drawn first for up to `MAX_SHADOWS = 4`
+  shadow-casting directional (orthographic) or spot (perspective) lights
+  (`frame_shadows`): the casters' depth from each light (`shadow_casters`,
+  culled to its view), one sample per texel centre, nearest kept (discarding
+  texels below `alpha_cutoff` for `.Alpha_Mask` casters with a `color_map`);
+  the software renderer runs the same phases in a depth-only mode at each
+  map's size, the GPU renders into R32_FLOAT colour targets (sampleable on
+  every backend) with depth buffers. A receiver's pixel scales each shadow
+  light's direct light by `shadow_factor` (with perspective divide `c.xyz /
+  c.w`): a 3x3 grid of bilinear depth comparisons (a 4x4 block of texels
+  weighed 1 - f, 1, 1, f per axis), edges repeated, outside the light's view
+  lit. The shader has the same arithmetic (`shadow_factor` in
   `shaders/o3d.slang`); `FLAG_RECEIVE_SHADOW` and `FLAG_ALPHA_MASK` join the
   shader contract.
 - **Order:** draws whose bounding sphere (the geometry's radius plus
@@ -267,8 +305,8 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
 
 ## Next
 
-Integrated in onimite (`view3d{}`, v0.0.3). What is still missing, found by
-using it, most important first.
+Integrated in onimite (`view3d{}`). What is still missing, found by using it,
+most important first.
 
 For models people download:
 
@@ -279,31 +317,26 @@ For models people download:
    `Gltf_Error.Unsupported_Extension` when required; and optional PBR
    extensions (`KHR_materials_transmission`, `KHR_materials_ior`,
    `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
-   `KHR_materials_specular`, `KHR_lights_punctual`), which today are ignored
-   when listed in `extensionsUsed`.
+   `KHR_materials_specular`), which today are ignored when listed in
+   `extensionsUsed`.
 
 For typical three.js scenes:
 
-2. **Tone mapping and exposure** (three.js's `ACESFilmicToneMapping` /
-   `AgXToneMapping`, `toneMappingExposure`): most three.js scenes use one,
-   and lit models look flat or blown out without it.
-3. **SpotLight**, and shadows from more than the first directional light
-   (point and spot light shadows).
-4. **Fog** (`Fog`, `FogExp2`).
+2. **Point light shadows:** omnidirectional cube/dual-paraboloid shadow maps
+   (directional and spot light shadows are supported, up to 4 per frame).
 
 For onimite:
 
-5. **Textures that change every frame:** a video clip or a group's 2D
+3. **Textures that change every frame:** a video clip or a group's 2D
    drawing mapped onto a surface. Today a texture is added once
    (`texture_add`); this needs an update path the host fills per frame
    (on the GPU: a texture the host renders into).
-6. **ShaderMaterial textures** (small here): `uniform sampler2D` bound to
+4. **ShaderMaterial textures** (small here): `uniform sampler2D` bound to
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
-7. **Instancing, lines and points:** `InstancedMesh` for many copies of one
-   mesh, `LineSegments` and `Points` for data visualisation.
 
 Metal: v0.0.1's standard shader did not compile there (a texel `Load` on
 a combined texture-sampler, which Slang emits wrongly for MSL; the shadow
 map is now sampled at texel centres). Run `tools/gpu_check` on macOS to
 confirm every case before relying on it.
+

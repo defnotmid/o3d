@@ -811,4 +811,58 @@ test_gltf_unsupported_extensions :: proc(t: ^testing.T) {
 	testing.expect_value(t, err_opt, Gltf_Error.None)
 }
 
+// KHR_materials_unlit sets Material_Flag.Basic, and KHR_lights_punctual imports
+// directional, point, and spot lights on nodes and appends them to scene.lights
+// transformed by the node's world matrix (aiming along local -Z).
+@(test)
+test_gltf_unlit_and_lights_punctual :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	scene: Scene
+	defer scene_destroy(&scene)
+
+	Bin :: struct #packed {
+		pos: [3][3]f32,
+	}
+	b := Bin{pos = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}}
+	encoded := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	src := fmt.tprintf(
+		`{{"asset":{{"version":"2.0"}},"extensionsUsed":["KHR_materials_unlit","KHR_lights_punctual"],"extensionsRequired":["KHR_materials_unlit","KHR_lights_punctual"],"extensions":{{"KHR_lights_punctual":{{"lights":[{{"type":"directional","color":[1,0.5,0.25],"intensity":2.5}},{{"type":"point","color":[0.2,0.8,1],"intensity":10,"range":6}},{{"type":"spot","color":[1,1,1],"intensity":20,"range":12,"spot":{{"innerConeAngle":0.2,"outerConeAngle":0.5}}}}]}}}},"buffers":[{{"uri":"data:application/octet-stream;base64,%s","byteLength":%d}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],"materials":[{{"pbrMetallicRoughness":{{"baseColorFactor":[0.8,0.2,0.4,1]}},"extensions":{{"KHR_materials_unlit":{{}}}}}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"material":0}}]}}],"nodes":[{{"mesh":0}},{{"translation":[1,2,3],"extensions":{{"KHR_lights_punctual":{{"light":0}}}}}},{{"translation":[-2,1,0],"extensions":{{"KHR_lights_punctual":{{"light":1}}}}}},{{"translation":[0,4,2],"extensions":{{"KHR_lights_punctual":{{"light":2}}}}}}],"scenes":[{{"nodes":[0,1,2,3]}}],"scene":0}}`,
+		encoded,
+		size_of(Bin),
+	)
+	m, err := gltf_parse(transmute([]u8)src, &geos)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Gltf_Error.None)
+	testing.expect_value(t, len(m.lights), 3)
+
+	scene_clear(&scene)
+	gltf_draw(&scene, &m, transform = compose({10, 0, 0}))
+	testing.expect_value(t, len(scene.draws), 1)
+	testing.expect(t, .Basic in scene.draws.material[0].flags, "KHR_materials_unlit sets .Basic")
+	testing.expect_value(t, len(scene.lights), 3)
+
+	// Directional light at (11, 2, 3) aiming along -Z -> target (11, 2, 2).
+	l0 := scene.lights[0]
+	testing.expect_value(t, l0.kind, Light_Kind.Directional)
+	testing.expect(t, linalg.length(l0.position - Vec3{11, 2, 3}) < 1e-4)
+	testing.expect(t, linalg.length(l0.target - Vec3{11, 2, 2}) < 1e-4)
+	testing.expect_value(t, l0.intensity, f32(2.5))
+
+	// Point light at (8, 1, 0) with distance = 6.
+	l1 := scene.lights[1]
+	testing.expect_value(t, l1.kind, Light_Kind.Point)
+	testing.expect(t, linalg.length(l1.position - Vec3{8, 1, 0}) < 1e-4)
+	testing.expect_value(t, l1.distance, f32(6))
+
+	// Spot light at (10, 4, 2) aiming at (10, 4, 1) with outer angle = 0.5, inner = 0.2 -> penumbra = (0.5 - 0.2) / 0.5 = 0.6.
+	l2 := scene.lights[2]
+	testing.expect_value(t, l2.kind, Light_Kind.Spot)
+	testing.expect(t, linalg.length(l2.position - Vec3{10, 4, 2}) < 1e-4)
+	testing.expect(t, linalg.length(l2.target - Vec3{10, 4, 1}) < 1e-4)
+	testing.expect(t, abs(l2.angle - 0.5) < 1e-5)
+	testing.expect(t, abs(l2.penumbra - 0.6) < 1e-5)
+}
+
+
 

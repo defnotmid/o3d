@@ -42,6 +42,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"gltf", 160, 120, build_gltf},
 	{"skinned", 160, 120, build_skinned},
 	{"morph", 160, 120, build_morph},
+	{"manim", 200, 150, build_manim},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -260,6 +261,19 @@ build_shadow :: proc(a: ^Parity_Assets) -> string {
 			l.shadow = {map_size = 1024, height = 9, bias = -0.0005, normal_bias = 0.01}
 		}
 	}
+	append(&a.scene.lights, o3d.Light{
+		kind        = .Spot,
+		color       = {1, 0.7, 0.35},
+		intensity   = 18,
+		position    = {-2.2, 3.2, 2.2},
+		target      = {0, 0.4, 0},
+		distance    = 10,
+		decay       = 2,
+		angle       = 32 * math.RAD_PER_DEG,
+		penumbra    = 0.35,
+		cast_shadow = true,
+		shadow      = {map_size = 512, bias = -0.001, normal_bias = 0.01},
+	})
 	for i in 0 ..< len(a.scene.draws) {
 		a.scene.draws.material[i].flags += {.Cast_Shadow, .Receive_Shadow}
 	}
@@ -352,7 +366,7 @@ build_textures :: proc(a: ^Parity_Assets) -> string {
 }
 
 // Equirectangular environment lighting (prefiltered radiance and diffuse
-// irradiance) and a blurred background, lights off.
+// irradiance), blurred background, ACES Filmic tone mapping, and Exp2 fog.
 @(private = "file")
 build_environment :: proc(a: ^Parity_Assets) -> string {
 	EW, EH :: 64, 32
@@ -385,6 +399,9 @@ build_environment :: proc(a: ^Parity_Assets) -> string {
 	a.scene.environment_intensity = 1.2
 	a.scene.background = env_id
 	a.scene.background_blurriness = 0.25
+	a.scene.tone_mapping = .ACES_Filmic
+	a.scene.tone_mapping_exposure = 1.15
+	a.scene.fog = {kind = .Exp2, color = {0.75, 0.8, 0.9}, density = 0.06}
 
 	o3d.environment_prefilter(&a.textures, env_id)
 	return ""
@@ -613,5 +630,69 @@ build_morph :: proc(a: ^Parity_Assets) -> string {
 	)
 	return ""
 }
+
+// Manim-style 3D scene: InstancedMesh (per-instance transform + color),
+// LineSegments / polyline / wireframe, Points (world-space and pixel-space),
+// AgX tone mapping, and Linear fog.
+@(private = "file")
+build_manim :: proc(a: ^Parity_Assets) -> string {
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {2.2, 1.8, 3.6}, target = {0, 0.2, 0}, fov = 45, near = 0.1, far = 30}
+	a.scene.tone_mapping = .AgX
+	a.scene.tone_mapping_exposure = 1.1
+	a.scene.fog = {kind = .Linear, color = {0.08, 0.1, 0.14}, near = 3.0, far = 12.0}
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.85}, intensity = 2.5, position = {3, 4, 3}})
+	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
+
+	// 1. Instanced spheres with per-instance transform and color.
+	inst_mat := o3d.MATERIAL_DEFAULT
+	inst_mat.color, inst_mat.roughness = {1, 1, 1}, 0.35
+	append(&a.scene.draws, o3d.Draw{o3d.sphere(&a.geos, 0.22, 24, 16), o3d.compose(), inst_mat})
+	insts: [5]o3d.Instance
+	for i in 0 ..< 5 {
+		t := f32(i) / 4.0
+		ang := (t - 0.5) * 2.2
+		insts[i] = {
+			transform = o3d.compose({math.sin(ang) * 1.1, 0.15 + 0.3 * math.cos(ang * 2), math.cos(ang) * 0.6 - 0.3}),
+			color     = {0.2 + 0.7 * t, 0.8 - 0.4 * t, 0.9 - 0.6 * t},
+			has_color = true,
+		}
+	}
+	o3d.scene_set_draw_instances(&a.scene, 0, o3d.scene_instances(&a.scene, insts[:]))
+
+	// 2. A 3D parametric helix polyline in world-space thickness.
+	helix_pts: [24]o3d.Vec3
+	for i in 0 ..< len(helix_pts) {
+		t := f32(i) / f32(len(helix_pts) - 1)
+		theta := t * math.TAU * 1.5
+		helix_pts[i] = {0.85 * math.cos(theta), -0.4 + 1.3 * t, 0.85 * math.sin(theta)}
+	}
+	line_mat := o3d.MATERIAL_DEFAULT
+	line_mat.color = {1.0, 0.75, 0.2}
+	line_mat.size = 0.045
+	line_mat.flags = {.Basic}
+	append(&a.scene.draws, o3d.Draw{o3d.polyline(&a.geos, helix_pts[:]), o3d.compose(), line_mat})
+
+	// 3. A wireframe box in pixel-space thickness (No_Size_Attenuation).
+	wire_mat := o3d.MATERIAL_DEFAULT
+	wire_mat.color = {0.35, 0.85, 1.0}
+	wire_mat.size = 3.0
+	wire_mat.flags = {.Basic, .No_Size_Attenuation}
+	append(&a.scene.draws, o3d.Draw{o3d.wireframe(&a.geos, o3d.box(&a.geos, 0.9, 0.9, 0.9)), o3d.compose({-0.8, 0.4, 0.3}, {0.3, 0.5, 0}), wire_mat})
+
+	// 4. Points cloud in world-space size.
+	pts := [6]o3d.Vec3 {
+		{-1.2, -0.2, 0.8}, {-0.6, 0.9, 0.7}, {0.0, 1.1, 0.4},
+		{ 0.6,  0.8, 0.6}, { 1.1, 0.2, 0.7}, {0.4, -0.3, 0.9},
+	}
+	pt_mat := o3d.MATERIAL_DEFAULT
+	pt_mat.color = {1.0, 0.4, 0.7}
+	pt_mat.size = 0.09
+	pt_mat.flags = {.Basic}
+	append(&a.scene.draws, o3d.Draw{o3d.points(&a.geos, pts[:]), o3d.compose(), pt_mat})
+
+	return ""
+}
+
 
 

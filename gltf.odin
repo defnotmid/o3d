@@ -76,6 +76,7 @@ SUPPORTED_EXTENSIONS := [?]string {
 	"KHR_materials_emissive_strength",
 	"KHR_texture_transform",
 	"KHR_mesh_quantization",
+	"KHR_lights_punctual",
 }
 
 @(private = "file")
@@ -162,6 +163,7 @@ Model_Node :: struct {
 	parent:                     i32, // -1 for root nodes; always < current node index
 	mesh:                       i32, // -1 if none, else index in `Model.meshes`
 	skin:                       i32, // -1 if none, else index in `Model.skins`
+	light:                      i32, // -1 if none, else index in `Model.lights`
 	first_weight, weight_count: u32, // rest morph weights in `Model.node_weights`
 	has_matrix:                 bool,
 	translation:                Vec3,
@@ -188,6 +190,7 @@ Model_Channel :: struct {
 Model :: struct {
 	meshes:                [dynamic]Model_Mesh,
 	primitives:            [dynamic]Model_Primitive,
+	lights:                [dynamic]Light,
 	nodes:                 #soa[dynamic]Model_Node,
 	skins:                 [dynamic]Model_Skin,
 	skin_joints:           [dynamic]u32,
@@ -242,6 +245,7 @@ model_destroy :: proc(m: ^Model) {
 	}
 	delete(m.meshes)
 	delete(m.primitives)
+	delete(m.lights)
 	delete(m.nodes)
 	delete(m.skins)
 	delete(m.skin_joints)
@@ -426,6 +430,7 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 	parents := m.nodes.parent[:n]
 	meshes := m.nodes.mesh[:n]
 	skins := m.nodes.skin[:n]
+	lights := m.nodes.light[:n]
 	locals := m.nodes.local[:n]
 	world := p.world[:n]
 	for i in 0 ..< n {
@@ -437,6 +442,17 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		world[i] = (world[parent] * local) if parent >= 0 else (transform * local)
 	}
 	for i in 0 ..< n {
+		if li := lights[i]; li >= 0 && int(li) < len(m.lights) {
+			l := m.lights[li]
+			w := world[i]
+			pos := Vec3{w[0, 3], w[1, 3], w[2, 3]}
+			// KHR_lights_punctual directional and spot lights shine along local -Z.
+			fwd := Vec3{-w[0, 2], -w[1, 2], -w[2, 2]}
+			dir := linalg.normalize(fwd) if linalg.length(fwd) > 1e-9 else Vec3{0, 0, -1}
+			l.position = pos
+			l.target = pos + dir
+			append(&scene.lights, l)
+		}
 		mi := meshes[i]
 		if mi < 0 || int(mi) >= len(m.meshes) {
 			continue
@@ -505,7 +521,34 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 		}
 	}
 
-	// 2. Build meshes and primitives into `geos` and `m.primitives`.
+	// 2. Import KHR_lights_punctual lights.
+	reserve(&m.lights, len(data.lights))
+	for &gl in data.lights {
+		kind: Light_Kind = .Point
+		switch gl.type {
+		case .directional:
+			kind = .Directional
+		case .point:
+			kind = .Point
+		case .spot:
+			kind = .Spot
+		case .invalid:
+		}
+		outer := gl.spot_outer_cone_angle if gl.spot_outer_cone_angle > 0 else math.PI / 4
+		inner := clamp(gl.spot_inner_cone_angle, 0, outer)
+		penumbra := clamp(1 - inner / outer, 0, 1) if outer > 0 else 0
+		append(&m.lights, Light{
+			kind      = kind,
+			color     = linear_to_srgb_vec3(Vec3(gl.color)),
+			intensity = gl.intensity,
+			distance  = max(gl.range, 0),
+			decay     = 2,
+			angle     = outer,
+			penumbra  = penumbra,
+		})
+	}
+
+	// 3. Build meshes and primitives into `geos` and `m.primitives`.
 	reserve(&m.meshes, len(data.meshes))
 	v_scratch := make([dynamic]Vertex, context.temp_allocator)
 	s_scratch := make([dynamic]Skin_Vertex, context.temp_allocator)
@@ -565,7 +608,7 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 		})
 	}
 
-	// 3. Flatten the default scene's node hierarchy (every root when the file
+	// 4. Flatten the default scene's node hierarchy (every root when the file
 	// names no scene) in topological order (parents always before children).
 	node_map := make([]i32, len(data.nodes), context.temp_allocator)
 	slice.fill(node_map, -1)
@@ -590,7 +633,7 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 		}
 	}
 
-	// 4. Flatten skins (joint node indices and inverse bind matrices).
+	// 5. Flatten skins (joint node indices and inverse bind matrices).
 	build_skins(data, &m, node_map, &f_scratch)
 
 	num_nodes := len(m.nodes)
@@ -602,7 +645,7 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 	resize(&m.scratch.joints, len(m.skin_joints))
 	resize(&m.scratch.morph_weights, len(m.node_weights))
 
-	// 5. Flatten animations and keyframe samplers.
+	// 6. Flatten animations and keyframe samplers.
 	build_animations(data, &m, node_map, &f_scratch)
 	return m
 }
@@ -834,11 +877,6 @@ view_transform :: proc "contextless" (view: cgltf.texture_view) -> (t: Texture_T
 }
 
 @(private = "file")
-linear_to_srgb_vec3 :: #force_inline proc "contextless" (c: [3]f32) -> Vec3 {
-	return {linear_to_srgb(c[0]), linear_to_srgb(c[1]), linear_to_srgb(c[2])}
-}
-
-@(private = "file")
 convert_material :: proc(data: ^cgltf.data, gm: ^cgltf.material, img_ids: []Texture_Id) -> Material {
 	if gm == nil {
 		return MATERIAL_DEFAULT
@@ -865,7 +903,7 @@ convert_material :: proc(data: ^cgltf.data, gm: ^cgltf.material, img_ids: []Text
 	m.ao_map = tex_from_view(data, gm.occlusion_texture, img_ids)
 	m.ao_transform = view_transform(gm.occlusion_texture)
 	m.ao_map_intensity = gm.occlusion_texture.scale if gm.occlusion_texture.texture != nil else 1
-	m.emissive = linear_to_srgb_vec3(gm.emissive_factor)
+	m.emissive = linear_to_srgb_vec3(Vec3(gm.emissive_factor))
 	m.emissive_intensity = gm.emissive_strength.emissive_strength if gm.has_emissive_strength else 1
 	if gm.double_sided {
 		m.side = .Double
@@ -930,6 +968,13 @@ emit_node :: proc(data: ^cgltf.data, gn: ^cgltf.node, parent_idx: i32, m: ^Model
 			skin_idx = i32(si)
 		}
 	}
+	light_idx: i32 = -1
+	if gn.light != nil && len(data.lights) > 0 {
+		li := int(uintptr(gn.light) - uintptr(raw_data(data.lights))) / size_of(cgltf.light)
+		if li >= 0 && li < len(m.lights) {
+			light_idx = i32(li)
+		}
+	}
 
 	t := Vec3(gn.translation) if gn.has_translation else Vec3{0, 0, 0}
 	r := quaternion(x = gn.rotation[0], y = gn.rotation[1], z = gn.rotation[2], w = gn.rotation[3]) if gn.has_rotation else linalg.QUATERNIONF32_IDENTITY
@@ -953,6 +998,7 @@ emit_node :: proc(data: ^cgltf.data, gn: ^cgltf.node, parent_idx: i32, m: ^Model
 		parent       = parent,
 		mesh         = mesh_idx,
 		skin         = skin_idx,
+		light        = light_idx,
 		first_weight = first_weight,
 		weight_count = weight_count,
 		has_matrix   = bool(gn.has_matrix),

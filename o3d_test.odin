@@ -780,3 +780,209 @@ test_alpha_mask_ao_and_uv_transform :: proc(t: ^testing.T) {
 	testing.expectf(t, px_shift[(32 * W + 20) * 4] > 200 && px_shift[(32 * W + 44) * 4] < 10, "KHR_texture_transform offset={0.5,0} swaps AO halves")
 }
 
+// Tone mapping modes (Linear, Reinhard, Cineon, ACES_Filmic, AgX, Neutral) with
+// exposure compress overbright HDR values into [0, 1], and Fog (Linear and Exp2)
+// blends shaded draws toward fog.color by camera distance without touching
+// background pixels.
+@(test)
+test_tone_mapping_and_fog :: proc(t: ^testing.T) {
+	hdr := Vec3{4.0, 2.0, 0.5}
+	testing.expect_value(t, tone_map(hdr, .None, 1.0), hdr)
+	testing.expect_value(t, tone_map(Vec3{0.3, 0.2, 0.1}, .Linear, 2.0), Vec3{0.6, 0.4, 0.2})
+	for mode in Tone_Mapping {
+		if mode == .None || mode == .Linear {
+			continue
+		}
+		mapped := tone_map(hdr, mode, 1.0)
+		testing.expectf(t, mapped.r > 0.5 && mapped.r < 1.0 && mapped.g > 0.3 && mapped.g < 1.0, "%v compresses HDR into (0, 1): %v", mode, mapped)
+		brighter := tone_map(hdr, mode, 2.0)
+		testing.expectf(t, brighter.r > mapped.r && brighter.g > mapped.g, "%v exposure increases brightness: %v vs %v", mode, brighter, mapped)
+	}
+
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+
+	W :: 64
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 5}, fov = 45, near = 0.1, far = 50}
+	m := MATERIAL_DEFAULT
+	m.color = {1, 0, 0}
+	m.flags = {.Basic}
+	box_id := box(&g, 0.8, 0.8, 0.2)
+
+	// Linear fog from dist = 2 to dist = 10 toward pure blue {0, 0, 1}.
+	scene.fog = {kind = .Linear, color = {0, 0, 1}, near = 2, far = 10}
+	append(&scene.draws, Draw{box_id, compose({0, 0, 3}), m}) // dist ~ 2
+	px_near := software_render(&s, &scene, &g, nil, W, W)
+	near_r, near_b := px_near[(32 * W + 32) * 4], px_near[(32 * W + 32) * 4 + 2]
+	bg_a := px_near[(2 * W + 2) * 4 + 3]
+
+	scene.draws.model[0] = compose({0, 0, -1}) // dist ~ 6
+	px_mid := software_render(&s, &scene, &g, nil, W, W)
+	mid_r, mid_b := px_mid[(32 * W + 32) * 4], px_mid[(32 * W + 32) * 4 + 2]
+
+	scene.draws.model[0] = compose({0, 0, -6}) // dist ~ 11
+	px_far := software_render(&s, &scene, &g, nil, W, W)
+	far_r, far_b := px_far[(32 * W + 32) * 4], px_far[(32 * W + 32) * 4 + 2]
+
+	testing.expectf(t, near_r > 230 && near_b < 60, "near box un-fogged red: r=%d b=%d", near_r, near_b)
+	testing.expectf(t, mid_r > 120 && mid_b > 120, "mid box blended red+blue: r=%d b=%d", mid_r, mid_b)
+	testing.expectf(t, far_b > 240 && far_r < 20, "far box fogged blue: r=%d b=%d", far_r, far_b)
+	testing.expect_value(t, bg_a, u8(0))
+
+	// Exp2 fog increases monotonically with distance.
+	scene.fog = {kind = .Exp2, color = {0, 1, 0}, density = 0.18}
+	scene.draws.model[0] = compose({0, 0, 3})
+	g_near := software_render(&s, &scene, &g, nil, W, W)[(32 * W + 32) * 4 + 1]
+	scene.draws.model[0] = compose({0, 0, -1})
+	g_mid := software_render(&s, &scene, &g, nil, W, W)[(32 * W + 32) * 4 + 1]
+	scene.draws.model[0] = compose({0, 0, -6})
+	g_far := software_render(&s, &scene, &g, nil, W, W)[(32 * W + 32) * 4 + 1]
+	testing.expectf(t, g_near < g_mid && g_mid < g_far, "Exp2 fog green channel increases with distance: %d < %d < %d", g_near, g_mid, g_far)
+}
+
+// SpotLight cone falloff (inner/outer penumbra), perspective spot shadow map,
+// and multiple simultaneous shadow-casting lights (Directional + Spot).
+@(test)
+test_spot_light_and_multi_shadows :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+
+	W :: 64
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 45, near = 0.1, far = 50}
+	// Spot light at (0, 0, 3) aimed at (0, 0, 0) with narrow cone angle = 20 deg, penumbra = 0.5.
+	append(&scene.lights, Light{
+		kind      = .Spot,
+		color     = {1, 1, 1},
+		intensity = 15,
+		position  = {0, 0, 3},
+		target    = {0, 0, 0},
+		angle     = 20 * math.RAD_PER_DEG,
+		penumbra  = 0.5,
+	})
+	floor := MATERIAL_DEFAULT
+	floor.color, floor.roughness = {0.9, 0.9, 0.9}, 0.8
+	floor.flags = {.Receive_Shadow}
+	append(&scene.draws, Draw{plane(&g, 6, 6), compose(), floor})
+
+	px := software_render(&s, &scene, &g, nil, W, W)
+	center_r := px[(32 * W + 32) * 4]
+	edge_r := px[(32 * W + 4) * 4]
+	testing.expectf(t, center_r > 160 && edge_r == 0, "spot light illuminates center (%d) and cuts off outside cone (%d)", center_r, edge_r)
+
+	// Two shadow-casting lights at once:
+	// Light 0: Red Directional light at (-0.6, 0, 5) -> (-0.6, 0, 0), blocked at (-0.6, 0, 2.5)
+	// Light 1: Blue Spot light at (+0.6, 0, 4) -> (+0.6, 0, 0), blocked at (+0.6, 0, 2.5)
+	// Camera at (0, 0, 2.0) looking at (0, 0, 0), so blockers at z = 2.5 are behind camera:
+	// - Left floor (-0.6, 0, 0): occluded from Red Directional, lit by Blue Spot -> blue > red
+	// - Right floor (+0.6, 0, 0): occluded from Blue Spot, lit by Red Directional -> red > blue
+	// - Center floor (0, 0, 0): unoccluded from both -> both red and blue bright!
+	clear(&scene.lights)
+	append(&scene.lights, Light{
+		kind        = .Directional,
+		color       = {1, 0, 0},
+		intensity   = 4,
+		position    = {0, 0, 5},
+		target      = {0, 0, 0},
+		cast_shadow = true,
+		shadow      = {map_size = 256, height = 4, bias = -0.002},
+	})
+	append(&scene.lights, Light{
+		kind        = .Spot,
+		color       = {0, 0, 1},
+		intensity   = 40,
+		position    = {0.6, 0, 4},
+		target      = {0.6, 0, 0},
+		angle       = 55 * math.RAD_PER_DEG,
+		penumbra    = 0.2,
+		cast_shadow = true,
+		shadow      = {map_size = 256, bias = -0.002},
+	})
+	caster := MATERIAL_DEFAULT
+	caster.flags = {.Cast_Shadow}
+	scene.camera.position = {0, 0, 2.0}
+	append(&scene.draws, Draw{box(&g, 0.35, 0.35, 0.1), compose({-0.5, 0, 2.6}), caster})
+	append(&scene.draws, Draw{box(&g, 0.35, 0.35, 0.1), compose({ 0.6, 0, 2.6}), caster})
+	px_two := software_render(&s, &scene, &g, nil, W, W)
+	left_px := px_two[(32 * W + 16) * 4:][:4]
+	center_px := px_two[(32 * W + 32) * 4:][:4]
+	right_px := px_two[(32 * W + 48) * 4:][:4]
+	testing.expectf(t, left_px[0] < 20 && left_px[2] > 100, "left floor shadowed from red directional, lit by blue spot: %v", left_px)
+	testing.expectf(t, right_px[2] < 20 && right_px[0] > 100, "right floor shadowed from blue spot, lit by red directional: %v", right_px)
+	testing.expectf(t, center_px[0] > 100 && center_px[2] > 100, "center floor lit by both lights: %v", center_px)
+}
+
+// InstancedMesh (per-instance transform + color), LineSegments (line_segments,
+// polyline, wireframe), and Points (world-space and pixel-space).
+@(test)
+test_instancing_lines_and_points :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+
+	W :: 64
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 45, near = 0.1, far = 50}
+	m := MATERIAL_DEFAULT
+	m.color = {1, 1, 1}
+	m.flags = {.Basic}
+
+	// 1. InstancedMesh: one draw with 2 instances (left red, right green).
+	append(&scene.draws, Draw{box(&g, 0.8, 0.8, 0.2), compose(), m})
+	insts := [2]Instance {
+		{transform = compose({-0.8, 0, 0}), color = {1, 0, 0}, has_color = true},
+		{transform = compose({ 0.8, 0, 0}), color = {0, 1, 0}, has_color = true},
+	}
+	scene_set_draw_instances(&scene, 0, scene_instances(&scene, insts[:]))
+	px := software_render(&s, &scene, &g, nil, W, W)
+	left_px := px[(32 * W + 18) * 4:][:4]
+	right_px := px[(32 * W + 46) * 4:][:4]
+	testing.expectf(t, left_px[0] > 220 && left_px[1] < 20, "left instance is red: %v", left_px)
+	testing.expectf(t, right_px[1] > 220 && right_px[0] < 20, "right instance is green: %v", right_px)
+
+	// 2. LineSegments and Points: horizontal line across y = 0.5 and point at (0, -0.5, 0) in pixel space.
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 45, near = 0.1, far = 50}
+	line_mat := MATERIAL_DEFAULT
+	line_mat.color = {1, 0.8, 0}
+	line_mat.size = 6 // 6 pixels thick
+	line_mat.flags = {.Basic, .No_Size_Attenuation}
+	seg_id := line_segments(&g, {{-1, 0.5, 0}, {1, 0.5, 0}})
+	append(&scene.draws, Draw{seg_id, compose(), line_mat})
+
+	pt_mat := MATERIAL_DEFAULT
+	pt_mat.color = {0, 0.8, 1}
+	pt_mat.size = 10 // 10 pixels wide
+	pt_mat.flags = {.Basic, .No_Size_Attenuation}
+	pt_id := points(&g, {{0, -0.5, 0}})
+	append(&scene.draws, Draw{pt_id, compose(), pt_mat})
+
+	// Also verify polyline and wireframe geometry creation.
+	poly_id := polyline(&g, {{-1, 0, 0}, {0, 1, 0}, {1, 0, 0}}, closed = true)
+	wire_id := wireframe(&g, box(&g, 1, 1, 1))
+	poly_geo, poly_ok := geometry_get(&g, poly_id)
+	wire_geo, wire_ok := geometry_get(&g, wire_id)
+	testing.expect(t, poly_ok && poly_geo.mode == .Lines && poly_geo.index_count == 6)
+	testing.expect(t, wire_ok && wire_geo.mode == .Lines && wire_geo.index_count == 60)
+
+	px_lp := software_render(&s, &scene, &g, nil, W, W)
+	// Line at y = 0.5 projects near row y = 22, x = 32; Point at y = -0.5 projects near row y = 42, x = 32.
+	line_hit := px_lp[(22 * W + 32) * 4:][:4]
+	pt_hit := px_lp[(42 * W + 32) * 4:][:4]
+	testing.expectf(t, line_hit[0] > 200 && line_hit[1] > 150, "pixel-sized line segment rendered at (32, 22): %v", line_hit)
+	testing.expectf(t, pt_hit[2] > 200 && pt_hit[1] > 150, "pixel-sized point rendered at (32, 42): %v", pt_hit)
+}
+
+

@@ -66,8 +66,9 @@ Software :: struct {
 	band_tris:     [dynamic]Tri_Ref,
 	// One per thread that runs a phase (the caller is 0).
 	workers:       [dynamic]Worker,
-	// The shadow light's depth per texel (shadow.size squared), drawn first.
-	shadow_map:    []f32,
+	// Each shadow light's depth per texel (shadow.size squared), drawn first.
+	shadow_maps:   [MAX_SHADOWS][]f32,
+	expanded:      Expanded_Draws,
 }
 
 software_destroy :: proc(s: ^Software) {
@@ -89,7 +90,10 @@ software_destroy :: proc(s: ^Software) {
 		worker_destroy(&w)
 	}
 	delete(s.workers)
-	delete(s.shadow_map)
+	for &sm in s.shadow_maps {
+		delete(sm)
+	}
+	expanded_draws_destroy(&s.expanded)
 	s^ = {}
 }
 
@@ -172,10 +176,11 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		s.pixels = make([]u8, width * height * 4)
 	}
 	view, proj := camera_matrices(scene.camera, width, height)
+	active := expand_draws(&s.expanded, scene, geos, view, proj, width, height)
 	lights: [MAX_LIGHTS]Shading_Light
-	nl := shading_lights(scene.lights[:], &lights)
-	shading_materials(scene_materials(scene), &s.materials, textures)
-	shader_blocks(scene, shaders, view, proj, &s.blocks)
+	nl := shading_lights(active.lights[:], &lights)
+	shading_materials(scene_materials(active), &s.materials, textures)
+	shader_blocks(active, shaders, view, proj, &s.blocks)
 	threads := 0
 	if pool != nil {
 		sync.guard(&pool.mutex)
@@ -184,38 +189,47 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	if len(s.workers) < threads + 1 {
 		table_grow(&s.workers, threads + 1)
 	}
-	env := shading_environment(scene, textures)
-	bg_tex, bg_intensity, bg_lod := shading_background(scene, textures)
+	env := shading_environment(active, textures)
+	bg_tex, bg_intensity, bg_lod := shading_background(active, textures)
+	shadows: [MAX_SHADOWS]Shadow
+	ns := frame_shadows(active, &shadows)
 	job := Frame_Job {
-		s            = s,
-		scene        = scene,
-		geos         = geos,
-		shaders      = shaders,
-		textures     = textures,
-		lights       = lights[:nl],
-		env          = env,
-		bg_tex       = bg_tex,
-		bg_intensity = bg_intensity,
-		bg_lod       = bg_lod,
-		eye          = scene.camera.position,
-		shadow       = frame_shadow(scene),
+		s             = s,
+		scene         = active,
+		geos          = geos,
+		shaders       = shaders,
+		textures      = textures,
+		lights        = lights[:nl],
+		env           = env,
+		bg_tex        = bg_tex,
+		bg_intensity  = bg_intensity,
+		bg_lod        = bg_lod,
+		eye           = active.camera.position,
+		shadows       = shadows,
+		shadow_count  = ns,
+		tone_mapping  = active.tone_mapping,
+		tone_exposure = active.tone_mapping_exposure,
+		fog           = active.fog,
+		fog_color     = linear(active.fog.color),
 	}
-	if job.shadow.light >= 0 {
-		size := job.shadow.size
-		if len(s.shadow_map) != size * size {
-			delete(s.shadow_map)
-			s.shadow_map = make([]f32, size * size)
+	for si in 0 ..< ns {
+		sh := &job.shadows[si]
+		size := sh.size
+		if len(s.shadow_maps[si]) != size * size {
+			delete(s.shadow_maps[si])
+			s.shadow_maps[si] = make([]f32, size * size)
 		}
-		shadow_casters(scene, geos, shaders, &job.shadow, &s.order)
-		job.view_proj, job.width, job.height, job.depth_only = job.shadow.view_proj, size, size, true
-		run_pass(s, scene, geos, &job, pool, draw_depth_band)
+		shadow_casters(active, geos, shaders, sh, &s.order, &s.expanded)
+		job.shadow_index = si
+		job.view_proj, job.width, job.height, job.depth_only = sh.view_proj, size, size, true
+		run_pass(s, active, geos, &job, pool, draw_depth_band)
 	}
-	draw_order(scene, geos, shaders, view, proj, &s.order)
+	draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
 	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
 	if bg_tex != 0 {
 		job.inv_vp = linalg.inverse(job.view_proj)
 	}
-	run_pass(s, scene, geos, &job, pool, draw_band)
+	run_pass(s, active, geos, &job, pool, draw_band)
 	return s.pixels
 }
 
@@ -237,7 +251,7 @@ run_pass :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, job: ^Frame_Job
 make_chunks :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries) {
 	n := 0
 	for di, oi in s.order {
-		geo, _ := geometry_get(geos, scene.draws[di].geometry)
+		geo, _ := geometry_get_any(geos, &s.expanded, scene.draws[di].geometry)
 		tris := int(geo.index_count / 3)
 		for first := 0; first < tris; first += CHUNK_TRIS {
 			if n == len(s.chunks) {
@@ -265,7 +279,13 @@ Frame_Job :: struct {
 	bg_lod:        f32,
 	inv_vp:        Mat4,
 	eye:           Vec3,
-	shadow:        Shadow,
+	shadows:       [MAX_SHADOWS]Shadow,
+	shadow_count:  int,
+	shadow_index:  int,
+	tone_mapping:  Tone_Mapping,
+	tone_exposure: f32,
+	fog:           Fog,
+	fog_color:     Vec3,
 	// The pass: its camera and target, and whether it draws only depth
 	// (the shadow map: positions only, the casters' other side).
 	view_proj:     Mat4,
@@ -299,11 +319,12 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	di := s.order[c.order]
 	d := &job.scene.draws[di]
 	m := &s.materials[di]
-	geo, _ := geometry_get(job.geos, d.geometry)
-	vertices, all, _ := geometry_mesh(job.geos, d.geometry)
+	geo, _ := geometry_get_any(job.geos, &s.expanded, d.geometry)
+	vertices, all, _ := geometry_mesh_any(job.geos, &s.expanded, d.geometry)
 	skin := geometry_skin(job.geos, d.geometry)
 	joints := scene_draw_joints(job.scene, di)
 	skinned := len(skin) > 0 && len(joints) > 0
+
 	active_buf: [MAX_MORPH_TARGETS]Active_Morph = ---
 	na := active_morphs(geo, scene_draw_morphs(job.scene, di), &active_buf)
 	active := active_buf[:na]

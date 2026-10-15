@@ -323,4 +323,48 @@ main :: proc() {
 			fnv1a64(pixels),
 		)
 	}
+
+	{
+		geos: o3d.Geometries
+		defer o3d.geometries_destroy(&geos)
+		scene: o3d.Scene
+		defer o3d.scene_destroy(&scene)
+
+		sphere_id := o3d.sphere(&geos, 0.2, 16, 12)
+		helix_pts := [8]o3d.Vec3{{-1, -0.4, 0}, {-0.6, -0.1, 0.5}, {-0.2, 0.2, 0.7}, {0.2, 0.5, 0.5}, {0.6, 0.8, 0}, {0.8, 1.0, -0.4}, {0.4, 1.2, -0.6}, {0, 1.3, -0.2}}
+		line_id := o3d.polyline(&geos, helix_pts[:])
+		wire_id := o3d.wireframe(&geos, o3d.box(&geos, 0.8, 0.8, 0.8))
+		pt_id := o3d.points(&geos, helix_pts[:])
+
+		inst_mat := o3d.MATERIAL_DEFAULT
+		inst_mat.color, inst_mat.roughness = {1, 1, 1}, 0.35
+		line_mat := o3d.MATERIAL_DEFAULT
+		line_mat.color, line_mat.size, line_mat.flags = {1, 0.8, 0.2}, 0.04, {.Basic}
+		wire_mat := o3d.MATERIAL_DEFAULT
+		wire_mat.color, wire_mat.size, wire_mat.flags = {0.3, 0.85, 1}, 3.0, {.Basic, .No_Size_Attenuation}
+		pt_mat := o3d.MATERIAL_DEFAULT
+		pt_mat.color, pt_mat.size, pt_mat.flags = {1, 0.4, 0.7}, 0.08, {.Basic}
+		insts := [4]o3d.Instance {
+			{transform = o3d.compose({-0.9, 0, 0}), color = {1, 0.3, 0.3}, has_color = true},
+			{transform = o3d.compose({-0.3, 0.3, 0}), color = {0.3, 1, 0.3}, has_color = true},
+			{transform = o3d.compose({ 0.3, -0.2, 0}), color = {0.3, 0.5, 1}, has_color = true},
+			{transform = o3d.compose({ 0.9, 0.2, 0}), color = {1, 0.9, 0.3}, has_color = true},
+		}
+
+		o3d.scene_clear(&scene)
+		scene.camera = {position = {2.0, 1.6, 3.6}, target = {0, 0.2, 0}, fov = 45, near = 0.1, far = 30}
+		scene.tone_mapping = .AgX
+		scene.tone_mapping_exposure = 1.1
+		scene.fog = {kind = .Linear, color = {0.08, 0.1, 0.14}, near = 2.5, far = 10.0}
+		append(&scene.lights, o3d.Light{kind = .Spot, color = {1, 0.95, 0.85}, intensity = 20, position = {2, 4, 3}, target = {0, 0.2, 0}, angle = math.PI / 3, penumbra = 0.3})
+		append(&scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
+		append(&scene.draws, o3d.Draw{sphere_id, o3d.compose(), inst_mat})
+		o3d.scene_set_draw_instances(&scene, 0, o3d.scene_instances(&scene, insts[:]))
+		append(&scene.draws, o3d.Draw{line_id, o3d.compose(), line_mat})
+		append(&scene.draws, o3d.Draw{wire_id, o3d.compose({-0.6, 0.4, 0.2}), wire_mat})
+		append(&scene.draws, o3d.Draw{pt_id, o3d.compose(), pt_mat})
+
+		run_case("small_manim      (1T, 0-alloc)", &sw, &scene, &geos, nil, nil, W, H, WARMUP, ITERS)
+	}
 }
+

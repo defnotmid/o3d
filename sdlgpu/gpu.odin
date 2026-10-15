@@ -63,6 +63,8 @@ GPU :: struct {
 	morph_deltas:             Pool_Buffer,
 	indices:                  Pool_Buffer,
 	custom_skinned:           Pool_Buffer,
+	dynamic_vertices:         Pool_Buffer,
+	dynamic_indices:          Pool_Buffer,
 	// The generations of the tables mirrored (geometry, textures, shaders'
 	// pipelines): a different one (new contents, ids reused) starts over.
 	mirrored:                 struct {
@@ -77,20 +79,21 @@ GPU :: struct {
 	// made the first time a frame draws with them.
 	custom:                   [dynamic]Custom,
 	// The shadow pass (shadow.odin): its fragment shader (depth out), its
-	// pipelines by the casters' material side, the map (depth per texel,
-	// read by the main pass) and its depth buffer at `shadow_size` squared.
+	// pipelines by the casters' material side, the maps (depth per texel,
+	// read by the main pass) and their depth buffers at `shadow_sizes` squared.
 	shadow_frag:              ^sdl.GPUShader,
 	shadow_pipelines:         [o3d.Side]^sdl.GPUGraphicsPipeline,
 	shadow_skinned_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
-	shadow_map:               ^sdl.GPUTexture,
-	shadow_depth:             ^sdl.GPUTexture,
-	shadow_size:              u32,
+	shadow_maps:              [o3d.MAX_SHADOWS]^sdl.GPUTexture,
+	shadow_depths:            [o3d.MAX_SHADOWS]^sdl.GPUTexture,
+	shadow_sizes:             [o3d.MAX_SHADOWS]u32,
 	shadow_sampler:           ^sdl.GPUSampler,
 	casters:                  [dynamic]int,
 	// Scratch per frame.
 	order:                    [dynamic]int,
 	materials:                [dynamic]o3d.Shading_Material, // per draw
 	blocks:                   o3d.Shader_Blocks,
+	expanded:                 o3d.Expanded_Draws,
 	custom_skinned_verts:     [dynamic]o3d.Vertex,
 	custom_skinned_first:     [dynamic]i32,
 }
@@ -135,11 +138,13 @@ Light_Uniforms :: struct {
 Lighting_Uniforms :: struct {
 	eye:           [4]f32,
 	count:         [4]i32,
-	shadow_matrix: o3d.Mat4,
+	shadow_matrix: [o3d.MAX_SHADOWS]o3d.Mat4,
 	// Map size (0: no shadow), bias, normal bias.
-	shadow_params: [4]f32,
-	// Environment intensity (0: no environment), max radiance mip level.
+	shadow_params: [o3d.MAX_SHADOWS][4]f32,
+	// Environment intensity (0: no environment), max radiance mip level, tone exposure, fog density.
 	env_params:    [4]f32,
+	fog_color:     [4]f32,
+	fog_params:    [4]f32,
 	lights:        [o3d.MAX_LIGHTS]Light_Uniforms,
 }
 
@@ -186,7 +191,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	g.vert = sdl.CreateGPUShader(g.device, {code_size = len(vert_code), code = raw_data(vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_storage_buffers = 1, num_uniform_buffers = 1})
 	g.skinned_vert = sdl.CreateGPUShader(g.device, {code_size = len(skinned_vert_code), code = raw_data(skinned_vert_code), entrypoint = skinned_vs_entry, format = format, stage = .VERTEX, num_storage_buffers = 1, num_uniform_buffers = 2})
-	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 9, num_uniform_buffers = 2})
+	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 12, num_uniform_buffers = 2})
 	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
 	g.bg_vert = sdl.CreateGPUShader(g.device, {code_size = len(bg_vert_code), code = raw_data(bg_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
 	g.bg_frag = sdl.CreateGPUShader(g.device, {code_size = len(bg_frag_code), code = raw_data(bg_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
@@ -230,12 +235,17 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	// 1x1 fallback shadow and colour textures, cleared, bound for unused slots.
 	cmd := sdl.AcquireGPUCommandBuffer(g.device)
-	if cmd == nil || !ensure_shadow(g, 1) {
+	if cmd == nil {
 		return .Device
 	}
-	clear := sdl.GPUColorTargetInfo{texture = g.shadow_map, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
-	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
-	clear.texture = g.dummy_texture
+	for idx in 0 ..< o3d.MAX_SHADOWS {
+		if !ensure_shadow(g, idx, 1) {
+			return .Device
+		}
+		clear := sdl.GPUColorTargetInfo{texture = g.shadow_maps[idx], clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+		sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
+	}
+	clear := sdl.GPUColorTargetInfo{texture = g.dummy_texture, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
 	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
 	if !sdl.SubmitGPUCommandBuffer(cmd) {
 		return .Device
@@ -247,7 +257,7 @@ destroy :: proc(g: ^GPU) {
 	if g.device == nil {
 		return
 	}
-	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices, &g.custom_skinned}) {
+	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices, &g.custom_skinned, &g.dynamic_vertices, &g.dynamic_indices}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
@@ -276,6 +286,7 @@ destroy :: proc(g: ^GPU) {
 	delete(g.order)
 	delete(g.materials)
 	o3d.shader_blocks_destroy(&g.blocks)
+	o3d.expanded_draws_destroy(&g.expanded)
 	for side in o3d.Side {
 		for p in g.pipelines[side] {
 			if p != nil {
@@ -525,26 +536,33 @@ make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side, skinned: bool) -> ^sdl.GPU
 
 // The shadow map and its depth buffer at `size` squared.
 @(private)
-ensure_shadow :: proc(g: ^GPU, size: u32) -> bool {
-	if g.shadow_size == size && g.shadow_map != nil {
+ensure_shadow :: proc(g: ^GPU, idx: int, size: u32) -> bool {
+	if g.shadow_sizes[idx] == size && g.shadow_maps[idx] != nil {
 		return true
 	}
-	release_shadow(g)
-	g.shadow_map = sdl.CreateGPUTexture(g.device, {type = .D2, format = SHADOW_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
-	g.shadow_depth = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
-	g.shadow_size = size
-	return g.shadow_map != nil && g.shadow_depth != nil
+	release_shadow_slot(g, idx)
+	g.shadow_maps[idx] = sdl.CreateGPUTexture(g.device, {type = .D2, format = SHADOW_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
+	g.shadow_depths[idx] = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
+	g.shadow_sizes[idx] = size
+	return g.shadow_maps[idx] != nil && g.shadow_depths[idx] != nil
+}
+
+@(private = "file")
+release_shadow_slot :: proc(g: ^GPU, idx: int) {
+	if g.shadow_maps[idx] != nil {
+		sdl.ReleaseGPUTexture(g.device, g.shadow_maps[idx])
+	}
+	if g.shadow_depths[idx] != nil {
+		sdl.ReleaseGPUTexture(g.device, g.shadow_depths[idx])
+	}
+	g.shadow_maps[idx], g.shadow_depths[idx], g.shadow_sizes[idx] = nil, nil, 0
 }
 
 @(private = "file")
 release_shadow :: proc(g: ^GPU) {
-	if g.shadow_map != nil {
-		sdl.ReleaseGPUTexture(g.device, g.shadow_map)
+	for idx in 0 ..< o3d.MAX_SHADOWS {
+		release_shadow_slot(g, idx)
 	}
-	if g.shadow_depth != nil {
-		sdl.ReleaseGPUTexture(g.device, g.shadow_depth)
-	}
-	g.shadow_map, g.shadow_depth, g.shadow_size = nil, nil, 0
 }
 
 @(private = "file")

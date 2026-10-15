@@ -121,19 +121,35 @@ skin_vertex :: #force_inline proc "contextless" (v: Vertex, sv: Skin_Vertex, joi
 	return
 }
 
+// How a geometry or draw is rasterized: indexed triangles (Mesh), line
+// segments (LineSegments: pairs of vertices or mesh edges expanded into
+// camera-facing ribbons), or points (Points: vertices expanded into
+// camera-facing quads).
+Draw_Mode :: enum u8 {
+	Triangles = 0,
+	Lines     = 1,
+	Points    = 2,
+}
+
 Geometry :: struct {
 	first_vertex, vertex_count: u32,
 	first_index, index_count:   u32,
 	first_skin:                 u32,
 	first_morph, morph_targets: u32,
 	skinned:                    bool,
+	mode:                       Draw_Mode,
 	// Distance from the origin to the farthest vertex (culling, sorting),
 	// and the largest morph position delta length across targets.
 	radius, morph_radius:       f32,
 }
 
-// 0 is no geometry.
+// 0 is no geometry; ids with SCENE_GEO_BIT refer to per-frame line/point
+// geometries in `Scene`; ids with DYNAMIC_GEO_BIT refer to per-frame expanded
+// line/point quad geometries in `Expanded_Draws`.
 Geometry_Id :: distinct u32
+
+SCENE_GEO_BIT :: Geometry_Id(1 << 29)
+DYNAMIC_GEO_BIT :: Geometry_Id(1 << 30)
 
 Primitive :: enum u8 {
 	None, // made from vertices by the caller
@@ -193,7 +209,7 @@ geometries_destroy :: proc(g: ^Geometries) {
 }
 
 geometry_get :: proc "contextless" (g: ^Geometries, id: Geometry_Id) -> (Geometry, bool) {
-	if id == 0 || int(id) > len(g.list) {
+	if id == 0 || id >= SCENE_GEO_BIT || int(id) > len(g.list) {
 		return {}, false
 	}
 	return g.list[id - 1], true
@@ -221,7 +237,7 @@ geometries_made :: proc "contextless" (g: ^Geometries) -> int {
 	return len(g.list)
 }
 
-geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: []Skin_Vertex = nil, morph_deltas: []Morph_Delta = nil) -> Geometry_Id {
+geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: []Skin_Vertex = nil, morph_deltas: []Morph_Delta = nil, mode: Draw_Mode = .Triangles) -> Geometry_Id {
 	generation_take(&g.generation)
 	r: f32
 	for v in vertices {
@@ -248,6 +264,7 @@ geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: [
 		first_morph   = first_morph,
 		morph_targets = morph_targets,
 		skinned       = skinned,
+		mode          = mode,
 		radius        = r,
 		morph_radius  = morph_r,
 	})
@@ -260,6 +277,82 @@ geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: [
 	}
 	append(&g.indices, ..indices)
 	return Geometry_Id(len(g.list))
+}
+
+// LineSegments geometry from pairs of endpoints `(positions[2*i], positions[2*i+1])`.
+line_segments :: proc(g: ^Geometries, positions: []Vec3) -> Geometry_Id {
+	n := (len(positions) / 2) * 2
+	clear(&g.scratch.vertices)
+	clear(&g.scratch.indices)
+	table_grow(&g.scratch.vertices, n)
+	table_grow_non_zero(&g.scratch.indices, n)
+	for i in 0 ..< n {
+		g.scratch.vertices[i] = {position = positions[i], normal = {0, 0, 1}}
+		g.scratch.indices[i] = u32(i)
+	}
+	return geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:], mode = .Lines)
+}
+
+// Connected polyline geometry `(positions[0]->positions[1]->...)` as LineSegments.
+polyline :: proc(g: ^Geometries, positions: []Vec3, closed := false) -> Geometry_Id {
+	n := len(positions)
+	if n < 2 {
+		return 0
+	}
+	segs := n if closed else n - 1
+	clear(&g.scratch.vertices)
+	clear(&g.scratch.indices)
+	table_grow(&g.scratch.vertices, n)
+	table_grow_non_zero(&g.scratch.indices, segs * 2)
+	for p, i in positions {
+		g.scratch.vertices[i] = {position = p, normal = {0, 0, 1}}
+	}
+	for i in 0 ..< segs {
+		g.scratch.indices[i * 2] = u32(i)
+		g.scratch.indices[i * 2 + 1] = u32((i + 1) % n)
+	}
+	return geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:], mode = .Lines)
+}
+
+// WireframeGeometry(src): the edges of a triangle mesh as LineSegments.
+wireframe :: proc(g: ^Geometries, src: Geometry_Id) -> Geometry_Id {
+	verts, idx, ok := geometry_mesh(g, src)
+	if !ok || len(idx) < 3 {
+		return 0
+	}
+	clear(&g.scratch.vertices)
+	clear(&g.scratch.indices)
+	append(&g.scratch.vertices, ..verts)
+	add_edge :: proc(indices: ^[dynamic]u32, u, v: u32) {
+		lo, hi := min(u, v), max(u, v)
+		for i := 0; i + 1 < len(indices^); i += 2 {
+			if indices[i] == lo && indices[i + 1] == hi {
+				return
+			}
+		}
+		append(indices, lo, hi)
+	}
+	for t := 0; t + 2 < len(idx); t += 3 {
+		a, b, c := idx[t], idx[t + 1], idx[t + 2]
+		add_edge(&g.scratch.indices, a, b)
+		add_edge(&g.scratch.indices, b, c)
+		add_edge(&g.scratch.indices, c, a)
+	}
+	return geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:], mode = .Lines)
+}
+
+// Points geometry from 3D positions.
+points :: proc(g: ^Geometries, positions: []Vec3) -> Geometry_Id {
+	n := len(positions)
+	clear(&g.scratch.vertices)
+	clear(&g.scratch.indices)
+	table_grow(&g.scratch.vertices, n)
+	table_grow_non_zero(&g.scratch.indices, n)
+	for p, i in positions {
+		g.scratch.vertices[i] = {position = p, normal = {0, 0, 1}}
+		g.scratch.indices[i] = u32(i)
+	}
+	return geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:], mode = .Points)
 }
 
 // The geometry for a primitive's key, made the first time it is asked for.

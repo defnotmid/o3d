@@ -32,6 +32,7 @@ Light_Shadow :: struct {
 	normal_bias: f32,
 }
 
+MAX_SHADOWS :: 4
 SHADOW_MAP_SIZE :: 512
 SHADOW_HEIGHT :: 10
 SHADOW_NEAR :: 0.5
@@ -46,14 +47,39 @@ Shadow :: struct {
 	bias, normal_bias: f32,
 }
 
-// The light that casts the shadow (-1: none).
+// The first light that casts a shadow (-1: none).
 shadow_light :: proc "contextless" (lights: []Light) -> int {
 	for l, i in lights[:min(len(lights), MAX_LIGHTS)] {
-		if l.kind == .Directional && l.cast_shadow {
+		if (l.kind == .Directional || l.kind == .Spot) && l.cast_shadow {
 			return i
 		}
 	}
 	return -1
+}
+
+@(private = "file")
+make_light_shadow :: proc "contextless" (l: Light, index: int) -> (sh: Shadow) {
+	s := l.shadow
+	near := s.near if s.near > 0 else SHADOW_NEAR
+	view := look_at(l.position, l.target)
+	vp: Mat4
+	if l.kind == .Spot {
+		angle := clamp(l.angle if l.angle > 0 else math.PI / 3, 1e-3, math.PI * 0.499)
+		fov := 2 * angle * math.DEG_PER_RAD
+		far_def := l.distance if l.distance > near else max(SHADOW_FAR, near * 2)
+		far := s.far if s.far > near else far_def
+		vp = perspective(fov, 1, near, far) * view
+	} else {
+		far := s.far if s.far > near else max(SHADOW_FAR, near * 2)
+		vp = orthographic(s.height if s.height > 0 else SHADOW_HEIGHT, 1, near, far) * view
+	}
+	return {
+		light       = index,
+		view_proj   = vp,
+		size        = s.map_size if s.map_size > 0 else SHADOW_MAP_SIZE,
+		bias        = s.bias,
+		normal_bias = s.normal_bias,
+	}
 }
 
 frame_shadow :: proc "contextless" (scene: ^Scene) -> (sh: Shadow) {
@@ -61,21 +87,29 @@ frame_shadow :: proc "contextless" (scene: ^Scene) -> (sh: Shadow) {
 	if sh.light < 0 {
 		return
 	}
-	l := scene.lights[sh.light]
-	s := l.shadow
-	near := s.near if s.near > 0 else SHADOW_NEAR
-	far := s.far if s.far > near else max(SHADOW_FAR, near * 2)
-	view := look_at(l.position, l.target)
-	sh.view_proj = orthographic(s.height if s.height > 0 else SHADOW_HEIGHT, 1, near, far) * view
-	sh.size = s.map_size if s.map_size > 0 else SHADOW_MAP_SIZE
-	sh.bias, sh.normal_bias = s.bias, s.normal_bias
-	return
+	return make_light_shadow(scene.lights[sh.light], sh.light)
+}
+
+// Up to `MAX_SHADOWS` shadow-casting directional or spot lights among the
+// first `MAX_LIGHTS` in `scene.lights`.
+frame_shadows :: proc "contextless" (scene: ^Scene, out: ^[MAX_SHADOWS]Shadow) -> int {
+	n := 0
+	for l, i in scene.lights[:min(len(scene.lights), MAX_LIGHTS)] {
+		if (l.kind == .Directional || l.kind == .Spot) && l.cast_shadow {
+			out[n] = make_light_shadow(l, i)
+			n += 1
+			if n == MAX_SHADOWS {
+				break
+			}
+		}
+	}
+	return n
 }
 
 // The draws that cast into the map: `.Cast_Shadow`, with geometry (and a
 // compiled shader if they ask for one), their bounding sphere in the
 // light's view; in the order listed.
-shadow_casters :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, sh: ^Shadow, order: ^[dynamic]int) {
+shadow_casters :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, sh: ^Shadow, order: ^[dynamic]int, exp: ^Expanded_Draws = nil) {
 	clear(order)
 	n := len(scene.draws)
 	models := scene.draws.model[:n]
@@ -84,7 +118,7 @@ shadow_casters :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, sh: 
 		if .Cast_Shadow not_in m.flags || (m.shader != 0 && shader_get(shaders, m.shader) == nil) {
 			continue
 		}
-		if draw_seen(geos, geometries[i], models[i], sh.view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i)) {
+		if draw_seen(geos, geometries[i], models[i], sh.view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
 			append(order, i)
 		}
 	}
@@ -109,11 +143,15 @@ shadow_side :: proc "contextless" (side: Side) -> Side {
 // it; texels past the edge repeat the edge; outside the camera is lit.
 shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: Vec3) -> f32 {
 	p := world + normal * sh.normal_bias
-	c := sh.view_proj * Vec4{p.x, p.y, p.z, 1} // orthographic: w is 1
-	u := c.x * 0.5 + 0.5
-	v := 0.5 - c.y * 0.5 // rows from the top, as the map is drawn
-	z := c.z + sh.bias
-	if u < 0 || u > 1 || v < 0 || v > 1 || z > 1 {
+	c := sh.view_proj * Vec4{p.x, p.y, p.z, 1}
+	if c.w <= 0 {
+		return 1
+	}
+	inv_w := 1 / c.w
+	u := c.x * inv_w * 0.5 + 0.5
+	v := 0.5 - c.y * inv_w * 0.5 // rows from the top, as the map is drawn
+	z := c.z * inv_w + sh.bias
+	if u < 0 || u > 1 || v < 0 || v > 1 || z < 0 || z > 1 {
 		return 1
 	}
 	size := sh.size
@@ -136,7 +174,7 @@ shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: 
 	return lit / 9
 }
 
-@(private = "file")
+@(private)
 mat_scale :: #force_inline proc "contextless" (m: Mat4) -> f32 {
 	return max(
 		linalg.length(Vec3{m[0, 0], m[1, 0], m[2, 0]}),
@@ -148,8 +186,8 @@ mat_scale :: #force_inline proc "contextless" (m: Mat4) -> f32 {
 // Whether a draw can be seen through `view_proj`: it has geometry and its
 // bounding sphere (covering its morph deltas and posed joints, and scaled
 // with the draw) is at least partly inside.
-draw_seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4, joints: []Mat4 = nil, morphs: []f32 = nil) -> bool {
-	geo := geometry_get(geos, id) or_return
+draw_seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4, joints: []Mat4 = nil, morphs: []f32 = nil, exp: ^Expanded_Draws = nil) -> bool {
+	geo := geometry_get_any(geos, exp, id) or_return
 	if geo.index_count == 0 {
 		return false
 	}
@@ -170,3 +208,4 @@ draw_seen :: proc(geos: ^Geometries, id: Geometry_Id, model, view_proj: Mat4, jo
 	}
 	return sphere_visible(view_proj, {model[0, 3], model[1, 3], model[2, 3]}, r * mat_scale(model))
 }
+

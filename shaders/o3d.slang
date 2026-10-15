@@ -8,6 +8,7 @@
 import common;
 
 static const int MAX_LIGHTS = 8;
+static const int MAX_SHADOWS = 4;
 static const int MAX_JOINTS = 64;
 static const int MAX_MORPH_TARGETS = 8;
 // Light_Kind's values and Shading_Flag's bits (o3d_test checks).
@@ -15,6 +16,12 @@ static const uint LIGHT_AMBIENT = 0;
 static const uint LIGHT_HEMISPHERE = 1;
 static const uint LIGHT_DIRECTIONAL = 2;
 static const uint LIGHT_POINT = 3;
+static const uint LIGHT_SPOT = 4;
+
+static const int FOG_NONE = 0;
+static const int FOG_LINEAR = 1;
+static const int FOG_EXP2 = 2;
+
 static const uint FLAG_BASIC = 1;
 static const uint FLAG_FLAT_SHADING = 2;
 static const uint FLAG_TWO_SIDED = 4;
@@ -64,9 +71,9 @@ struct Material {
     float4 uv_transforms[12];
 };
 
-// Shading_Light: color, ground linear times intensity; vector the direction
-// toward a directional light or a point light's position; kind a LIGHT_*;
-// shadowed: the shadow light (its direct light scaled by the shadow).
+// Shading_Light: color, ground linear times intensity (or spot axis + cos_inner/outer);
+// vector the direction toward a directional light or a point/spot light's position;
+// kind a LIGHT_*; shadowed: 1-based shadow map index (0: unshadowed).
 struct Light {
     float4 color;
     float4 ground;
@@ -77,15 +84,17 @@ struct Light {
     uint shadowed;
 };
 
-// shadowMatrix: the shadow light's view-projection; shadowParams: map size
+// shadowMatrix: the shadow lights' view-projections; shadowParams: map size
 // (0: no shadow), bias, normal bias; envParams: intensity (0: no env),
-// max radiance mip level.
+// max radiance mip level, tone mapping exposure, fog density.
 struct Lighting {
     float4 eye;
     int4 count;
-    float4x4 shadowMatrix;
-    float4 shadowParams;
+    float4x4 shadowMatrix[MAX_SHADOWS];
+    float4 shadowParams[MAX_SHADOWS];
     float4 envParams;
+    float4 fogColor;
+    float4 fogParams;
     Light lights[MAX_LIGHTS];
 };
 
@@ -100,7 +109,7 @@ struct Joints_VS {
 [[vk::binding(0, 3)]] ConstantBuffer<Material> material : register(b0, space3);
 [[vk::binding(1, 3)]] ConstantBuffer<Lighting> lighting : register(b1, space3);
 [[vk::binding(0, 2)]] Sampler2D<float4> colorMap : register(t0, space2);
-// The shadow map: depth per texel (R32_FLOAT), read texel by texel.
+// The shadow maps: depth per texel (R32_FLOAT), read texel by texel.
 [[vk::binding(1, 2)]] Sampler2D<float> shadowMap : register(t1, space2);
 [[vk::binding(2, 2)]] Sampler2D<float4> normalMap : register(t2, space2);
 [[vk::binding(3, 2)]] Sampler2D<float4> roughnessMap : register(t3, space2);
@@ -109,6 +118,9 @@ struct Joints_VS {
 [[vk::binding(6, 2)]] Sampler2D<float4> envIrradianceMap : register(t6, space2);
 [[vk::binding(7, 2)]] Sampler2D<float4> metalnessMap : register(t7, space2);
 [[vk::binding(8, 2)]] Sampler2D<float4> aoMap : register(t8, space2);
+[[vk::binding(9, 2)]] Sampler2D<float> shadowMap1 : register(t9, space2);
+[[vk::binding(10, 2)]] Sampler2D<float> shadowMap2 : register(t10, space2);
+[[vk::binding(11, 2)]] Sampler2D<float> shadowMap3 : register(t11, space2);
 
 struct VS_In {
     float3 position : TEXCOORD0;
@@ -206,19 +218,34 @@ float3 perturb_normal(float3 n, float3 dp_dx, float3 dp_dy, float2 duv_dx, float
     return normalize(t * (map_n.x * scale) + b * (map_n.y * scale) + n * map_n.z);
 }
 
+float sample_shadow_map(int idx, float2 uv) {
+    if (idx == 0) return shadowMap.SampleLevel(uv, 0);
+    if (idx == 1) return shadowMap1.SampleLevel(uv, 0);
+    if (idx == 2) return shadowMap2.SampleLevel(uv, 0);
+    return shadowMap3.SampleLevel(uv, 0);
+}
+
 // shadow.odin's shadow_factor: a 3x3 grid of bilinear depth comparisons,
 // a 4x4 block of texels weighed (1 - f, 1, 1, f) per axis, edges repeated,
 // outside the light's camera lit.
-float shadow_factor(float3 world, float3 normal) {
-    float3 p = world + normal * lighting.shadowParams.z;
-    float4 c = mul(lighting.shadowMatrix, float4(p, 1));
-    float u = c.x * 0.5 + 0.5;
-    float v = 0.5 - c.y * 0.5;
-    float z = c.z + lighting.shadowParams.y;
-    if (u < 0 || u > 1 || v < 0 || v > 1 || z > 1) {
+float shadow_factor(int idx, float3 world, float3 normal) {
+    float4 params = lighting.shadowParams[idx];
+    if (params.x <= 0) {
         return 1;
     }
-    int size = int(lighting.shadowParams.x);
+    float3 p = world + normal * params.z;
+    float4 c = mul(lighting.shadowMatrix[idx], float4(p, 1));
+    if (c.w <= 1e-6) {
+        return 1;
+    }
+    float inv_w = 1 / c.w;
+    float u = c.x * inv_w * 0.5 + 0.5;
+    float v = 0.5 - c.y * inv_w * 0.5;
+    float z = c.z * inv_w + params.y;
+    if (u < 0 || u > 1 || v < 0 || v > 1 || z < 0 || z > 1) {
+        return 1;
+    }
+    int size = int(params.x);
     float s = u * float(size) - 0.5;
     float t = v * float(size) - 0.5;
     float x0 = floor(s);
@@ -235,7 +262,7 @@ float shadow_factor(float3 world, float3 normal) {
             int col = clamp(int(x0) - 1 + i, 0, size - 1);
             // The texel itself: its centre through the nearest sampler (Load
             // on a combined texture-sampler miscompiles to MSL).
-            float depth = shadowMap.SampleLevel((float2(col, row) + 0.5) / float(size), 0);
+            float depth = sample_shadow_map(idx, (float2(col, row) + 0.5) / float(size));
             acc += wx[i] * (z <= depth ? 1.0 : 0.0);
         }
         lit += wy[j] * acc;
@@ -243,7 +270,7 @@ float shadow_factor(float3 world, float3 normal) {
     return lit / 9;
 }
 
-float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float shadow, float ao) {
+float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao) {
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
     float3 f0 = lerp(float3(0.04), base, metalness);
@@ -264,7 +291,7 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
         }
         float3 ldir = l.vector.xyz;
         float3 light = l.color.rgb;
-        if (l.kind == LIGHT_POINT) {
+        if (l.kind == LIGHT_POINT || l.kind == LIGHT_SPOT) {
             float3 d = l.vector.xyz - world;
             float dist = length(d);
             ldir = d / max(dist, 1e-6);
@@ -274,10 +301,16 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
                 float t = saturate(1 - pow(dist / l.distance, 4));
                 falloff *= t * t;
             }
+            if (l.kind == LIGHT_SPOT) {
+                float cos_angle = dot(ldir, l.ground.xyz);
+                float denom = max(l.ground.w - l.color.w, 1e-6);
+                float spot = saturate((cos_angle - l.color.w) / denom);
+                falloff *= spot * spot * (3 - 2 * spot);
+            }
             light *= falloff;
         }
-        if (l.shadowed != 0) {
-            light *= shadow;
+        if (l.shadowed > 0 && l.shadowed <= uint(MAX_SHADOWS)) {
+            light *= shadows[l.shadowed - 1];
         }
         float nl = saturate(dot(n, ldir));
         if (nl <= 0) {
@@ -368,9 +401,11 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
                 n = -n;
             }
         }
-        float shadow = 1;
-        if ((flags & FLAG_RECEIVE_SHADOW) != 0 && lighting.shadowParams.x > 0) {
-            shadow = shadow_factor(i.world, n);
+        float4 shadows = float4(1);
+        if ((flags & FLAG_RECEIVE_SHADOW) != 0) {
+            for (int si = 0; si < lighting.count.w; si++) {
+                shadows[si] = shadow_factor(si, i.world, n);
+            }
         }
         if ((flags & FLAG_TWO_SIDED) != 0 && !front) {
             n = -n;
@@ -381,7 +416,7 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
             float3 map_n = sample_map(normalMap, uv, dx, dy).rgb * 2 - 1;
             n = perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n);
         }
-        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadow, ao);
+        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao);
     }
     float3 emissive = material.emissive.rgb;
     if ((flags & FLAG_EMISSIVE_MAP) != 0) {
@@ -390,6 +425,18 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
         emissive *= linear_rgb(sample_map(emissiveMap, uv, dx, dy).rgb);
     }
     c += emissive;
+    c = tone_map(c, lighting.count.y, lighting.envParams.z);
+    if (lighting.count.z != FOG_NONE) {
+        float dist = length(i.world - lighting.eye.xyz);
+        float f = 0;
+        if (lighting.count.z == FOG_LINEAR) {
+            f = saturate((dist - lighting.fogParams.x) / max(lighting.fogParams.y - lighting.fogParams.x, 1e-6));
+        } else if (lighting.count.z == FOG_EXP2) {
+            float d = lighting.envParams.w * dist;
+            f = saturate(1 - exp(-d * d));
+        }
+        c = lerp(c, lighting.fogColor.rgb, f);
+    }
     return float4(linear_to_srgb(c.r) * a, linear_to_srgb(c.g) * a, linear_to_srgb(c.b) * a, a);
 }
 

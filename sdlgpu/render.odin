@@ -51,6 +51,21 @@ upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuff
 	return nil
 }
 
+// Uploads per-frame expanded line/point geometry when present.
+@(private = "file")
+upload_dynamic :: proc(g: ^GPU, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
+	if len(g.expanded.vertices) == 0 || len(g.expanded.indices) == 0 {
+		return nil
+	}
+	g.dynamic_vertices.uploaded = 0
+	g.dynamic_indices.uploaded = 0
+	pass := sdl.BeginGPUCopyPass(cmd)
+	defer sdl.EndGPUCopyPass(pass)
+	upload_pool(g, &g.dynamic_vertices, {.VERTEX}, mem.slice_to_bytes(g.expanded.vertices[:]), pass) or_return
+	upload_pool(g, &g.dynamic_indices, {.INDEX}, mem.slice_to_bytes(g.expanded.indices[:]), pass) or_return
+	return nil
+}
+
 // When a morphed or skinned draw uses a ShaderMaterial, morphs and skins its
 // vertices into `g.custom_skinned` before the render pass so the user's vertex
 // shader receives posed positions and normals.
@@ -66,6 +81,9 @@ upload_custom_skinned :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries,
 			continue
 		}
 		d := &scene.draws[di]
+		if d.geometry >= o3d.DYNAMIC_GEO_BIT {
+			continue
+		}
 		geo, ok := o3d.geometry_get(geos, d.geometry)
 		if !ok {
 			continue
@@ -173,34 +191,43 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 	return nil
 }
 
-// The shadow pass: the casters' depth from the shadow light into the map.
+// The shadow pass: the casters' depth from a shadow light into its map.
 @(private)
-draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, shadow: ^o3d.Shadow, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
-	if !ensure_shadow(g, u32(shadow.size)) {
+draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, idx: int, shadow: ^o3d.Shadow, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
+	if !ensure_shadow(g, idx, u32(shadow.size)) {
 		return .Out_Of_Memory
 	}
-	o3d.shadow_casters(scene, geos, shaders, shadow, &g.casters)
-	color := sdl.GPUColorTargetInfo{texture = g.shadow_map, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
-	depth := sdl.GPUDepthStencilTargetInfo{texture = g.shadow_depth, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+	o3d.shadow_casters(scene, geos, shaders, shadow, &g.casters, &g.expanded)
+	color := sdl.GPUColorTargetInfo{texture = g.shadow_maps[idx], clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = g.shadow_depths[idx], clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	defer sdl.EndGPURenderPass(pass)
-	if g.vertices.buffer == nil {
+	if g.vertices.buffer == nil && g.dynamic_vertices.buffer == nil {
 		return nil
 	}
-	sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
-	sdl.BindGPUIndexBuffer(pass, {buffer = g.indices.buffer}, ._32BIT)
 	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	bound: ^sdl.GPUGraphicsPipeline
-	vb_zero := true
+	bound_vb: ^sdl.GPUBuffer
+	bound_ib: ^sdl.GPUBuffer
 	for di in g.casters {
 		m := &g.materials[di]
 		if .Alpha_Mask in m.flags && .Color_Map not_in m.flags && m.opacity < m.alpha_cutoff {
 			continue
 		}
 		d := &scene.draws[di]
-		geo, _ := o3d.geometry_get(geos, d.geometry) // shadow_casters kept only draws with geometry
+		geo, _ := o3d.geometry_get_any(geos, &g.expanded, d.geometry) // shadow_casters kept only draws with geometry
+		dyn := d.geometry >= o3d.DYNAMIC_GEO_BIT
+		vbuf := g.dynamic_vertices.buffer if dyn else g.vertices.buffer
+		ibuf := g.dynamic_indices.buffer if dyn else g.indices.buffer
+		if vbuf == nil || ibuf == nil {
+			continue
+		}
+		if ibuf != bound_ib {
+			sdl.BindGPUIndexBuffer(pass, {buffer = ibuf}, ._32BIT)
+			bound_ib = ibuf
+		}
 		joints := o3d.scene_draw_joints(scene, di)
-		skinned := geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
+		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
 		p := g.shadow_skinned_pipelines[d.material.side] if skinned else g.shadow_pipelines[d.material.side]
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
@@ -214,23 +241,23 @@ draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: 
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {
 			vbs := [2]sdl.GPUBufferBinding {
-				{buffer = g.vertices.buffer, offset = geo.first_vertex * size_of(o3d.Vertex)},
+				{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)},
 				{buffer = g.skin_vertices.buffer, offset = geo.first_skin * size_of(o3d.Skin_Vertex)},
 			}
 			sdl.BindGPUVertexBuffers(pass, 0, &vbs[0], 2)
-			vb_zero = false
+			bound_vb = nil
 			ju: [o3d.MAX_JOINTS]o3d.Mat4
 			copy(ju[:], joints)
 			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
 		} else if du.morph_info.x > 0 && geo.first_vertex > 0 {
-			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
-			vb_zero = false
+			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
+			bound_vb = nil
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
 		} else {
-			if !vb_zero {
-				sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
-				vb_zero = true
+			if bound_vb != vbuf {
+				sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf}, 1)
+				bound_vb = vbuf
 			}
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 		}
@@ -314,28 +341,41 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 
 	view, proj := o3d.camera_matrices(scene.camera, int(width), int(height))
 	view_proj := proj * view
+	active := o3d.expand_draws(&g.expanded, scene, geos, view, proj, int(width), int(height))
+	upload_dynamic(g, cmd) or_return
+
 	lights: [o3d.MAX_LIGHTS]o3d.Shading_Light
-	nl := o3d.shading_lights(scene.lights[:], &lights)
-	o3d.shading_materials(o3d.scene_materials(scene), &g.materials, textures)
-	o3d.shader_blocks(scene, shaders, view, proj, &g.blocks)
-	shadow := o3d.frame_shadow(scene)
-	if shadow.light >= 0 {
-		draw_shadow(g, scene, geos, shaders, &shadow, cmd) or_return
+	nl := o3d.shading_lights(active.lights[:], &lights)
+	o3d.shading_materials(o3d.scene_materials(active), &g.materials, textures)
+	o3d.shader_blocks(active, shaders, view, proj, &g.blocks)
+	shadows: [o3d.MAX_SHADOWS]o3d.Shadow
+	ns := o3d.frame_shadows(active, &shadows)
+	for si in 0 ..< ns {
+		draw_shadow(g, active, geos, shaders, si, &shadows[si], cmd) or_return
+		for &l, li in lights[:nl] {
+			if li == shadows[si].light {
+				l.shadowed = u32(si + 1)
+			}
+		}
 	}
+	exposure := active.tone_mapping_exposure if active.tone_mapping_exposure > 0 else 1
 	lu: Lighting_Uniforms
-	lu.eye = {scene.camera.position.x, scene.camera.position.y, scene.camera.position.z, 0}
-	lu.count = {i32(nl), 0, 0, 0}
-	if shadow.light >= 0 {
-		lu.shadow_matrix = shadow.view_proj
-		lu.shadow_params = {f32(shadow.size), shadow.bias, shadow.normal_bias, 0}
+	lu.eye = {active.camera.position.x, active.camera.position.y, active.camera.position.z, 0}
+	lu.count = {i32(nl), i32(active.tone_mapping), i32(active.fog.kind), i32(ns)}
+	for si in 0 ..< ns {
+		lu.shadow_matrix[si] = shadows[si].view_proj
+		lu.shadow_params[si] = {f32(shadows[si].size), shadows[si].bias, shadows[si].normal_bias, 0}
 	}
-	if env.radiance != 0 {
-		lu.env_params = {env.intensity, env.max_lod, 0, 0}
+	lu.env_params = {env.intensity if env.radiance != 0 else 0, env.max_lod if env.radiance != 0 else 0, exposure, active.fog.density}
+	if active.fog.kind != .None {
+		fc := o3d.linear(active.fog.color)
+		lu.fog_color = {fc.r, fc.g, fc.b, 0}
+		lu.fog_params = {active.fog.near, active.fog.far, 0, 0}
 	}
 	for l, i in lights[:nl] {
 		lu.lights[i] = {
-			color    = {l.color.r, l.color.g, l.color.b, 0},
-			ground   = {l.ground.r, l.ground.g, l.ground.b, 0},
+			color    = {l.color.r, l.color.g, l.color.b, l.cos_outer},
+			ground   = {l.ground.r, l.ground.g, l.ground.b, l.cos_inner},
 			vector   = {l.vector.x, l.vector.y, l.vector.z, 0},
 			kind     = u32(l.kind),
 			distance = l.distance,
@@ -344,15 +384,15 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		}
 	}
 
-	o3d.draw_order(scene, geos, shaders, view, proj, &g.order)
+	o3d.draw_order(active, geos, shaders, view, proj, &g.order, &g.expanded)
 	// ShaderMaterials' pipelines made before the pass, on first use.
 	for di in g.order {
 		m := &g.materials[di]
 		if m.shader != 0 {
-			custom_pipeline(g, shaders, m.shader, scene.draws[di].material.side, .Blended in m.flags)
+			custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, .Blended in m.flags)
 		}
 	}
-	upload_custom_skinned(g, scene, geos, cmd) or_return
+	upload_custom_skinned(g, active, geos, cmd) or_return
 
 	// Into the targets' top-left width x height (they may be larger), then
 	// copied to `out`.
@@ -374,21 +414,33 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		sdl.BindGPUFragmentSamplers(pass, 0, &bg_binding, 1)
 		inv_vp := linalg.inverse(view_proj)
 		sdl.PushGPUVertexUniformData(cmd, 0, &inv_vp, size_of(inv_vp))
-		bg_params := [4]f32{bg_intensity, bg_intensity, bg_intensity, bg_lod}
+		bg_params := [4]f32{bg_intensity, bg_lod, f32(active.tone_mapping), exposure}
 		sdl.PushGPUFragmentUniformData(cmd, 0, &bg_params, size_of(bg_params))
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	}
 	sdl.PushGPUFragmentUniformData(cmd, 1, &lu, size_of(lu))
 	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
-	vb_zero := false
+	bound_vb: ^sdl.GPUBuffer
+	bound_ib: ^sdl.GPUBuffer
 	if g.vertices.buffer != nil && g.indices.buffer != nil {
 		sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
 		sdl.BindGPUIndexBuffer(pass, {buffer = g.indices.buffer}, ._32BIT)
-		vb_zero = true
+		bound_vb = g.vertices.buffer
+		bound_ib = g.indices.buffer
 	}
 	for di in g.order {
-		d := &scene.draws[di]
-		geo, _ := o3d.geometry_get(geos, d.geometry) // draw_order kept only draws with geometry
+		d := &active.draws[di]
+		geo, _ := o3d.geometry_get_any(geos, &g.expanded, d.geometry) // draw_order kept only draws with geometry
+		dyn := d.geometry >= o3d.DYNAMIC_GEO_BIT
+		vbuf := g.dynamic_vertices.buffer if dyn else g.vertices.buffer
+		ibuf := g.dynamic_indices.buffer if dyn else g.indices.buffer
+		if vbuf == nil || ibuf == nil {
+			continue
+		}
+		if ibuf != bound_ib {
+			sdl.BindGPUIndexBuffer(pass, {buffer = ibuf}, ._32BIT)
+			bound_ib = ibuf
+		}
 		m := &g.materials[di]
 		blend := .Blended in m.flags
 		if m.shader != 0 {
@@ -413,28 +465,30 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 				}
 			}
 			if custom_first := g.custom_skinned_first[di]; custom_first >= 0 && g.custom_skinned.buffer != nil {
-				sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.custom_skinned.buffer}, 1)
-				vb_zero = false
+				if bound_vb != g.custom_skinned.buffer {
+					sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.custom_skinned.buffer}, 1)
+					bound_vb = g.custom_skinned.buffer
+				}
 				sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, custom_first, 0)
 			} else {
-				if !vb_zero {
-					sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
-					vb_zero = true
+				if bound_vb != vbuf {
+					sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf}, 1)
+					bound_vb = vbuf
 				}
 				sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 			}
 			continue
 		}
-		joints := o3d.scene_draw_joints(scene, di)
-		skinned := geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
+		joints := o3d.scene_draw_joints(active, di)
+		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
 		p := g.skinned_pipelines[d.material.side][1 if blend else 0] if skinned else g.pipelines[d.material.side][1 if blend else 0]
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
 		}
-		samplers := [9]sdl.GPUTextureSamplerBinding {
+		samplers := [12]sdl.GPUTextureSamplerBinding {
 			tex_binding(g, m.color_map),
-			{texture = g.shadow_map, sampler = g.shadow_sampler},
+			{texture = g.shadow_maps[0], sampler = g.shadow_sampler},
 			tex_binding(g, m.normal_map),
 			tex_binding(g, m.roughness_map),
 			tex_binding(g, m.emissive_map),
@@ -442,31 +496,34 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			tex_binding(g, env.irradiance, g.env_sampler),
 			tex_binding(g, m.metalness_map),
 			tex_binding(g, m.ao_map),
+			{texture = g.shadow_maps[1], sampler = g.shadow_sampler},
+			{texture = g.shadow_maps[2], sampler = g.shadow_sampler},
+			{texture = g.shadow_maps[3], sampler = g.shadow_sampler},
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], len(samplers))
-		du := make_draw_uniforms(view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
+		du := make_draw_uniforms(view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(active, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m)
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {
 			vbs := [2]sdl.GPUBufferBinding {
-				{buffer = g.vertices.buffer, offset = geo.first_vertex * size_of(o3d.Vertex)},
+				{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)},
 				{buffer = g.skin_vertices.buffer, offset = geo.first_skin * size_of(o3d.Skin_Vertex)},
 			}
 			sdl.BindGPUVertexBuffers(pass, 0, &vbs[0], 2)
-			vb_zero = false
+			bound_vb = nil
 			ju: [o3d.MAX_JOINTS]o3d.Mat4
 			copy(ju[:], joints)
 			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
 		} else if du.morph_info.x > 0 && geo.first_vertex > 0 {
-			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
-			vb_zero = false
+			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
+			bound_vb = nil
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
 		} else {
-			if !vb_zero {
-				sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.vertices.buffer}, 1)
-				vb_zero = true
+			if bound_vb != vbuf {
+				sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf}, 1)
+				bound_vb = vbuf
 			}
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 		}

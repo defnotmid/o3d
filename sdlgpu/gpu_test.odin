@@ -75,6 +75,10 @@ test_gltf_matches_software :: proc(t: ^testing.T) {expect_parity(t, "gltf")}
 @(test)
 test_morph_matches_software :: proc(t: ^testing.T) {expect_parity(t, "morph")}
 
+// InstancedMesh, LineSegments, Points, tone mapping, and fog.
+@(test)
+test_manim_matches_software :: proc(t: ^testing.T) {expect_parity(t, "manim")}
+
 // One GPU through every case in turn, as tools/gpu_check and a host that
 // remakes its tables use it: each case's new tables (ids and sizes reused)
 // replace what the GPU mirrored, so nothing stale is drawn or read.
