@@ -50,7 +50,7 @@ Obj_Error :: enum u8 {
 	No_Geometry,
 }
 
-OBJ_ERROR_TEXT :: [Obj_Error]string {
+OBJ_ERROR_TEXT := [Obj_Error]string {
 	.None           = "",
 	.Empty          = "empty buffer",
 	.File_Not_Found = "file not found",
