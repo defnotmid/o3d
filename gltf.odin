@@ -353,13 +353,15 @@ gltf_morph_count :: proc "contextless" (m: ^Model) -> int {
 
 // Evaluates `m`'s node hierarchy (and optional keyframe animation `anim` at
 // `time` seconds) under `transform` and appends its mesh primitives to
-// `scene.draws`. `flags` (e.g. `{.Cast_Shadow, .Receive_Shadow}`) are merged
-// into each primitive's material flags; `override_material` replaces every
-// primitive's material when non-nil; `morphs` overrides morph target weights
-// (by target name or 0-based index) after any animated `"weights"` channels.
-// `pose` is where it is posed (nil: the model's own, so one thread at a time);
-// with the caller's, the model is only read. Zero allocations on warm frames.
-gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil, override_material: ^Material = nil, morphs: []Morph_Weight = nil) {
+// `scene.draws`. `flags` (e.g. `{.Cast_Shadow, .Receive_Shadow, .Toon}`) are
+// merged into each primitive's material flags; `override_material` replaces
+// every primitive's material when non-nil; `morphs` overrides morph target
+// weights (by target name or 0-based index) after any animated `"weights"`
+// channels; `outline_width` (> 0) and `outline_color` enable inverted-hull
+// cartoon outlines on all primitives. `pose` is where it is posed (nil: the
+// model's own, so one thread at a time); with the caller's, the model is only
+// read. Zero allocations on warm frames.
+gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil, override_material: ^Material = nil, morphs: []Morph_Weight = nil, outline_width: f32 = 0, outline_color: Vec3 = {}) {
 	n := len(m.nodes)
 	if n == 0 {
 		return
@@ -497,6 +499,10 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
 			mat := override_material^ if override_material != nil else prim.material
 			mat.flags += flags
+			if outline_width > 0 {
+				mat.outline_width = outline_width
+				mat.outline_color = outline_color
+			}
 			di := len(scene.draws)
 			append(&scene.draws, Draw{prim.geometry, world[i], mat})
 			if prim.skinned && var_joints.count > 0 {

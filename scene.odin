@@ -78,6 +78,8 @@ Side :: enum u8 {
 Material_Flag :: enum u8 {
 	// Unlit: the colour as is (MeshBasicMaterial, LineBasicMaterial, PointsMaterial).
 	Basic,
+	// Cel-shaded diffuse bands + stepped specular highlight (MeshToonMaterial).
+	Toon,
 	// One normal per triangle (flatShading).
 	Flat_Shading,
 	// Blended over what is behind (opacity < 1 needs it, as in three.js).
@@ -95,7 +97,7 @@ Material_Flag :: enum u8 {
 	No_Size_Attenuation,
 }
 
-Material_Flags :: bit_set[Material_Flag; u8]
+Material_Flags :: bit_set[Material_Flag; u16]
 
 Texture_Slot :: enum u8 {
 	Color     = 0,
@@ -115,9 +117,9 @@ Texture_Transform :: struct {
 	tex_coord: u8,
 }
 
-// MeshStandardMaterial (or MeshBasicMaterial with `.Basic`), or a
-// ShaderMaterial with `shader` (shader.odin): then only `side`,
-// `.Transparent` and `uniforms` apply.
+// MeshStandardMaterial (or MeshBasicMaterial with `.Basic`, MeshToonMaterial
+// with `.Toon`), or a ShaderMaterial with `shader` (shader.odin): then only
+// `side`, `.Transparent` and `uniforms` apply.
 Material :: struct {
 	color:               Vec3, // sRGB
 	metalness:           f32,
@@ -130,6 +132,10 @@ Material :: struct {
 	// Line width (`.Lines`) or point size (`.Points`); 0 takes defaults
 	// (0.03 world / 2 px for lines, 0.08 world / 4 px for points).
 	size:                f32,
+	// Inverted-hull cartoon outline thickness in world units (> 0 appends a
+	// back-face extruded shell draw) and sRGB colour (default black).
+	outline_width:       f32,
+	outline_color:       Vec3,
 	mode:                Draw_Mode,
 	side:                Side,
 	flags:               Material_Flags,
@@ -570,9 +576,10 @@ effective_draw_mode :: #force_inline proc "contextless" (m: Material, geo: Geome
 	return m.mode if m.mode != .Triangles else geo.mode
 }
 
-// Expands instanced draws into individual draws and `.Lines` / `.Points`
+// Expands instanced draws into individual draws, inverted-hull outlines
+// (`outline_width > 0`) into back-face extruded shells, and `.Lines` / `.Points`
 // draws into camera-facing quad triangles in `exp`, returning `scene`
-// unchanged when no draw uses instancing, lines, or points.
+// unchanged when no draw uses instancing, outlines, lines, or points.
 expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, view, proj: Mat4, width, height: int) -> ^Scene {
 	clear(&exp.geos)
 	clear(&exp.vertices)
@@ -581,9 +588,11 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	if !need_expand {
 		for i in 0 ..< len(scene.draws) {
 			d := &scene.draws[i]
-			if geo, ok := scene_geometry_get(scene, geos, d.geometry); ok && effective_draw_mode(d.material, geo) != .Triangles {
-				need_expand = true
-				break
+			if geo, ok := scene_geometry_get(scene, geos, d.geometry); ok {
+				if effective_draw_mode(d.material, geo) != .Triangles || (d.material.outline_width > 0 && d.material.side == .Front) {
+					need_expand = true
+					break
+				}
 			}
 		}
 	}
@@ -624,11 +633,62 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 		insts := scene_draw_instances(scene, di)
 		mode := effective_draw_mode(d.material, geo)
 		if mode == .Triangles {
+			outline_geo_id := Geometry_Id(0)
+			if d.material.outline_width > 0 && d.material.side == .Front {
+				raw_verts, raw_idx, m_ok := scene_geometry_mesh(scene, geos, d.geometry)
+				if m_ok && len(raw_verts) > 0 && len(raw_idx) > 0 {
+					skin := geometry_skin(geos, d.geometry) if d.geometry < SCENE_GEO_BIT else nil
+					joints := scene_draw_joints(scene, di)
+					skinned := len(skin) > 0 && len(joints) > 0
+					active_buf: [MAX_MORPH_TARGETS]Active_Morph = ---
+					na := active_morphs(geo, scene_draw_morphs(scene, di), &active_buf) if d.geometry < SCENE_GEO_BIT else 0
+					morphed := na > 0 && geos != nil && len(geos.morph_deltas) > 0
+					deltas := geos.morph_deltas[:] if geos != nil else nil
+					m_scale := max(mat_scale(d.model), 1e-4)
+					local_off := d.material.outline_width / m_scale
+					first_v := u32(len(exp.vertices))
+					first_i := u32(len(exp.indices))
+					table_grow_non_zero(&exp.vertices, int(first_v) + len(raw_verts))
+					table_grow_non_zero(&exp.indices, int(first_i) + len(raw_idx))
+					r_max: f32
+					for vtx, vi in raw_verts {
+						v := vtx
+						if morphed {
+							v.position, v.normal = morph_vertex(v, u32(vi), deltas, active_buf[:na])
+						}
+						if skinned {
+							v.position, v.normal = skin_vertex(v, skin[vi], joints)
+						}
+						nlen := linalg.length(v.normal)
+						n_dir := v.normal / nlen if nlen > 1e-6 else Vec3{0, 1, 0}
+						v.position += n_dir * local_off
+						exp.vertices[int(first_v) + vi] = v
+						r_max = max(r_max, linalg.length(v.position))
+					}
+					copy(exp.indices[first_i:], raw_idx)
+					outline_geo_id = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos))
+					append(&exp.geos, Geometry{
+						first_vertex = first_v,
+						vertex_count = u32(len(raw_verts)),
+						first_index  = first_i,
+						index_count  = u32(len(raw_idx)),
+						radius       = r_max,
+					})
+				}
+			}
+			outline_mat := MATERIAL_DEFAULT
+			outline_mat.color = d.material.outline_color
+			outline_mat.opacity = d.material.opacity
+			outline_mat.side = .Back
+			outline_mat.flags = {.Basic} + ({.Transparent} if .Transparent in d.material.flags else {})
 			if len(insts) == 0 {
 				ei := len(out.draws)
 				append(&out.draws, d)
 				scene_set_draw_joints(out, ei, j_range)
 				scene_set_draw_morphs(out, ei, m_range)
+				if outline_geo_id != 0 {
+					append(&out.draws, Draw{geometry = outline_geo_id, model = d.model, material = outline_mat})
+				}
 			} else {
 				base_lin := linear(d.material.color)
 				for inst in insts {
@@ -641,6 +701,9 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 					append(&out.draws, idraw)
 					scene_set_draw_joints(out, ei, j_range)
 					scene_set_draw_morphs(out, ei, m_range)
+					if outline_geo_id != 0 {
+						append(&out.draws, Draw{geometry = outline_geo_id, model = idraw.model, material = outline_mat})
+					}
 				}
 			}
 			continue
@@ -1002,6 +1065,7 @@ Shading_Flag :: enum u8 {
 	Metalness_Map,
 	Ao_Map,
 	Alpha_Mask,
+	Toon,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1031,6 +1095,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		f: Shading_Flags
 		if .Basic in m.flags {
 			f += {.Basic}
+		}
+		if .Toon in m.flags {
+			f += {.Toon}
 		}
 		if .Flat_Shading in m.flags {
 			f += {.Flat_Shading}
@@ -1104,10 +1171,17 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 	}
 }
 
+@(private = "file")
+toon_step :: #force_inline proc "contextless" (edge0, edge1, x: f32) -> f32 {
+	t := clamp((x - edge0) / (edge1 - edge0), 0, 1)
+	return t * t * (3 - 2 * t)
+}
+
 // The colour (linear) leaving a point of `m` at `world` with normal `n`
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
-// specular with Smith correlated visibility and Schlick Fresnel), direct
-// lights plus ambient, hemisphere and equirectangular environment lighting.
+// specular with Smith correlated visibility and Schlick Fresnel) or
+// MeshToonMaterial (`.Toon`: 3-band quantized cel-shading + stepped highlight),
+// direct lights plus ambient, hemisphere and equirectangular environment lighting.
 // `shadow` / `shadows` scale each shadow light's direct light (`shadow_factor`;
 // 1: lit); `ao` scales indirect light (ambient, hemisphere, environment).
 shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}) -> Vec3 {
@@ -1158,6 +1232,20 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 			}
 			if l.shadowed > 0 {
 				light *= shadow * shadows[min(int(l.shadowed - 1), MAX_SHADOWS - 1)]
+			}
+			if .Toon in m.flags {
+				raw_nl := clamp(linalg.dot(n, ldir), 0, 1)
+				toon_nl := 0.22 + 0.46 * toon_step(0.12, 0.18, raw_nl) + 0.32 * toon_step(0.50, 0.58, raw_nl)
+				spec_term := Vec3{}
+				if raw_nl > 0.12 && roughness < 0.85 {
+					h := linalg.normalize(ldir + v)
+					nh := clamp(linalg.dot(n, h), 0, 1)
+					thresh := 1.0 - (1.0 - roughness) * 0.18
+					spec_s := toon_step(thresh - 0.02, thresh + 0.02, nh) * (1.0 - roughness) * 0.55
+					spec_term = linalg.lerp(Vec3{1, 1, 1}, base, m.metalness) * spec_s
+				}
+				out += light * (diffuse * (toon_nl / math.PI) + spec_term)
+				continue
 			}
 			nl := clamp(linalg.dot(n, ldir), 0, 1)
 			if nl <= 0 {

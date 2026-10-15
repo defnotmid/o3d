@@ -1113,33 +1113,64 @@ threemf_build_mesh :: proc(
 		})
 	}
 
+	// Precompute area-weighted and unit face normals + a flat per-vertex
+	// triangle incidence list so shared vertices within a 60° crease angle
+	// (`cos(60°) = 0.5`) receive smooth normals while hard edges stay sharp.
+	COS_CREASE :: f32(0.5)
+	total_tris := len(tris)
+	tri_area_n := make([]Vec3, total_tris, context.temp_allocator)
+	tri_unit_n := make([]Vec3, total_tris, context.temp_allocator)
+	head := make([]i32, v_count, context.temp_allocator)
+	slice.fill(head, -1)
+	next_corner := make([]i32, total_tris * 3, context.temp_allocator)
+
+	for t, ti in tris {
+		p0 := positions[t.v[0]]
+		p1 := positions[t.v[1]]
+		p2 := positions[t.v[2]]
+		c := linalg.cross(p1 - p0, p2 - p0)
+		clen := linalg.length(c)
+		tri_area_n[ti] = c
+		tri_unit_n[ti] = c / clen if clen > 1e-12 else Vec3{0, 1, 0}
+		for k in 0 ..< 3 {
+			vi := t.v[k]
+			ci := i32(ti * 3 + k)
+			next_corner[ci] = head[vi]
+			head[vi] = ci
+		}
+	}
+
 	first_prim := u32(len(b.model.primitives))
 	prim_count := u32(0)
 	run_start := 0
-	for run_start < len(tris) {
+	for run_start < total_tris {
 		key := tris[run_start].sort_key
 		run_end := run_start + 1
-		for run_end < len(tris) && tris[run_end].sort_key == key {
+		for run_end < total_tris && tris[run_end].sort_key == key {
 			run_end += 1
 		}
 		run := tris[run_start:run_end]
 		nt := len(run)
 		verts := make([]Vertex, nt * 3, context.temp_allocator)
 		indices := make([]u32, nt * 3, context.temp_allocator)
-		for t, ti in run {
-			p0 := positions[t.v[0]]
-			p1 := positions[t.v[1]]
-			p2 := positions[t.v[2]]
-			c := linalg.cross(p1 - p0, p2 - p0)
-			clen := linalg.length(c)
-			n := c / clen if clen > 1e-12 else Vec3{0, 1, 0}
-			base := ti * 3
-			verts[base + 0] = {position = p0, normal = n, uv = t.uv[0]}
-			verts[base + 1] = {position = p1, normal = n, uv = t.uv[1]}
-			verts[base + 2] = {position = p2, normal = n, uv = t.uv[2]}
-			indices[base + 0] = u32(base + 0)
-			indices[base + 1] = u32(base + 1)
-			indices[base + 2] = u32(base + 2)
+		for t, local_ti in run {
+			ti := run_start + local_ti
+			fn := tri_unit_n[ti]
+			base := local_ti * 3
+			for k in 0 ..< 3 {
+				vi := t.v[k]
+				acc := Vec3{}
+				for ci := head[vi]; ci >= 0; ci = next_corner[ci] {
+					other_ti := int(ci) / 3
+					if linalg.dot(fn, tri_unit_n[other_ti]) >= COS_CREASE {
+						acc += tri_area_n[other_ti]
+					}
+				}
+				alen := linalg.length(acc)
+				vn := acc / alen if alen > 1e-12 else fn
+				verts[base + k] = {position = positions[vi], normal = vn, uv = t.uv[k]}
+				indices[base + k] = u32(base + k)
+			}
 		}
 		geo_id := geometry_add(b.geos, verts, indices)
 		append(&b.model.primitives, Model_Primitive {

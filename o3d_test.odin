@@ -985,4 +985,82 @@ test_instancing_lines_and_points :: proc(t: ^testing.T) {
 	testing.expectf(t, pt_hit[2] > 200 && pt_hit[1] > 150, "pixel-sized point rendered at (32, 42): %v", pt_hit)
 }
 
+// Verifies MeshToonMaterial (`.Toon` 3-band quantized cel-shading) and
+// inverted-hull cartoon outlines (`Material.outline_width`, `Material.outline_color`).
+@(test)
+test_toon_shading_and_outlines :: proc(t: ^testing.T) {
+	// 1. Direct `shade()` test: within each of the 3 cel-shading plateaus
+	// (shadow: nl in 0..0.10, midtone: nl in 0.22..0.46, lit: nl in 0.62..0.80)
+	// the diffuse shading is flat/quantized, with sharp steps between plateaus.
+	sm := Shading_Material{
+		base      = {0.8, 0.4, 0.2},
+		opacity   = 1,
+		roughness = 0.9, // high roughness to isolate 3-band diffuse steps
+		flags     = {.Toon},
+	}
+	lights := [1]Shading_Light{
+		{
+			kind   = .Directional,
+			color  = {math.PI, math.PI, math.PI},
+			vector = {0, 0, 1},
+		},
+	}
+	c_shadow_a := shade(&sm, {}, {0, 0, -1}, {0, 0, 5}, lights[:]) // nl = 0.0
+	c_shadow_b := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.08}), {0, 0, 5}, lights[:]) // nl ~ 0.08
+	c_mid_a    := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.30}), {0, 0, 5}, lights[:]) // nl ~ 0.29
+	c_mid_b    := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.45}), {0, 0, 5}, lights[:]) // nl ~ 0.41
+	c_lit_a    := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.90}), {0, 0, 5}, lights[:]) // nl ~ 0.67
+	c_lit_b    := shade(&sm, {}, {0, 0, 1}, {0, 0, 5}, lights[:]) // nl = 1.0
+
+	testing.expect(t, linalg.length(c_shadow_a - c_shadow_b) < 1e-5, "shadow band plateau is flat")
+	testing.expect(t, linalg.length(c_mid_a - c_mid_b) < 1e-5, "midtone band plateau is flat")
+	testing.expect(t, linalg.length(c_lit_a - c_lit_b) < 1e-5, "lit band plateau is flat")
+	testing.expect(t, c_mid_a.r > c_shadow_a.r * 2.5 && c_lit_a.r > c_mid_a.r * 1.35, "distinct quantized steps between shadow, midtone, and lit bands")
+
+	// 2. Inverted-hull outline rendering test: render a sphere with and without
+	// a bright green outline (`outline_width = 0.12`, `outline_color = {0, 1, 0}`)
+	// and verify the silhouette ring is filled with the outline color while the
+	// interior remains the sphere's base color.
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+
+	W :: 64
+	sph := sphere(&g, 0.8, 24, 16)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 3}, fov = 45, near = 0.1, far = 50}
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {2, 3, 4}})
+
+	mat := MATERIAL_DEFAULT
+	mat.color = {1, 0.1, 0.1}
+	mat.flags = {.Toon}
+	append(&scene.draws, Draw{sph, compose(), mat})
+	px_first := software_render(&s, &scene, &g, nil, W, W)
+	px_no_outline := make([]u8, len(px_first), context.temp_allocator)
+	copy(px_no_outline, px_first)
+
+	// Enable outline on the draw.
+	scene.draws.material[0].outline_width = 0.12
+	scene.draws.material[0].outline_color = {0, 1, 0}
+	px_outline := software_render(&s, &scene, &g, nil, W, W)
+
+	// Center pixel (32, 32) is red in both; silhouette ring has green outline pixels where px_no_outline was transparent.
+	center_px := px_outline[(32 * W + 32) * 4:][:4]
+	testing.expectf(t, center_px[0] > 150 && center_px[1] < 80, "sphere interior remains red: %v", center_px)
+
+	outline_ring_pixels := 0
+	for i in 0 ..< W * W {
+		if px_no_outline[i * 4 + 3] == 0 && px_outline[i * 4 + 3] == 255 {
+			if px_outline[i * 4 + 1] > 200 && px_outline[i * 4 + 0] < 20 {
+				outline_ring_pixels += 1
+			}
+		}
+	}
+	testing.expectf(t, outline_ring_pixels > 40, "inverted-hull outline forms a silhouette ring around the sphere (%d pixels)", outline_ring_pixels)
+}
+
+
 

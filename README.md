@@ -32,7 +32,10 @@ What is known about three.js carries over:
   light only as three.js's `aoMap` does), per-slot UV transforms `*_transform`
   (`offset`, `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`),
   and the booleans as a bit set: `flags = {.Transparent, .Alpha_Mask,
-  .Flat_Shading, .No_Size_Attenuation}`) or MeshBasicMaterial (`.Basic`), or
+  .Flat_Shading, .No_Size_Attenuation}`), MeshBasicMaterial (`.Basic`),
+  MeshToonMaterial (`.Toon`: banded diffuse and a stepped highlight; any
+  front-sided material also takes `outline_width` and `outline_color`, an
+  inverted-hull cartoon outline), or
   ShaderMaterial: your own vertex and fragment shaders in GLSL ES (three.js's
   GLSL 1 style with `attribute`, `varying` and `gl_FragColor`, or GLSL 3 with
   `glsl3 = true`), with three.js's built-in uniforms (`modelMatrix`,
@@ -103,9 +106,10 @@ m.color, m.roughness, m.color_map = {1, 0.35, 0.3}, 0.4, albedo
 m.flags = {.Cast_Shadow, .Receive_Shadow}
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
-// glTF 2.0 / GLB and 3MF: loaded once into flat tables, drawn per frame at time t
+// glTF 2.0 / GLB, 3MF and OBJ (model_load picks by extension): loaded once into flat tables, drawn per frame at time t
 duck, err := o3d.gltf_load("duck.glb", &geos, &textures)   // err: .None, or why (GLTF_ERROR_TEXT[err])
 part, _ := o3d.threemf_load("part.3mf", &geos, &textures)  // err: .None, or why (THREEMF_ERROR_TEXT[err])
+mesh, _ := o3d.obj_load("mesh.obj", &geos, &textures)      // err: .None, or why (OBJ_ERROR_TEXT[err])
 o3d.gltf_draw(&scene, &duck, o3d.compose({-1.5, 0, 0}), anim = 0, time = t)
 o3d.gltf_draw(&scene, &part, o3d.compose({1.5, 0, 0}))
 // Morph target overrides by target name or 0-based index (applied after animation):
@@ -226,7 +230,15 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   (`u`, `v`) map to `Material` and `Textures` (splitting multi-material meshes
   into one `Model_Primitive` per distinct material). Unsupported entries in
   `requiredextensions` fail with `Threemf_Error.Unsupported_Extension` and
-  record the namespace URI in `Model.unsupported_extension`.
+  record the namespace URI in `Model.unsupported_extension`. Faces share
+  smooth normals within a 60° crease angle; sharper edges stay hard.
+- **OBJ (`obj.odin`):** `obj_load` and `obj_parse` read Wavefront `.obj`
+  (`v` with optional vertex colours, `vt`, `vn`, `f` with N-gons fanned and
+  negative indices, `o` / `g` as nodes, `usemtl` splitting primitives) and its
+  `mtllib` `.mtl` (`Kd`, `Ke`, `Ks`/`Ns` or `Pr`/`Pm`, `d`/`Tr`, and the
+  `map_Kd`, `map_Ke`, `map_Bump`, `map_Pr`/`map_Ns`, `map_Pm` textures)
+  relative to the file, into the same tables. Faces without `vn` get the 60°
+  crease-angle normals. `model_load` picks glTF, 3MF or OBJ by extension.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, spot cone

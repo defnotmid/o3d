@@ -34,6 +34,7 @@ static const uint FLAG_EMISSIVE_MAP = 256;
 static const uint FLAG_METALNESS_MAP = 512;
 static const uint FLAG_AO_MAP = 1024;
 static const uint FLAG_ALPHA_MASK = 2048;
+static const uint FLAG_TOON = 4096;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -270,7 +271,7 @@ float shadow_factor(int idx, float3 world, float3 normal) {
     return lit / 9;
 }
 
-float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao) {
+float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao, uint flags) {
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
     float3 f0 = lerp(float3(0.04), base, metalness);
@@ -311,6 +312,20 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
         }
         if (l.shadowed > 0 && l.shadowed <= uint(MAX_SHADOWS)) {
             light *= shadows[l.shadowed - 1];
+        }
+        if ((flags & FLAG_TOON) != 0) {
+            float raw_nl = saturate(dot(n, ldir));
+            float toon_nl = 0.22 + 0.46 * smoothstep(0.12, 0.18, raw_nl) + 0.32 * smoothstep(0.50, 0.58, raw_nl);
+            float3 spec_term = float3(0);
+            if (raw_nl > 0.12 && roughness < 0.85) {
+                float3 h = normalize(ldir + v);
+                float nh = saturate(dot(n, h));
+                float thresh = 1.0 - (1.0 - roughness) * 0.18;
+                float spec_s = smoothstep(thresh - 0.02, thresh + 0.02, nh) * (1.0 - roughness) * 0.55;
+                spec_term = lerp(float3(1), base, metalness) * spec_s;
+            }
+            o += light * (diffuse * (toon_nl / PI) + spec_term);
+            continue;
         }
         float nl = saturate(dot(n, ldir));
         if (nl <= 0) {
@@ -416,7 +431,7 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
             float3 map_n = sample_map(normalMap, uv, dx, dy).rgb * 2 - 1;
             n = perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n);
         }
-        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao);
+        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags);
     }
     float3 emissive = material.emissive.rgb;
     if ((flags & FLAG_EMISSIVE_MAP) != 0) {

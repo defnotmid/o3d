@@ -1082,3 +1082,112 @@ test_threemf_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, m_ext.unsupported_extension, "http://schemas.microsoft.com/3dmanufacturing/slice/2015/07")
 	testing.expect(t, THREEMF_ERROR_TEXT[err_ext] != "")
 }
+
+// Verifies 3MF crease-angle normal smoothing: faces meeting at < 60° share
+// smooth averaged normals along their shared edge, while faces meeting at 90°
+// (>= 60°) keep crisp hard-edge normals.
+@(test)
+test_threemf_crease_normals :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+
+	model_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="meter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+	<resources>
+		<object id="1" type="model">
+			<mesh>
+				<vertices>
+					<vertex x="0" y="0" z="0"/>
+					<vertex x="0" y="1" z="0"/>
+					<vertex x="-1" y="0" z="0"/>
+					<vertex x="1" y="0" z="-0.3"/>
+					<vertex x="0" y="0" z="-1"/>
+				</vertices>
+				<triangles>
+					<triangle v1="0" v2="1" v3="2"/>
+					<triangle v1="0" v2="3" v3="1"/>
+					<triangle v1="0" v2="4" v3="1"/>
+				</triangles>
+			</mesh>
+		</object>
+	</resources>
+	<build>
+		<item objectid="1"/>
+	</build>
+</model>`
+	zip_bytes := make_test_zip({{name = "3D/3dmodel.model", data = model_xml}})
+	m, err := threemf_parse(zip_bytes, &geos)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Threemf_Error.None)
+	testing.expect_value(t, len(m.primitives), 1)
+
+	g, ok := geometry_get(&geos, m.primitives[0].geometry)
+	testing.expect(t, ok && g.vertex_count == 9)
+	verts := geos.vertices[g.first_vertex:][:g.vertex_count]
+
+	// Tri 0 (v0, v1, v2) has normal (0, 1, 0) in o3d; Tri 1 (v0, v3, v1) has normal ~ normalize(0.3, 1, 0)
+	// (~16.7° crease < 60°), so vertex 0 in Tri 0 (verts[0]) and Tri 1 (verts[3]) share an averaged normal.
+	testing.expect(t, verts[0].normal.y > 0.9 && verts[0].normal.x > 0.05, "gentle crease is smoothed across shared edge")
+	testing.expect(t, linalg.length(verts[0].normal - verts[3].normal) < 1e-4, "shared gentle-crease vertices get identical averaged normal")
+
+	// Tri 2 (v0, v4, v1) has normal (1, 0, 0) in o3d (90° from Tri 0, >= 60° crease),
+	// so Tri 2's normal is NOT blended into Tri 0's vertex 0 normal, and Tri 2 keeps its sharp (1, 0, 0) normal.
+	testing.expect(t, linalg.length(verts[6].normal - Vec3{1, 0, 0}) < 1e-4, "sharp 90-deg crease keeps crisp hard-edge normal")
+}
+
+// Verifies Wavefront .obj + .mtl parsing, N-gon fan triangulation, negative
+// indices, per-vertex colors, crease-angle smooth normals, and `gltf_draw`
+// with `.Toon` and `outline_width`.
+@(test)
+test_obj_parse_and_mtl :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+
+	obj_src := `# Test Wavefront OBJ with quad face, negative indices, and vertex colors
+o MascotBody
+v -1.0  0.0  0.0 1.0 0.2 0.2
+v  1.0  0.0  0.0 1.0 0.2 0.2
+v  1.0  1.0  0.0 0.2 1.0 0.2
+v -1.0  1.0  0.0 0.2 1.0 0.2
+vt 0.0 0.0
+vt 1.0 0.0
+vt 1.0 1.0
+vt 0.0 1.0
+f 1/1 2/2 3/3 4/4
+
+o MascotCap
+v  0.0  1.0  0.0
+v  1.0  1.0  0.0
+v  0.5  1.8  0.0
+vn 0.0  0.0  1.0
+f -3//1 -2//1 -1//1
+`
+	m, err := obj_parse(transmute([]u8)obj_src, &geos, &textures)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Obj_Error.None)
+	testing.expect_value(t, len(m.nodes), 2)
+	testing.expect_value(t, len(m.primitives), 2)
+
+	// First primitive: quad fan-triangulated into 2 triangles (6 vertices), with 2-color palette texture.
+	g0, ok0 := geometry_get(&geos, m.primitives[0].geometry)
+	testing.expect(t, ok0 && g0.vertex_count == 6 && g0.index_count == 6)
+	testing.expect(t, m.primitives[0].material.color_map != 0, "multi-color vertex colors baked into palette texture")
+	v0 := geos.vertices[g0.first_vertex]
+	testing.expect(t, linalg.length(v0.normal - Vec3{0, 0, 1}) < 1e-4, "auto-computed face/smooth normal points along +Z")
+
+	// Second primitive: triangle using negative indices and explicit vn.
+	g1, ok1 := geometry_get(&geos, m.primitives[1].geometry)
+	testing.expect(t, ok1 && g1.vertex_count == 3)
+
+	// Draw with .Toon and outline_width: expand_draws emits 2 front draws + 2 back-face outline draws = 4 draws.
+	scene_clear(&scene)
+	gltf_draw(&scene, &m, flags = {.Toon}, outline_width = 0.03, outline_color = {0.05, 0.03, 0.02})
+	testing.expect_value(t, len(scene.draws), 2)
+	testing.expect(t, .Toon in scene.draws.material[0].flags)
+	testing.expect(t, abs(scene.draws.material[0].outline_width - 0.03) < 1e-6)
+}
+

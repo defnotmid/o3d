@@ -20,7 +20,7 @@ struct pixelInput_0
 };
 
 
-#line 54 "shaders/o3d.slang"
+#line 62 "o3d.slang"
 struct Material_0
 {
     float4 color_0;
@@ -36,7 +36,7 @@ struct Material_0
 };
 
 
-#line 100
+#line 110
 struct KernelContext_0
 {
     Material_0 constant* material_0;
@@ -45,85 +45,85 @@ struct KernelContext_0
 };
 
 
-#line 400
+#line 460
 [[fragment]] pixelOutput_0 fs_shadow(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], Material_0 constant* material_1 [[buffer(0)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]])
 {
 
-#line 400
+#line 460
     thread KernelContext_0 kernelContext_0;
 
-#line 400
+#line 460
     (&kernelContext_0)->material_0 = material_1;
 
-#line 400
+#line 460
     (&kernelContext_0)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 400
+#line 460
     (&kernelContext_0)->colorMap_sampler_0 = colorMap_sampler_1;
     if(((material_1->flags_0) & 2048U) != 0U)
     {
 
-#line 402
+#line 462
         float a_0 = (&kernelContext_0)->material_0->color_0.w;
 
-#line 402
+#line 462
         float a_1;
         if(((material_1->flags_0) & 32U) != 0U)
         {
 
-#line 403
+#line 463
             float2 raw_0;
             if(((((&kernelContext_0)->material_0->uv_sets_0) >> 0U) & 1U) != 0U)
             {
 
-#line 404
+#line 464
                 raw_0 = _S1.uv1_0;
 
-#line 404
+#line 464
             }
             else
             {
 
-#line 404
+#line 464
                 raw_0 = _S1.uv_0;
 
-#line 404
+#line 464
             }
 
 
             float3 _S2 = float3(raw_0, 1.0f);
 
-#line 407
+#line 467
             a_1 = a_0 * (((&kernelContext_0)->colorMap_texture_0).sample(((&kernelContext_0)->colorMap_sampler_0), (float2(dot((&kernelContext_0)->material_0->uv_transforms_0[0U].xyz, _S2), 1.0f - dot((&kernelContext_0)->material_0->uv_transforms_0[1U].xyz, _S2))), level((0.0f)))).w;
 
-#line 403
+#line 463
         }
         else
         {
 
-#line 403
+#line 463
             a_1 = a_0;
 
-#line 403
+#line 463
         }
 
-#line 410
+#line 470
         if(a_1 < ((&kernelContext_0)->material_0->alpha_cutoff_0))
         {
 
-#line 411
+#line 471
             discard_fragment();
 
-#line 410
+#line 470
         }
 
-#line 401
+#line 461
     }
 
-#line 401
+#line 461
     pixelOutput_0 _S3 = { position_0.z };
 
-#line 414
+#line 474
     return _S3;
 }
 
