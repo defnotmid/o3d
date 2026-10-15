@@ -103,9 +103,11 @@ m.color, m.roughness, m.color_map = {1, 0.35, 0.3}, 0.4, albedo
 m.flags = {.Cast_Shadow, .Receive_Shadow}
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
-// glTF 2.0 / GLB: loaded once into flat tables, drawn per frame at time t
+// glTF 2.0 / GLB and 3MF: loaded once into flat tables, drawn per frame at time t
 duck, err := o3d.gltf_load("duck.glb", &geos, &textures)   // err: .None, or why (GLTF_ERROR_TEXT[err])
+part, _ := o3d.threemf_load("part.3mf", &geos, &textures)  // err: .None, or why (THREEMF_ERROR_TEXT[err])
 o3d.gltf_draw(&scene, &duck, o3d.compose({-1.5, 0, 0}), anim = 0, time = t)
+o3d.gltf_draw(&scene, &part, o3d.compose({1.5, 0, 0}))
 // Morph target overrides by target name or 0-based index (applied after animation):
 // o3d.gltf_draw(&scene, &face, anim = 0, time = t, morphs = {{name = "Smile", weight = 0.8}, {index = 1, weight = 0.5}})
 // From several threads, each with its own pose (the model is then only read):
@@ -210,6 +212,21 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   `KHR_materials_emissive_strength`, `KHR_texture_transform`,
   `KHR_mesh_quantization`, and `KHR_lights_punctual`. Also not imported: glTF
   cameras.
+- **3MF (`threemf.odin`):** `threemf_load` and `threemf_parse` read `.3mf`
+  (3D Manufacturing Format) ZIP archives (`3D/3dmodel.model` via `_rels/.rels`,
+  plus production-extension sub-model `.model` parts) into the same flat
+  `Model`, `Geometries` and `Textures` tables as `gltf_load`, so `gltf_draw`
+  and `model_destroy` work on 3MF models with no special cases. 3MF Z-up
+  vertices and 3x4 affine `<component>` / `<item>` transforms are converted
+  into o3d's Y-up space via the +1-determinant basis change `(x, y, z) ->
+  (x, z, -y)` (`B * M * B^-1`), sub-models with a different `<model unit>`
+  scale into the root model's unit, and `<basematerials>` (`displaycolor`),
+  `<m:colorgroup>` (`color`), `<m:pbmetallicdisplayproperties>`
+  (`metallicness`, `roughness`), and `<m:texture2d>` + `<m:texture2dgroup>`
+  (`u`, `v`) map to `Material` and `Textures` (splitting multi-material meshes
+  into one `Model_Primitive` per distinct material). Unsupported entries in
+  `requiredextensions` fail with `Threemf_Error.Unsupported_Extension` and
+  record the namespace URI in `Model.unsupported_extension`.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, spot cone

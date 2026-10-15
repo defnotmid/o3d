@@ -864,5 +864,221 @@ test_gltf_unlit_and_lights_punctual :: proc(t: ^testing.T) {
 	testing.expect(t, abs(l2.penumbra - 0.6) < 1e-5)
 }
 
+@(private = "file")
+Test_Zip_Entry :: struct {
+	name: string,
+	data: string,
+}
 
+@(private = "file")
+put_u16_le :: proc(buf: ^[dynamic]u8, v: u16) {
+	append(buf, u8(v), u8(v >> 8))
+}
 
+@(private = "file")
+put_u32_le :: proc(buf: ^[dynamic]u8, v: u32) {
+	append(buf, u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24))
+}
+
+// Builds a minimal Stored (method 0) ZIP archive in memory for testing `.3mf`.
+@(private = "file")
+make_test_zip :: proc(entries: []Test_Zip_Entry, allocator := context.temp_allocator) -> []u8 {
+	buf := make([dynamic]u8, 0, 1024, allocator)
+	offsets := make([]u32, len(entries), context.temp_allocator)
+	for e, i in entries {
+		offsets[i] = u32(len(buf))
+		put_u32_le(&buf, 0x04034b50) // LFH signature
+		put_u16_le(&buf, 20)         // version needed
+		put_u16_le(&buf, 0)          // flags
+		put_u16_le(&buf, 0)          // method = 0 (stored)
+		put_u16_le(&buf, 0)          // mod time
+		put_u16_le(&buf, 0)          // mod date
+		put_u32_le(&buf, 0)          // crc32
+		put_u32_le(&buf, u32(len(e.data)))
+		put_u32_le(&buf, u32(len(e.data)))
+		put_u16_le(&buf, u16(len(e.name)))
+		put_u16_le(&buf, 0)          // extra len
+		append(&buf, ..transmute([]u8)e.name)
+		append(&buf, ..transmute([]u8)e.data)
+	}
+	cd_offset := u32(len(buf))
+	for e, i in entries {
+		put_u32_le(&buf, 0x02014b50) // CDH signature
+		put_u16_le(&buf, 20)         // version made by
+		put_u16_le(&buf, 20)         // version needed
+		put_u16_le(&buf, 0)          // flags
+		put_u16_le(&buf, 0)          // method = 0 (stored)
+		put_u16_le(&buf, 0)          // mod time
+		put_u16_le(&buf, 0)          // mod date
+		put_u32_le(&buf, 0)          // crc32
+		put_u32_le(&buf, u32(len(e.data)))
+		put_u32_le(&buf, u32(len(e.data)))
+		put_u16_le(&buf, u16(len(e.name)))
+		put_u16_le(&buf, 0)          // extra len
+		put_u16_le(&buf, 0)          // comment len
+		put_u16_le(&buf, 0)          // disk start
+		put_u16_le(&buf, 0)          // internal attr
+		put_u32_le(&buf, 0)          // external attr
+		put_u32_le(&buf, offsets[i])
+		append(&buf, ..transmute([]u8)e.name)
+	}
+	cd_size := u32(len(buf)) - cd_offset
+	put_u32_le(&buf, 0x06054b50) // EOCD signature
+	put_u16_le(&buf, 0)
+	put_u16_le(&buf, 0)
+	put_u16_le(&buf, u16(len(entries)))
+	put_u16_le(&buf, u16(len(entries)))
+	put_u32_le(&buf, cd_size)
+	put_u32_le(&buf, cd_offset)
+	put_u16_le(&buf, 0)
+	return buf[:]
+}
+
+@(test)
+test_threemf_parse_and_draw :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	scene: Scene
+	defer scene_destroy(&scene)
+
+	rels_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+	<Relationship Target="/3D/root.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>`
+
+	root_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="meter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
+       xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+       requiredextensions="m p">
+	<resources>
+		<m:pbmetallicdisplayproperties id="10">
+			<m:pbmetallic name="Gold" metallicness="0.85" roughness="0.15"/>
+		</m:pbmetallicdisplayproperties>
+		<basematerials id="1" displaypropertiesid="10">
+			<base name="Gold" displaycolor="#FFCC00"/>
+		</basematerials>
+		<m:colorgroup id="2">
+			<m:color color="#FF0000FF"/>
+			<m:color color="#00FF0080"/>
+		</m:colorgroup>
+		<object id="3" name="DualTri" pid="1" pindex="0" type="model">
+			<mesh>
+				<vertices>
+					<vertex x="0" y="0" z="0"/>
+					<vertex x="1" y="0" z="0"/>
+					<vertex x="0" y="0" z="2"/>
+					<vertex x="0" y="2" z="0"/>
+				</vertices>
+				<triangles>
+					<triangle v1="0" v2="1" v3="2"/>
+					<triangle v1="0" v2="3" v3="1" pid="2" p1="1"/>
+				</triangles>
+			</mesh>
+		</object>
+		<object id="4" name="Assembly" type="model">
+			<components>
+				<component objectid="3" transform="1 0 0 0 1 0 0 0 1 2 4 6"/>
+				<component p:path="/3D/Parts/sub.model" objectid="1"/>
+			</components>
+		</object>
+	</resources>
+	<build>
+		<item objectid="4"/>
+	</build>
+</model>`
+
+	// Sub-part in centimeters (0.01 scale relative to root's meter unit).
+	sub_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="centimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+	<resources>
+		<object id="1" name="SubTri" type="model">
+			<mesh>
+				<vertices>
+					<vertex x="0" y="0" z="0"/>
+					<vertex x="100" y="0" z="0"/>
+					<vertex x="0" y="0" z="100"/>
+				</vertices>
+				<triangles>
+					<triangle v1="0" v2="1" v3="2"/>
+				</triangles>
+			</mesh>
+		</object>
+	</resources>
+	<build/>
+</model>`
+
+	zip_bytes := make_test_zip({
+		{name = "_rels/.rels", data = rels_xml},
+		{name = "3D/root.model", data = root_xml},
+		{name = "3D/Parts/sub.model", data = sub_xml},
+	})
+
+	m, err := threemf_parse(zip_bytes, &geos)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Threemf_Error.None)
+	testing.expect_value(t, len(m.meshes), 2)
+	// DualTri has 2 triangles with different materials -> split into 2 primitives.
+	testing.expect_value(t, m.meshes[0].primitive_count, u32(2))
+	testing.expect_value(t, m.meshes[1].primitive_count, u32(1))
+
+	// First primitive uses basematerials id=1 + pbmetallicdisplayproperties id=10.
+	p0 := m.primitives[0]
+	testing.expect(t, abs(p0.material.metalness - 0.85) < 1e-5)
+	testing.expect(t, abs(p0.material.roughness - 0.15) < 1e-5)
+	testing.expect(t, abs(p0.material.color.r - 1.0) < 1e-4)
+	testing.expect(t, abs(p0.material.color.g - 0xcc / 255.0) < 1e-4)
+
+	// Second primitive uses colorgroup id=2 index=1 (#00FF0080 -> transparent).
+	p1 := m.primitives[1]
+	testing.expect(t, .Transparent in p1.material.flags)
+	testing.expect(t, abs(p1.material.opacity - 128.0 / 255.0) < 1e-4)
+
+	// Z-up (0, 0, 2) in 3MF becomes Y-up (0, 2, 0) in o3d.
+	g0, ok0 := geometry_get(&geos, p0.geometry)
+	testing.expect(t, ok0)
+	v2 := geos.vertices[g0.first_vertex + 2]
+	testing.expect(t, linalg.length(v2.position - Vec3{0, 2, 0}) < 1e-5)
+
+	// Sub-part vertex (100, 0, 0) cm is scaled to (1, 0, 0) m.
+	p_sub := m.primitives[2]
+	g_sub, ok_sub := geometry_get(&geos, p_sub.geometry)
+	testing.expect(t, ok_sub)
+	v_sub1 := geos.vertices[g_sub.first_vertex + 1]
+	testing.expect(t, linalg.length(v_sub1.position - Vec3{1, 0, 0}) < 1e-5)
+
+	// Component translation (2, 4, 6) in 3MF Z-up becomes (2, 6, -4) in o3d Y-up.
+	scene_clear(&scene)
+	gltf_draw(&scene, &m)
+	testing.expect_value(t, len(scene.draws), 3)
+	d0_xf := scene.draws.model[0]
+	testing.expect(t, abs(d0_xf[0, 3] - 2) < 1e-5)
+	testing.expect(t, abs(d0_xf[1, 3] - 6) < 1e-5)
+	testing.expect(t, abs(d0_xf[2, 3] - (-4)) < 1e-5)
+}
+
+@(test)
+test_threemf_errors :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+
+	// Broken ZIP bytes.
+	m_bad, err_bad := threemf_parse(transmute([]u8)string("not a zip encoded archive"), &geos)
+	defer model_destroy(&m_bad)
+	testing.expect_value(t, err_bad, Threemf_Error.Not_Zip)
+
+	// Unsupported required extension (e.g. Slice extension).
+	slice_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:s="http://schemas.microsoft.com/3dmanufacturing/slice/2015/07"
+       requiredextensions="s">
+	<resources/>
+	<build/>
+</model>`
+	zip_slice := make_test_zip({{name = "3D/3dmodel.model", data = slice_xml}})
+	m_ext, err_ext := threemf_parse(zip_slice, &geos)
+	defer model_destroy(&m_ext)
+	testing.expect_value(t, err_ext, Threemf_Error.Unsupported_Extension)
+	testing.expect_value(t, m_ext.unsupported_extension, "http://schemas.microsoft.com/3dmanufacturing/slice/2015/07")
+	testing.expect(t, THREEMF_ERROR_TEXT[err_ext] != "")
+}
