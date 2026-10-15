@@ -186,7 +186,7 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 	mapped := sdl.MapGPUTransferBuffer(g.device, transfer, false)
 	mem.copy(mapped, raw_data(new), len(new))
 	sdl.UnmapGPUTransferBuffer(g.device, transfer)
-	sdl.UploadToGPUBuffer(pass, {transfer_buffer = transfer}, {buffer = b.buffer, offset = b.uploaded, size = u32(len(new))}, false)
+	sdl.UploadToGPUBuffer(pass, {transfer_buffer = transfer}, {buffer = b.buffer, offset = b.uploaded, size = u32(len(new))}, b.uploaded == 0)
 	b.uploaded = size
 	return nil
 }
