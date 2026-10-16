@@ -14,8 +14,8 @@ import "core:thread"
 test_primitive_winding :: proc(t: ^testing.T) {
 	g: Geometries
 	defer geometries_destroy(&g)
-	ids := []Geometry_Id{box(&g, 1, 2, 3, 2, 2, 2), sphere(&g, 1, 16, 8), plane(&g, 2, 1, 3, 2), cylinder(&g, 0.5, 1, 2, 12), cylinder(&g, 0, 1, 1, 8), torus(&g, 1, 0.3, 8, 16)}
-	names := []string{"box", "sphere", "plane", "cylinder", "cone", "torus"}
+	ids := []Geometry_Id{box(&g, 1, 2, 3, 2, 2, 2), sphere(&g, 1, 16, 8), plane(&g, 2, 1, 3, 2), cylinder(&g, 0.5, 1, 2, 12), cylinder(&g, 0, 1, 1, 8), torus(&g, 1, 0.3, 8, 16), capsule(&g, 0.5, 1, 4, 8)}
+	names := []string{"box", "sphere", "plane", "cylinder", "cone", "torus", "capsule"}
 	for id, n in ids {
 		vertices, indices, ok := geometry_mesh(&g, id)
 		testing.expect(t, ok)
@@ -1064,3 +1064,62 @@ test_toon_shading_and_outlines :: proc(t: ^testing.T) {
 
 
 
+
+// A tube is per-frame triangles that expansion hands the renderers as
+// dynamic geometry, wound outward; an instanced ShaderMaterial draw becomes a
+// draw per instance whose instanceColor and instanceId are that instance's.
+@(test)
+test_tube_and_instance_builtins :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	scene: Scene
+	defer scene_destroy(&scene)
+	exp: Expanded_Draws
+	defer expanded_draws_destroy(&exp)
+
+	tube := scene_tube(&scene, {{-1, 0, 0}, {0, 1, 0}, {1, 0, 0}}, 0.1, 8)
+	testing.expect(t, tube >= SCENE_GEO_BIT && tube < DYNAMIC_GEO_BIT)
+	geo := scene.path_geos[tube - SCENE_GEO_BIT]
+	verts := scene.path_vertices[geo.first_vertex:][:geo.vertex_count]
+	indices := scene.path_indices[geo.first_index:][:geo.index_count]
+	bad := 0
+	for i := 0; i + 2 < len(indices); i += 3 {
+		a, b, c := verts[indices[i]], verts[indices[i + 1]], verts[indices[i + 2]]
+		if linalg.dot(linalg.cross(b.position - a.position, c.position - a.position), a.normal + b.normal + c.normal) < 0 {
+			bad += 1
+		}
+	}
+	testing.expectf(t, bad == 0, "tube: %d triangles wound inward", bad)
+	append(&scene.draws, Draw{tube, compose(), MATERIAL_DEFAULT})
+
+	id, errs := shader(&shaders, "void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }", "void main() { gl_FragColor = vec4(instanceColor * (instanceId + 1.0), 1.0); }")
+	testing.expectf(t, id != 0 && errs == "", "errors: %s", errs)
+	m := MATERIAL_DEFAULT
+	m.shader = id
+	append(&scene.draws, Draw{capsule(&g, 0.5, 1), compose(), m})
+	scene_set_draw_instances(&scene, 1, scene_instances(&scene, {{transform = compose()}, {transform = compose({2, 0, 0}), color = {1, 0, 0}, has_color = true}}))
+
+	view, proj := linalg.MATRIX4F32_IDENTITY, linalg.MATRIX4F32_IDENTITY
+	out := expand_draws(&exp, &scene, &g, view, proj, 64, 64)
+	testing.expect_value(t, len(out.draws), 3)
+	testing.expect(t, out.draws[0].geometry >= DYNAMIC_GEO_BIT)
+
+	blocks: Shader_Blocks
+	defer shader_blocks_destroy(&blocks)
+	shader_blocks(out, &shaders, view, proj, &blocks)
+	sh := shader_get(&shaders, id)
+	color_at, id_at := sh.builtins[.Fragment][.Instance_Color], sh.builtins[.Fragment][.Instance_Id]
+	testing.expect(t, color_at >= 0 && id_at >= 0)
+	want := [2]struct {
+		color: Vec3,
+		id:    f32,
+	}{{{1, 1, 1}, 0}, {{1, 0, 0}, 1}}
+	for w, k in want {
+		block := blocks.bytes[blocks.at[1 + k][.Fragment]:]
+		color := (^Vec3)(&block[color_at])^
+		index := (^f32)(&block[id_at])^
+		testing.expectf(t, linalg.length(color - w.color) < 1e-5 && index == w.id, "instance %d: instanceColor %v, instanceId %v", k, color, index)
+	}
+}

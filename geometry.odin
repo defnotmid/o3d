@@ -158,6 +158,7 @@ Primitive :: enum u8 {
 	Plane,
 	Cylinder,
 	Torus,
+	Capsule,
 }
 
 PARAMS :: 7
@@ -179,6 +180,7 @@ PRIMITIVES := [Primitive]Builder {
 	.Plane    = build_plane,
 	.Cylinder = build_cylinder,
 	.Torus    = build_torus,
+	.Capsule  = build_capsule,
 }
 
 Geometries :: struct {
@@ -394,6 +396,13 @@ cylinder :: proc(g: ^Geometries, radius_top: f32 = 1, radius_bottom: f32 = 1, he
 	return primitive(g, {.Cylinder, {radius_top, radius_bottom, height, f32(max(radial_segments, 3)), f32(max(height_segments, 1)), 1 if open_ended else 0, 0}})
 }
 
+// CapsuleGeometry(radius, height, capSegments, radialSegments): along Y,
+// `height` the straight middle (the caps add a radius at each end), as
+// physics3d's capsule.
+capsule :: proc(g: ^Geometries, radius: f32 = 1, height: f32 = 1, cap_segments := 4, radial_segments := 8) -> Geometry_Id {
+	return primitive(g, {.Capsule, {radius, height, f32(max(cap_segments, 1)), f32(max(radial_segments, 3)), 0, 0, 0}})
+}
+
 // TorusGeometry(radius, tube, radialSegments, tubularSegments): in the XY
 // plane around Z.
 torus :: proc(g: ^Geometries, radius: f32 = 1, tube: f32 = 0.4, radial_segments := 12, tubular_segments := 48) -> Geometry_Id {
@@ -563,6 +572,44 @@ build_torus :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 			c := u32((ts + 1) * (j - 1) + i)
 			d := u32((ts + 1) * j + i)
 			append(idx, a, b, d, b, c, d)
+		}
+	}
+}
+
+@(private = "file")
+build_capsule :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
+	r := max(p[0], 1e-5)
+	half := max(p[1], 0) * 0.5
+	cs := int(p[2])
+	rs := int(p[3])
+	// Rows from the top pole to the bottom one: cs on each cap, the two
+	// equators joined by the straight middle.
+	rows := 2 * cs + 1
+	total := 2 * (r + half)
+	for iy in 0 ..= rows {
+		top := iy <= cs
+		theta := f32(iy if top else iy - 1) / f32(2 * cs) * math.PI
+		y := half if top else -half
+		for ix in 0 ..= rs {
+			u := f32(ix) / f32(rs)
+			phi := u * 2 * math.PI
+			n := Vec3{-math.cos(phi) * math.sin(theta), math.cos(theta), math.sin(phi) * math.sin(theta)}
+			pos := n * r + Vec3{0, y, 0}
+			append(verts, Vertex{position = pos, normal = n, uv = {u, (pos.y + r + half) / total}})
+		}
+	}
+	for iy in 0 ..< rows {
+		for ix in 0 ..< rs {
+			a := u32(iy * (rs + 1) + ix + 1)
+			b := u32(iy * (rs + 1) + ix)
+			c := u32((iy + 1) * (rs + 1) + ix)
+			d := u32((iy + 1) * (rs + 1) + ix + 1)
+			if iy != 0 {
+				append(idx, a, b, d)
+			}
+			if iy != rows - 1 {
+				append(idx, b, c, d)
+			}
 		}
 	}
 }

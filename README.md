@@ -40,8 +40,9 @@ What is known about three.js carries over:
   GLSL 1 style with `attribute`, `varying` and `gl_FragColor`, or GLSL 3 with
   `glsl3 = true`), with three.js's built-in uniforms (`modelMatrix`,
   `modelViewMatrix`, `projectionMatrix`, `viewMatrix`, `normalMatrix`,
-  `cameraPosition`, `isOrthographic`) and attributes (`position`, `normal`,
-  `uv`), compiled by [oksl](https://github.com/defnotmid/oksl) on both
+  `cameraPosition`, `isOrthographic`, plus `instanceColor` and `instanceId`:
+  an instanced draw's instance colour, white without one, and 0-based index)
+  and attributes (`position`, `normal`, `uv`), compiled by [oksl](https://github.com/defnotmid/oksl) on both
   renderers. The output is written as the shader leaves it; `.Transparent`
   blends it, `side` culls as for any material. `projectionMatrix` maps depth to
   0..1 (SDL_GPU's clip space) rather than WebGL's -1..1, which matters only to
@@ -67,7 +68,9 @@ What is known about three.js carries over:
   morphed and skinned meshes) but do not receive.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
-  (radiusTop 0 is a cone), `torus`, plus `line_segments(positions)` (pairs of
+  (radiusTop 0 is a cone), `torus`, `capsule(radius, height, capSegments,
+  radialSegments)`, plus `scene_tube(scene, points, radius, radialSegments,
+  closed)` (a per-frame lit tube through the points), `line_segments(positions)` (pairs of
   endpoints), `polyline(positions, closed)` (connected path),
   `wireframe(src)` (edges of a triangle mesh), and `points(positions)` (point
   clouds). Any triangle geometry can also be drawn as wireframe lines or

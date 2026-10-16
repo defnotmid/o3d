@@ -234,6 +234,9 @@ Scene :: struct {
 	joints:                [dynamic]Mat4,
 	// Morphed draws' target weights: draw i's are morph_weights[draw_morphs[i].first:][:draw_morphs[i].count].
 	draw_morphs:           [dynamic]Morph_Range,
+	// Which instance each draw is (0-based), filled by expand_draws; a draw
+	// past its end is instance 0.
+	draw_instance_ids:     [dynamic]i32,
 	morph_weights:         [dynamic]f32,
 	// Instanced draws' instances: draw i's are instances[draw_instances[i].first:][:draw_instances[i].count].
 	draw_instances:        [dynamic]Instance_Range,
@@ -261,6 +264,7 @@ scene_clear :: proc(s: ^Scene) {
 	clear(&s.draw_joints)
 	clear(&s.joints)
 	clear(&s.draw_morphs)
+	clear(&s.draw_instance_ids)
 	clear(&s.morph_weights)
 	clear(&s.draw_instances)
 	clear(&s.instances)
@@ -326,6 +330,85 @@ scene_polyline :: proc(s: ^Scene, positions: []Vec3, closed := false) -> Geometr
 		index_count  = u32(segs * 2),
 		mode         = .Lines,
 		radius       = r,
+	})
+	return id
+}
+
+// Per-frame TubeGeometry in `s`: a tube of `radius` swept along `points`
+// (`radial_segments` around, its frame carried along the curve without
+// twisting), capped unless `closed`. Triangles, lit and shaded like any mesh.
+scene_tube :: proc(s: ^Scene, points: []Vec3, radius: f32 = 0.08, radial_segments := 12, closed := false) -> Geometry_Id {
+	n := len(points)
+	if n < 2 {
+		return 0
+	}
+	rs := max(radial_segments, 3)
+	r := max(radius, 1e-5)
+	rings := n + (1 if closed else 0)
+	caps := 0 if closed else 2
+	first_v := u32(len(s.path_vertices))
+	first_i := u32(len(s.path_indices))
+	n_verts := rings * (rs + 1) + caps
+	n_idx := (rings - 1) * rs * 6 + caps * rs * 3
+	table_grow_non_zero(&s.path_vertices, int(first_v) + n_verts)
+	table_grow_non_zero(&s.path_indices, int(first_i) + n_idx)
+	verts := s.path_vertices[first_v:][:n_verts]
+	idx := s.path_indices[first_i:][:n_idx]
+	tangent :: proc(points: []Vec3, i: int, closed: bool) -> Vec3 {
+		n := len(points)
+		prev := points[(i - 1 + n) % n] if closed else points[max(i - 1, 0)]
+		next := points[(i + 1) % n] if closed else points[min(i + 1, n - 1)]
+		d := next - prev
+		l := linalg.length(d)
+		return d / l if l > 1e-6 else {0, 1, 0}
+	}
+	t0 := tangent(points, 0, closed)
+	normal := linalg.normalize(linalg.cross(Vec3{0, 1, 0} if abs(t0.y) < 0.9 else Vec3{1, 0, 0}, t0))
+	rad: f32
+	for i in 0 ..< rings {
+		p := points[i % n]
+		t := tangent(points, i % n, closed)
+		// The previous ring's normal, turned onto this tangent's plane.
+		if proj := normal - t * linalg.dot(normal, t); linalg.length(proj) > 1e-5 {
+			normal = linalg.normalize(proj)
+		}
+		binormal := linalg.cross(t, normal)
+		for k in 0 ..= rs {
+			u := f32(k) / f32(rs)
+			nv := normal * math.cos(u * 2 * math.PI) + binormal * math.sin(u * 2 * math.PI)
+			verts[i * (rs + 1) + k] = {position = p + nv * r, normal = nv, uv = {u, f32(i) / f32(rings - 1)}}
+		}
+		rad = max(rad, linalg.length(p) + r)
+	}
+	w := 0
+	for i in 0 ..< rings - 1 {
+		row0, row1 := u32(i * (rs + 1)), u32((i + 1) * (rs + 1))
+		for k in 0 ..< rs {
+			a, b := row0 + u32(k), row0 + u32(k + 1)
+			c, d := row1 + u32(k), row1 + u32(k + 1)
+			idx[w], idx[w + 1], idx[w + 2], idx[w + 3], idx[w + 4], idx[w + 5] = a, b, c, b, d, c
+			w += 6
+		}
+	}
+	if !closed {
+		start, end := u32(rings * (rs + 1)), u32(rings * (rs + 1) + 1)
+		last := u32((rings - 1) * (rs + 1))
+		verts[start] = {position = points[0], normal = -t0, uv = {0.5, 0}}
+		verts[end] = {position = points[n - 1], normal = tangent(points, n - 1, false), uv = {0.5, 1}}
+		for k in 0 ..< rs {
+			idx[w], idx[w + 1], idx[w + 2] = start, u32(k + 1), u32(k)
+			idx[w + 3], idx[w + 4], idx[w + 5] = end, last + u32(k), last + u32(k + 1)
+			w += 6
+		}
+	}
+	id := SCENE_GEO_BIT + Geometry_Id(len(s.path_geos))
+	append(&s.path_geos, Geometry{
+		first_vertex = first_v,
+		vertex_count = u32(n_verts),
+		first_index  = first_i,
+		index_count  = u32(n_idx),
+		mode         = .Triangles,
+		radius       = rad,
 	})
 	return id
 }
@@ -502,6 +585,7 @@ scene_destroy :: proc(s: ^Scene) {
 	delete(s.draw_joints)
 	delete(s.joints)
 	delete(s.draw_morphs)
+	delete(s.draw_instance_ids)
 	delete(s.morph_weights)
 	delete(s.draw_instances)
 	delete(s.instances)
@@ -633,9 +717,21 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 		insts := scene_draw_instances(scene, di)
 		mode := effective_draw_mode(d.material, geo)
 		if mode == .Triangles {
+			src_geo := d.geometry
+			if d.geometry >= SCENE_GEO_BIT {
+				// A per-frame mesh (scene_tube): into the expanded geometry the
+				// renderers draw.
+				src_v, src_i, _ := scene_geometry_mesh(scene, geos, d.geometry)
+				first_v := u32(len(exp.vertices))
+				first_i := u32(len(exp.indices))
+				append(&exp.vertices, ..src_v)
+				append(&exp.indices, ..src_i)
+				d.geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos))
+				append(&exp.geos, Geometry{first_vertex = first_v, vertex_count = u32(len(src_v)), first_index = first_i, index_count = u32(len(src_i)), radius = geo.radius})
+			}
 			outline_geo_id := Geometry_Id(0)
 			if d.material.outline_width > 0 && d.material.side == .Front {
-				raw_verts, raw_idx, m_ok := scene_geometry_mesh(scene, geos, d.geometry)
+				raw_verts, raw_idx, m_ok := scene_geometry_mesh(scene, geos, src_geo)
 				if m_ok && len(raw_verts) > 0 && len(raw_idx) > 0 {
 					skin := geometry_skin(geos, d.geometry) if d.geometry < SCENE_GEO_BIT else nil
 					joints := scene_draw_joints(scene, di)
@@ -691,7 +787,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 				}
 			} else {
 				base_lin := linear(d.material.color)
-				for inst in insts {
+				for inst, k in insts {
 					idraw := d
 					idraw.model = d.model * inst.transform
 					if inst.has_color || inst.color != {} {
@@ -699,6 +795,8 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 					}
 					ei := len(out.draws)
 					append(&out.draws, idraw)
+					table_grow(&out.draw_instance_ids, ei + 1)
+					out.draw_instance_ids[ei] = i32(k)
 					scene_set_draw_joints(out, ei, j_range)
 					scene_set_draw_morphs(out, ei, m_range)
 					if outline_geo_id != 0 {

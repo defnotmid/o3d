@@ -37,6 +37,10 @@ Builtin :: enum u8 {
 	Normal_Matrix, // of the model-view matrix, as three.js's
 	Camera_Position,
 	Is_Orthographic,
+	// An instanced draw's instance: its colour (white without one) and
+	// 0-based index.
+	Instance_Color,
+	Instance_Id,
 }
 
 @(rodata)
@@ -51,6 +55,8 @@ BUILTINS := [Builtin]struct {
 	.Normal_Matrix     = {"normalMatrix", "mat3", false},
 	.Camera_Position   = {"cameraPosition", "vec3", true},
 	.Is_Orthographic   = {"isOrthographic", "bool", true},
+	.Instance_Color    = {"instanceColor", "vec3", true},
+	.Instance_Id       = {"instanceId", "float", true},
 }
 
 // The vertex attributes a shader may read, where they are in a `Vertex`.
@@ -296,6 +302,10 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, out: ^
 					put(dst, scene.camera.position)
 				case .Is_Orthographic:
 					put(dst, u32(1 if scene.camera.orthographic else 0))
+				case .Instance_Color:
+					put(dst, m.color)
+				case .Instance_Id:
+					put(dst, f32(scene.draw_instance_ids[i] if i < len(scene.draw_instance_ids) else 0))
 				}
 			}
 			for u in scene.uniforms[m.uniforms.first:][:m.uniforms.count] {
