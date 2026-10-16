@@ -79,6 +79,10 @@ test_morph_matches_software :: proc(t: ^testing.T) {expect_parity(t, "morph")}
 @(test)
 test_manim_matches_software :: proc(t: ^testing.T) {expect_parity(t, "manim")}
 
+// CapsuleGeometry, a per-frame tube, and instanceColor / instanceId.
+@(test)
+test_shapes_matches_software :: proc(t: ^testing.T) {expect_parity(t, "shapes")}
+
 // One GPU through every case in turn, as tools/gpu_check and a host that
 // remakes its tables use it: each case's new tables (ids and sizes reused)
 // replace what the GPU mirrored, so nothing stale is drawn or read.

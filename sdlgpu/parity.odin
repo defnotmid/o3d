@@ -43,6 +43,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"skinned", 160, 120, build_skinned},
 	{"morph", 160, 120, build_morph},
 	{"manim", 200, 150, build_manim},
+	{"shapes", 200, 150, build_shapes},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -694,5 +695,43 @@ build_manim :: proc(a: ^Parity_Assets) -> string {
 	return ""
 }
 
+// A capsule, a per-frame tube, and a ShaderMaterial's instances styled by
+// instanceColor and instanceId.
+@(private = "file")
+build_shapes :: proc(a: ^Parity_Assets) -> string {
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {0, 0.6, 4}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 30}
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {2, 3, 4}})
+	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
 
+	cap_mat := o3d.MATERIAL_DEFAULT
+	cap_mat.color, cap_mat.roughness = {0.2, 0.8, 0.55}, 0.4
+	append(&a.scene.draws, o3d.Draw{o3d.capsule(&a.geos, 0.3, 0.7, 6, 16), o3d.compose({-1.2, 0, 0}, {0, 0, 0.5}), cap_mat})
 
+	pts: [16]o3d.Vec3
+	for i in 0 ..< len(pts) {
+		t := f32(i) / f32(len(pts) - 1)
+		pts[i] = {0.5 * math.cos(t * math.TAU), -0.8 + 1.6 * t, 0.5 * math.sin(t * math.TAU)}
+	}
+	tube_mat := o3d.MATERIAL_DEFAULT
+	tube_mat.color, tube_mat.roughness = {1, 0.75, 0.2}, 0.5
+	append(&a.scene.draws, o3d.Draw{o3d.scene_tube(&a.scene, pts[:], 0.08, 10), o3d.compose(), tube_mat})
+
+	id, errors := o3d.shader(&a.shaders,
+		"varying vec3 vNormal; void main() { vNormal = normalMatrix * normal; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+		"varying vec3 vNormal; void main() { float l = 0.4 + 0.6 * max(dot(normalize(vNormal), vec3(0.0, 0.0, 1.0)), 0.0); gl_FragColor = vec4(instanceColor * l * (0.5 + 0.25 * instanceId), 1.0); }")
+	if id == 0 || errors != "" {
+		return errors
+	}
+	sh_mat := o3d.MATERIAL_DEFAULT
+	sh_mat.shader = id
+	di := len(a.scene.draws)
+	append(&a.scene.draws, o3d.Draw{o3d.box(&a.geos, 0.3, 0.3, 0.3), o3d.compose({1.2, 0, 0}), sh_mat})
+	insts := [3]o3d.Instance {
+		{transform = o3d.compose({0, -0.5, 0}, {0.3, 0.4, 0}), color = {1, 0.3, 0.4}, has_color = true},
+		{transform = o3d.compose({0, 0, 0}, {0.3, 0.8, 0})},
+		{transform = o3d.compose({0, 0.5, 0}, {0.3, 1.2, 0}), color = {0.3, 0.6, 1}, has_color = true},
+	}
+	o3d.scene_set_draw_instances(&a.scene, di, o3d.scene_instances(&a.scene, insts[:]))
+	return ""
+}

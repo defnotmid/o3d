@@ -367,8 +367,10 @@ For onimite:
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
 
-Metal: v0.0.1's standard shader did not compile there (a texel `Load` on
-a combined texture-sampler, which Slang emits wrongly for MSL; the shadow
-map is now sampled at texel centres). Run `tools/gpu_check` on macOS to
-confirm every case before relying on it.
+Metal: checked on an Apple Silicon Mac (macOS 27) at v0.0.11:
+`tools/gpu_check` matches the software renderer in all 10 cases (54 to
+87 dB PSNR), and onimite's notarized macOS release draws its 3D examples
+on Metal as on the CPU. (v0.0.1's standard shader did not compile there:
+a texel `Load` on a combined texture-sampler, which Slang emits wrongly
+for MSL; the shadow map is now sampled at texel centres.)
 
