@@ -30,6 +30,9 @@ Error :: enum u8 {
 	// No GPU device, or it can't do what is asked.
 	Device,
 	Shader,
+	// A GPU render recorded without its prepare (o3d_sdlgpu.record), or
+	// after another prepare started the tables' mirrors over.
+	Not_Prepared,
 }
 
 // ---- transforms -------------------------------------------------------------------------

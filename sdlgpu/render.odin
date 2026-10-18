@@ -34,52 +34,107 @@ sync_mirrors :: proc(g: ^GPU, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, text
 	}
 }
 
-// Uploads what `geos` added since the last frame (in a copy pass of `cmd`).
-@(private)
-upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
-	vertices := mem.slice_to_bytes(geos.vertices[:])
-	skin_vertices := mem.slice_to_bytes(geos.skin_vertices[:])
-	morph_deltas := mem.slice_to_bytes(geos.morph_deltas[:])
-	indices := mem.slice_to_bytes(geos.indices[:])
-	if u32(len(vertices)) == g.vertices.uploaded && u32(len(skin_vertices)) == g.skin_vertices.uploaded && u32(len(morph_deltas)) == g.morph_deltas.uploaded && u32(len(indices)) == g.indices.uploaded {
-		return nil
+// A render in two steps, for a host recording it at a point of its own
+// command stream where nothing may be made (making a GPU resource may
+// submit): `prepare` makes and uploads everything the scene's render needs,
+// in a command buffer of its own that it submits; `record` then records the
+// passes into the host's command buffer, making nothing. A job holds what one
+// render prepared, so a frame's several renders can each be prepared ahead and
+// recorded later in any order, once per prepare. Until then its scene and
+// tables stay as prepared, and the host's external textures may be bound up
+// to `record`. The jobs of one GPU share its mirrors of the tables (so the
+// jobs prepared together draw from the same tables) and its frame targets
+// (grown to the largest job); each job has its own shadow maps and per-frame
+// buffers. A job is reused frame after frame (what it made only grows), and
+// `job_destroy` frees it.
+Job :: struct {
+	// As prepared: the scene drawn (the caller's, or its expansion in
+	// `expanded`), its tables and the tables' generations then.
+	scene:                ^o3d.Scene,
+	geos:                 ^o3d.Geometries,
+	shaders:              ^o3d.Shaders,
+	mirrored:             Mirrored,
+	width, height:        u32,
+	prepared:             bool,
+	view_proj:            o3d.Mat4,
+	lighting:             Lighting_Uniforms,
+	env:                  o3d.Shading_Environment,
+	background:           o3d.Texture_Id,
+	bg_params:            [4]f32, // intensity, mip level, tone mapping, exposure
+	shadows:              [o3d.MAX_SHADOWS]o3d.Shadow,
+	shadow_count:         int,
+	// Per shadow: its casters, its map (depth per texel, read by the main
+	// pass) and the map's depth buffer at `shadow_sizes` squared.
+	casters:              [o3d.MAX_SHADOWS][dynamic]int,
+	shadow_maps:          [o3d.MAX_SHADOWS]^sdl.GPUTexture,
+	shadow_depths:        [o3d.MAX_SHADOWS]^sdl.GPUTexture,
+	shadow_sizes:         [o3d.MAX_SHADOWS]u32,
+	order:                [dynamic]int,
+	materials:            [dynamic]o3d.Shading_Material, // per draw
+	blocks:               o3d.Shader_Blocks,
+	expanded:             o3d.Expanded_Draws,
+	custom_skinned_verts: [dynamic]o3d.Vertex,
+	custom_skinned_first: [dynamic]i32,
+	// The expanded line/point geometry and ShaderMaterials' posed vertices.
+	dynamic_vertices:     Pool_Buffer,
+	dynamic_indices:      Pool_Buffer,
+	custom_skinned:       Pool_Buffer,
+}
+
+job_destroy :: proc(g: ^GPU, job: ^Job) {
+	for idx in 0 ..< o3d.MAX_SHADOWS {
+		release_shadow_slot(g, job, idx)
+		delete(job.casters[idx])
 	}
-	pass := sdl.BeginGPUCopyPass(cmd)
-	defer sdl.EndGPUCopyPass(pass)
-	upload_pool(g, &g.vertices, {.VERTEX}, vertices, pass) or_return
-	upload_pool(g, &g.skin_vertices, {.VERTEX}, skin_vertices, pass) or_return
-	upload_pool(g, &g.morph_deltas, {.GRAPHICS_STORAGE_READ}, morph_deltas, pass) or_return
-	upload_pool(g, &g.indices, {.INDEX}, indices, pass) or_return
+	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned}) {
+		if b.buffer != nil {
+			sdl.ReleaseGPUBuffer(g.device, b.buffer)
+		}
+	}
+	delete(job.order)
+	delete(job.materials)
+	o3d.shader_blocks_destroy(&job.blocks)
+	o3d.expanded_draws_destroy(&job.expanded)
+	delete(job.custom_skinned_verts)
+	delete(job.custom_skinned_first)
+	job^ = {}
+}
+
+// Uploads what `geos` added since the last frame.
+@(private = "file")
+upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, pass: ^sdl.GPUCopyPass) -> o3d.Error {
+	upload_pool(g, &g.vertices, {.VERTEX}, mem.slice_to_bytes(geos.vertices[:]), pass) or_return
+	upload_pool(g, &g.skin_vertices, {.VERTEX}, mem.slice_to_bytes(geos.skin_vertices[:]), pass) or_return
+	upload_pool(g, &g.morph_deltas, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(geos.morph_deltas[:]), pass) or_return
+	upload_pool(g, &g.indices, {.INDEX}, mem.slice_to_bytes(geos.indices[:]), pass) or_return
 	return nil
 }
 
-// Uploads per-frame expanded line/point geometry when present.
+// Uploads the job's expanded line/point geometry when present.
 @(private = "file")
-upload_dynamic :: proc(g: ^GPU, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
-	if len(g.expanded.vertices) == 0 || len(g.expanded.indices) == 0 {
+upload_dynamic :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPUCopyPass) -> o3d.Error {
+	if len(job.expanded.vertices) == 0 || len(job.expanded.indices) == 0 {
 		return nil
 	}
-	g.dynamic_vertices.uploaded = 0
-	g.dynamic_indices.uploaded = 0
-	pass := sdl.BeginGPUCopyPass(cmd)
-	defer sdl.EndGPUCopyPass(pass)
-	upload_pool(g, &g.dynamic_vertices, {.VERTEX}, mem.slice_to_bytes(g.expanded.vertices[:]), pass) or_return
-	upload_pool(g, &g.dynamic_indices, {.INDEX}, mem.slice_to_bytes(g.expanded.indices[:]), pass) or_return
+	job.dynamic_vertices.uploaded = 0
+	job.dynamic_indices.uploaded = 0
+	upload_pool(g, &job.dynamic_vertices, {.VERTEX}, mem.slice_to_bytes(job.expanded.vertices[:]), pass) or_return
+	upload_pool(g, &job.dynamic_indices, {.INDEX}, mem.slice_to_bytes(job.expanded.indices[:]), pass) or_return
 	return nil
 }
 
 // When a morphed or skinned draw uses a ShaderMaterial, morphs and skins its
-// vertices into `g.custom_skinned` before the render pass so the user's vertex
-// shader receives posed positions and normals.
+// vertices into `job.custom_skinned` before the render pass so the user's
+// vertex shader receives posed positions and normals.
 @(private = "file")
-upload_custom_skinned :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
-	clear(&g.custom_skinned_verts)
-	o3d.table_grow_non_zero(&g.custom_skinned_first, len(scene.draws))
-	for &f in g.custom_skinned_first {
+upload_custom_skinned :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, pass: ^sdl.GPUCopyPass) -> o3d.Error {
+	clear(&job.custom_skinned_verts)
+	o3d.table_grow_non_zero(&job.custom_skinned_first, len(scene.draws))
+	for &f in job.custom_skinned_first {
 		f = -1
 	}
-	for di in g.order {
-		if g.materials[di].shader == 0 {
+	for di in job.order {
+		if job.materials[di].shader == 0 {
 			continue
 		}
 		d := &scene.draws[di]
@@ -100,8 +155,8 @@ upload_custom_skinned :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries,
 			continue
 		}
 		verts, _, _ := o3d.geometry_mesh(geos, d.geometry)
-		first := len(g.custom_skinned_verts)
-		o3d.table_grow_non_zero(&g.custom_skinned_verts, first + len(verts))
+		first := len(job.custom_skinned_verts)
+		o3d.table_grow_non_zero(&job.custom_skinned_verts, first + len(verts))
 		deltas := geos.morph_deltas[:]
 		for vtx, i in verts {
 			v := vtx
@@ -111,17 +166,15 @@ upload_custom_skinned :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries,
 			if skinned {
 				v.position, v.normal = o3d.skin_vertex(v, skin[i], joints)
 			}
-			g.custom_skinned_verts[first + i] = v
+			job.custom_skinned_verts[first + i] = v
 		}
-		g.custom_skinned_first[di] = i32(first)
+		job.custom_skinned_first[di] = i32(first)
 	}
-	if len(g.custom_skinned_verts) == 0 {
+	if len(job.custom_skinned_verts) == 0 {
 		return nil
 	}
-	g.custom_skinned.uploaded = 0
-	pass := sdl.BeginGPUCopyPass(cmd)
-	defer sdl.EndGPUCopyPass(pass)
-	return upload_pool(g, &g.custom_skinned, {.VERTEX}, mem.slice_to_bytes(g.custom_skinned_verts[:]), pass)
+	job.custom_skinned.uploaded = 0
+	return upload_pool(g, &job.custom_skinned, {.VERTEX}, mem.slice_to_bytes(job.custom_skinned_verts[:]), pass)
 }
 
 @(private = "file")
@@ -194,33 +247,30 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 }
 
 // The shadow pass: the casters' depth from a shadow light into its map.
-@(private)
-draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, idx: int, shadow: ^o3d.Shadow, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
-	if !ensure_shadow(g, idx, u32(shadow.size)) {
-		return .Out_Of_Memory
-	}
-	o3d.shadow_casters(scene, geos, shaders, shadow, &g.casters, &g.expanded)
-	color := sdl.GPUColorTargetInfo{texture = g.shadow_maps[idx], clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
-	depth := sdl.GPUDepthStencilTargetInfo{texture = g.shadow_depths[idx], clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+@(private = "file")
+draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
+	scene, geos, shadow := job.scene, job.geos, &job.shadows[idx]
+	color := sdl.GPUColorTargetInfo{texture = job.shadow_maps[idx], clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = job.shadow_depths[idx], clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	defer sdl.EndGPURenderPass(pass)
-	if g.vertices.buffer == nil && g.dynamic_vertices.buffer == nil {
-		return nil
+	if g.vertices.buffer == nil && job.dynamic_vertices.buffer == nil {
+		return
 	}
 	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	bound: ^sdl.GPUGraphicsPipeline
 	bound_vb: ^sdl.GPUBuffer
 	bound_ib: ^sdl.GPUBuffer
-	for di in g.casters {
-		m := &g.materials[di]
+	for di in job.casters[idx] {
+		m := &job.materials[di]
 		if .Alpha_Mask in m.flags && .Color_Map not_in m.flags && m.opacity < m.alpha_cutoff {
 			continue
 		}
 		d := &scene.draws[di]
-		geo, _ := o3d.geometry_get_any(geos, &g.expanded, d.geometry) // shadow_casters kept only draws with geometry
+		geo, _ := o3d.geometry_get_any(geos, &job.expanded, d.geometry) // shadow_casters kept only draws with geometry
 		dyn := d.geometry >= o3d.DYNAMIC_GEO_BIT
-		vbuf := g.dynamic_vertices.buffer if dyn else g.vertices.buffer
-		ibuf := g.dynamic_indices.buffer if dyn else g.indices.buffer
+		vbuf := job.dynamic_vertices.buffer if dyn else g.vertices.buffer
+		ibuf := job.dynamic_indices.buffer if dyn else g.indices.buffer
 		if vbuf == nil || ibuf == nil {
 			continue
 		}
@@ -264,18 +314,15 @@ draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: 
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 		}
 	}
-	return nil
 }
 
 // Uploads what `textures` added since the last frame (all mip levels per
 // texture); an external texture's slot stays nil (its texture is bound).
-@(private)
-upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
+@(private = "file")
+upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, pass: ^sdl.GPUCopyPass) -> o3d.Error {
 	if textures == nil || len(textures.list) <= len(g.textures) {
 		return nil
 	}
-	pass := sdl.BeginGPUCopyPass(cmd)
-	defer sdl.EndGPUCopyPass(pass)
 	for tex in textures.list[len(g.textures):] {
 		if tex.external {
 			append(&g.textures, nil)
@@ -329,54 +376,75 @@ tex_binding :: #force_inline proc "contextless" (g: ^GPU, id: o3d.Texture_Id, sa
 	return {texture = tex, sampler = sampler if sampler != nil else g.linear_sampler}
 }
 
-// Draws `scene` into `out` (made by `target`, `width x height`). With `cmd`
-// the work is recorded into it (the caller submits); else it is submitted
-// and waited for.
+// Draws `scene` into `out` (made by `target`, `width x height`): `prepare`
+// and `record` with the GPU's own job. With `cmd` the passes are recorded into
+// it (the caller submits); else they are submitted and waited for.
 render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, out: ^sdl.GPUTexture, width, height: u32, cmd: ^sdl.GPUCommandBuffer = nil, textures: ^o3d.Textures = nil) -> o3d.Error {
+	prepare(g, &g.job, scene, geos, shaders, width, height, textures) or_return
+	if cmd != nil {
+		return record(g, &g.job, out, cmd)
+	}
+	own := sdl.AcquireGPUCommandBuffer(g.device)
+	if own == nil {
+		return .Device
+	}
+	if err := record(g, &g.job, out, own); err != nil {
+		_ = sdl.CancelGPUCommandBuffer(own)
+		return err
+	}
+	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(own)
+	if fence == nil {
+		return .Device
+	}
+	_ = sdl.WaitForGPUFences(g.device, true, &fence, 1)
+	sdl.ReleaseGPUFence(g.device, fence)
+	return nil
+}
+
+// Prepares `job` to draw `scene` at `width x height` (see `Job`): the frame
+// targets, the job's shadow maps and buffers, the tables' mirrors and
+// ShaderMaterials' pipelines are made, and what is new uploaded, in a command
+// buffer it submits (SDL_GPU runs submissions in order, so before the
+// host's command buffer that records the job).
+prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, width, height: u32, textures: ^o3d.Textures = nil) -> o3d.Error {
+	job.prepared = false
 	if !ensure_targets(g, width, height) {
 		return .Out_Of_Memory
 	}
-	own := cmd == nil
-	cmd := cmd
-	if own {
-		cmd = sdl.AcquireGPUCommandBuffer(g.device)
-		if cmd == nil {
-			return .Device
-		}
-	}
 	sync_mirrors(g, geos, shaders, textures)
-	env := o3d.shading_environment(scene, textures)
-	bg_tex, bg_intensity, bg_lod := o3d.shading_background(scene, textures)
-	upload_geometry(g, geos, cmd) or_return
-	upload_textures(g, textures, cmd) or_return
+	job.env = o3d.shading_environment(scene, textures)
+	bg_intensity, bg_lod: f32
+	job.background, bg_intensity, bg_lod = o3d.shading_background(scene, textures)
 
 	view, proj := o3d.camera_matrices(scene.camera, int(width), int(height))
-	view_proj := proj * view
-	active := o3d.expand_draws(&g.expanded, scene, geos, view, proj, int(width), int(height))
-	upload_dynamic(g, cmd) or_return
-
+	active := o3d.expand_draws(&job.expanded, scene, geos, view, proj, int(width), int(height))
 	lights: [o3d.MAX_LIGHTS]o3d.Shading_Light
 	nl := o3d.shading_lights(active.lights[:], &lights)
-	o3d.shading_materials(o3d.scene_materials(active), &g.materials, textures)
-	o3d.shader_blocks(active, shaders, view, proj, &g.blocks)
-	shadows: [o3d.MAX_SHADOWS]o3d.Shadow
-	ns := o3d.frame_shadows(active, &shadows)
+	o3d.shading_materials(o3d.scene_materials(active), &job.materials, textures)
+	o3d.shader_blocks(active, shaders, view, proj, &job.blocks)
+	ns := o3d.frame_shadows(active, &job.shadows)
 	for si in 0 ..< ns {
-		draw_shadow(g, active, geos, shaders, si, &shadows[si], cmd) or_return
+		if !ensure_shadow(g, job, si, u32(job.shadows[si].size)) {
+			return .Out_Of_Memory
+		}
+		o3d.shadow_casters(active, geos, shaders, &job.shadows[si], &job.casters[si], &job.expanded)
 		for &l, li in lights[:nl] {
-			if li == shadows[si].light {
+			if li == job.shadows[si].light {
 				l.shadowed = u32(si + 1)
 			}
 		}
 	}
 	exposure := active.tone_mapping_exposure if active.tone_mapping_exposure > 0 else 1
-	lu: Lighting_Uniforms
+	job.bg_params = {bg_intensity, bg_lod, f32(active.tone_mapping), exposure}
+	lu := &job.lighting
+	lu^ = {}
 	lu.eye = {active.camera.position.x, active.camera.position.y, active.camera.position.z, 0}
 	lu.count = {i32(nl), i32(active.tone_mapping), i32(active.fog.kind), i32(ns)}
 	for si in 0 ..< ns {
-		lu.shadow_matrix[si] = shadows[si].view_proj
-		lu.shadow_params[si] = {f32(shadows[si].size), shadows[si].bias, shadows[si].normal_bias, 0}
+		lu.shadow_matrix[si] = job.shadows[si].view_proj
+		lu.shadow_params[si] = {f32(job.shadows[si].size), job.shadows[si].bias, job.shadows[si].normal_bias, 0}
 	}
+	env := job.env
 	lu.env_params = {env.intensity if env.radiance != 0 else 0, env.max_lod if env.radiance != 0 else 0, exposure, active.fog.density}
 	if active.fog.kind != .None {
 		fc := o3d.linear(active.fog.color)
@@ -394,16 +462,66 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			shadowed = u32(l.shadowed),
 		}
 	}
-
-	o3d.draw_order(active, geos, shaders, view, proj, &g.order, &g.expanded)
-	// ShaderMaterials' pipelines made before the pass, on first use.
-	for di in g.order {
-		m := &g.materials[di]
+	o3d.draw_order(active, geos, shaders, view, proj, &job.order, &job.expanded)
+	for di in job.order {
+		m := &job.materials[di]
 		if m.shader != 0 {
 			custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, .Blended in m.flags)
 		}
 	}
-	upload_custom_skinned(g, active, geos, cmd) or_return
+
+	cmd := sdl.AcquireGPUCommandBuffer(g.device)
+	if cmd == nil {
+		return .Device
+	}
+	pass := sdl.BeginGPUCopyPass(cmd)
+	err := upload_geometry(g, geos, pass)
+	if err == nil {
+		err = upload_textures(g, textures, pass)
+	}
+	if err == nil {
+		err = upload_dynamic(g, job, pass)
+	}
+	if err == nil {
+		err = upload_custom_skinned(g, job, active, geos, pass)
+	}
+	sdl.EndGPUCopyPass(pass)
+	if err != nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		return err
+	}
+	if !sdl.SubmitGPUCommandBuffer(cmd) {
+		return .Device
+	}
+	job.scene, job.geos, job.shaders = active, geos, shaders
+	job.mirrored = g.mirrored
+	job.width, job.height = width, height
+	job.view_proj = proj * view
+	job.shadow_count = ns
+	job.prepared = true
+	return nil
+}
+
+// Records `job` (prepared by `prepare`) into `cmd` and copies the frame to
+// `out` (`target`'s, at least the prepared size): the shadow passes, the main
+// pass and the copy, making nothing. A job records once per prepare;
+// `.Not_Prepared` when it was not prepared, or another job's prepare has
+// since started the tables' mirrors over (other tables) or the targets are
+// smaller than it.
+record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
+	if !job.prepared || job.mirrored != g.mirrored || job.width > g.capacity.x || job.height > g.capacity.y {
+		return .Not_Prepared
+	}
+	job.prepared = false
+	scene, geos, shaders := job.scene, job.geos, job.shaders
+	width, height := job.width, job.height
+	for si in 0 ..< job.shadow_count {
+		draw_shadow(g, job, si, cmd)
+	}
+	shadow_maps: [o3d.MAX_SHADOWS]^sdl.GPUTexture
+	for &m, si in shadow_maps {
+		m = job.shadow_maps[si] if si < job.shadow_count else g.dummy_shadow
+	}
 
 	// Into the targets' top-left width x height (they may be larger), then
 	// copied to `out`.
@@ -418,18 +536,17 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 	sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
 	sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})
 	bound: ^sdl.GPUGraphicsPipeline
-	if bg_tex != 0 {
+	if job.background != 0 {
 		sdl.BindGPUGraphicsPipeline(pass, g.bg_pipeline)
 		bound = g.bg_pipeline
-		bg_binding := tex_binding(g, bg_tex, g.env_sampler)
+		bg_binding := tex_binding(g, job.background, g.env_sampler)
 		sdl.BindGPUFragmentSamplers(pass, 0, &bg_binding, 1)
-		inv_vp := linalg.inverse(view_proj)
+		inv_vp := linalg.inverse(job.view_proj)
 		sdl.PushGPUVertexUniformData(cmd, 0, &inv_vp, size_of(inv_vp))
-		bg_params := [4]f32{bg_intensity, bg_lod, f32(active.tone_mapping), exposure}
-		sdl.PushGPUFragmentUniformData(cmd, 0, &bg_params, size_of(bg_params))
+		sdl.PushGPUFragmentUniformData(cmd, 0, &job.bg_params, size_of(job.bg_params))
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	}
-	sdl.PushGPUFragmentUniformData(cmd, 1, &lu, size_of(lu))
+	sdl.PushGPUFragmentUniformData(cmd, 1, &job.lighting, size_of(job.lighting))
 	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	bound_vb: ^sdl.GPUBuffer
 	bound_ib: ^sdl.GPUBuffer
@@ -439,12 +556,12 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		bound_vb = g.vertices.buffer
 		bound_ib = g.indices.buffer
 	}
-	for di in g.order {
-		d := &active.draws[di]
-		geo, _ := o3d.geometry_get_any(geos, &g.expanded, d.geometry) // draw_order kept only draws with geometry
+	for di in job.order {
+		d := &scene.draws[di]
+		geo, _ := o3d.geometry_get_any(geos, &job.expanded, d.geometry) // draw_order kept only draws with geometry
 		dyn := d.geometry >= o3d.DYNAMIC_GEO_BIT
-		vbuf := g.dynamic_vertices.buffer if dyn else g.vertices.buffer
-		ibuf := g.dynamic_indices.buffer if dyn else g.indices.buffer
+		vbuf := job.dynamic_vertices.buffer if dyn else g.vertices.buffer
+		ibuf := job.dynamic_indices.buffer if dyn else g.indices.buffer
 		if vbuf == nil || ibuf == nil {
 			continue
 		}
@@ -452,10 +569,10 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			sdl.BindGPUIndexBuffer(pass, {buffer = ibuf}, ._32BIT)
 			bound_ib = ibuf
 		}
-		m := &g.materials[di]
+		m := &job.materials[di]
 		blend := .Blended in m.flags
 		if m.shader != 0 {
-			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend)
+			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend, make = false)
 			if p == nil {
 				continue
 			}
@@ -464,21 +581,21 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 				bound = p
 			}
 			for stage in o3d.Shader_Stage {
-				at := g.blocks.at[di][stage]
+				at := job.blocks.at[di][stage]
 				if at < 0 {
 					continue
 				}
 				size := u32(o3d.shader_module(o3d.shader_get(shaders, m.shader), stage).block_size)
 				if stage == .Vertex {
-					sdl.PushGPUVertexUniformData(cmd, 0, &g.blocks.bytes[at], size)
+					sdl.PushGPUVertexUniformData(cmd, 0, &job.blocks.bytes[at], size)
 				} else {
-					sdl.PushGPUFragmentUniformData(cmd, 0, &g.blocks.bytes[at], size)
+					sdl.PushGPUFragmentUniformData(cmd, 0, &job.blocks.bytes[at], size)
 				}
 			}
-			if custom_first := g.custom_skinned_first[di]; custom_first >= 0 && g.custom_skinned.buffer != nil {
-				if bound_vb != g.custom_skinned.buffer {
-					sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = g.custom_skinned.buffer}, 1)
-					bound_vb = g.custom_skinned.buffer
+			if custom_first := job.custom_skinned_first[di]; custom_first >= 0 && job.custom_skinned.buffer != nil {
+				if bound_vb != job.custom_skinned.buffer {
+					sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = job.custom_skinned.buffer}, 1)
+					bound_vb = job.custom_skinned.buffer
 				}
 				sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, custom_first, 0)
 			} else {
@@ -490,7 +607,7 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 			}
 			continue
 		}
-		joints := o3d.scene_draw_joints(active, di)
+		joints := o3d.scene_draw_joints(scene, di)
 		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
 		p := g.skinned_pipelines[d.material.side][1 if blend else 0] if skinned else g.pipelines[d.material.side][1 if blend else 0]
 		if p != bound {
@@ -499,20 +616,20 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 		}
 		samplers := [12]sdl.GPUTextureSamplerBinding {
 			tex_binding(g, m.color_map),
-			{texture = g.shadow_maps[0], sampler = g.shadow_sampler},
+			{texture = shadow_maps[0], sampler = g.shadow_sampler},
 			tex_binding(g, m.normal_map),
 			tex_binding(g, m.roughness_map),
 			tex_binding(g, m.emissive_map),
-			tex_binding(g, env.radiance, g.env_sampler),
-			tex_binding(g, env.irradiance, g.env_sampler),
+			tex_binding(g, job.env.radiance, g.env_sampler),
+			tex_binding(g, job.env.irradiance, g.env_sampler),
 			tex_binding(g, m.metalness_map),
 			tex_binding(g, m.ao_map),
-			{texture = g.shadow_maps[1], sampler = g.shadow_sampler},
-			{texture = g.shadow_maps[2], sampler = g.shadow_sampler},
-			{texture = g.shadow_maps[3], sampler = g.shadow_sampler},
+			{texture = shadow_maps[1], sampler = g.shadow_sampler},
+			{texture = shadow_maps[2], sampler = g.shadow_sampler},
+			{texture = shadow_maps[3], sampler = g.shadow_sampler},
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], len(samplers))
-		du := make_draw_uniforms(view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(active, di))
+		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m)
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
@@ -543,17 +660,8 @@ render :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: ^o3d.
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
 	sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = out}, width, height, 1, false)
 	sdl.EndGPUCopyPass(copy_pass)
-	if own {
-		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
-		if fence == nil {
-			return .Device
-		}
-		_ = sdl.WaitForGPUFences(g.device, true, &fence, 1)
-		sdl.ReleaseGPUFence(g.device, fence)
-	}
 	return nil
 }
-
 // The texture's pixels (RGBA8 premultiplied), for tests and saving.
 read :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height: u32, allocator := context.allocator) -> (pixels: []u8, err: o3d.Error) {
 	size := width * height * 4

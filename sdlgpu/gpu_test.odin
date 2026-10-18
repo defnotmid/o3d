@@ -96,6 +96,19 @@ test_external_texture :: proc(t: ^testing.T) {
 	testing.expectf(t, err == "", "%s", err)
 }
 
+// Jobs prepared together, then recorded in another order into one command
+// buffer: the frames `render` draws, nothing made while recording.
+@(test)
+test_jobs_prepared_then_recorded :: proc(t: ^testing.T) {
+	g: GPU
+	if !test_gpu(t, &g) {
+		return
+	}
+	defer destroy(&g)
+	err := jobs_check(&g)
+	testing.expectf(t, err == "", "%s", err)
+}
+
 // One GPU through every case in turn, as tools/gpu_check and a host that
 // remakes its tables use it: each case's new tables (ids and sizes reused)
 // replace what the GPU mirrored, so nothing stale is drawn or read.

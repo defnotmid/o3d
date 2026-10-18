@@ -140,6 +140,11 @@ o3d_sdlgpu.render(&g, &scene, &geos, &shaders, out, 1920, 1080, cmd, &textures) 
 clip := o3d.texture_add_external(&textures, 1280, 720)   // once; a map like any other
 o3d_sdlgpu.texture_set_external(&g, &textures, clip, frame_texture)   // before each render that draws it
 
+// Recorded at a point of the host's own command stream, where nothing may be made:
+job: o3d_sdlgpu.Job                         // kept per view, reused every frame
+o3d_sdlgpu.prepare(&g, &job, &scene, &geos, &shaders, 1920, 1080, &textures)   // makes and uploads (submits its own copies)
+o3d_sdlgpu.record(&g, &job, out, cmd)      // later, in the host's command buffer: passes only
+
 // CPU: the same pixels, rows banded on the caller's thread pool
 sw: o3d.Software
 pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
@@ -155,7 +160,8 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   device unless `O3D_NO_GPU=1` (CI without a GPU; macOS, below).
 - `odin run tools/gpu_check -collection:deps=.. [-- out_dir]`: every
   GPU-vs-software parity case (`PARITY_CASES`) on the main thread, by PSNR,
-  optionally saving both frames, then the external texture check. On macOS this is the GPU check: SDL's
+  optionally saving both frames, then the external texture and prepared
+  jobs checks. On macOS this is the GPU check: SDL's
   Metal driver needs the main thread, which `odin test` does not give.
 - `odin run bench -collection:deps=.. -o:speed`: the zero-allocation
   software benchmark; `odin run demo -collection:deps=.. -- out_dir`: a
@@ -291,6 +297,20 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   sample white), the host's texture is never released by o3d, and the host
   unbinds (nil) before releasing it. The software renderer has no such
   pixels: it samples an external texture white (the material's own colour).
+- **Prepared jobs:** `render` is `prepare` then `record` with the GPU's
+  own `Job`. A host that records 3D at a point of its own command stream
+  (a 2D canvas's ordered pass, where creating a GPU resource may submit)
+  calls them itself: `prepare` makes everything the scene's render needs
+  (frame targets, the job's shadow maps and per-frame buffers, the tables'
+  mirrors, ShaderMaterials' pipelines) and uploads what is new in a
+  command buffer it submits; `record` records the shadow passes, the main
+  pass and the copy into the host's command buffer, making nothing. A
+  frame's several views each prepare a job first and record later, in any
+  order, once per prepare. Jobs share the GPU's mirrors of the tables (the
+  jobs prepared together draw from the same tables; a prepare on other
+  tables starts the mirrors over, and an earlier job then records
+  `.Not_Prepared`) and its frame targets (grown to the largest job); each
+  job has its own shadow maps and per-frame buffers.
 - **GPU targets:** the colour (multisampled), resolve and depth targets
   only grow, to the largest frame drawn; a frame renders into their
   top-left width x height (viewport and scissor) and is copied to the

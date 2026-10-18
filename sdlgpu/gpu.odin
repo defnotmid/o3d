@@ -62,14 +62,9 @@ GPU :: struct {
 	skin_vertices:            Pool_Buffer,
 	morph_deltas:             Pool_Buffer,
 	indices:                  Pool_Buffer,
-	custom_skinned:           Pool_Buffer,
-	dynamic_vertices:         Pool_Buffer,
-	dynamic_indices:          Pool_Buffer,
 	// The generations of the tables mirrored (geometry, textures, shaders'
 	// pipelines): a different one (new contents, ids reused) starts over.
-	mirrored:                 struct {
-		geometry, textures, shaders: o3d.Generation,
-	},
+	mirrored:                 Mirrored,
 	// Per texture (its id - 1): `Textures.list` mirrored on the GPU, nil
 	// for an external texture, whose GPU texture (the host's, not released
 	// here) is in `externals` (by id - 1, set by `texture_set_external`, for
@@ -82,24 +77,19 @@ GPU :: struct {
 	// Per shader (its id - 1): ShaderMaterials' GPU shaders and pipelines,
 	// made the first time a frame draws with them.
 	custom:                   [dynamic]Custom,
-	// The shadow pass (shadow.odin): its fragment shader (depth out), its
-	// pipelines by the casters' material side, the maps (depth per texel,
-	// read by the main pass) and their depth buffers at `shadow_sizes` squared.
+	// The shadow pass (shadow.odin): its fragment shader (depth out) and its
+	// pipelines by the casters' material side (the maps are a job's).
 	shadow_frag:              ^sdl.GPUShader,
 	shadow_pipelines:         [o3d.Side]^sdl.GPUGraphicsPipeline,
 	shadow_skinned_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
-	shadow_maps:              [o3d.MAX_SHADOWS]^sdl.GPUTexture,
-	shadow_depths:            [o3d.MAX_SHADOWS]^sdl.GPUTexture,
-	shadow_sizes:             [o3d.MAX_SHADOWS]u32,
 	shadow_sampler:           ^sdl.GPUSampler,
-	casters:                  [dynamic]int,
-	// Scratch per frame.
-	order:                    [dynamic]int,
-	materials:                [dynamic]o3d.Shading_Material, // per draw
-	blocks:                   o3d.Shader_Blocks,
-	expanded:                 o3d.Expanded_Draws,
-	custom_skinned_verts:     [dynamic]o3d.Vertex,
-	custom_skinned_first:     [dynamic]i32,
+	dummy_shadow:             ^sdl.GPUTexture, // bound for a job's unused shadow slots
+	// `render`'s own job.
+	job:                      Job,
+}
+
+Mirrored :: struct {
+	geometry, textures, shaders: o3d.Generation,
 }
 
 External_Texture :: struct {
@@ -247,13 +237,13 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	if cmd == nil {
 		return .Device
 	}
-	for idx in 0 ..< o3d.MAX_SHADOWS {
-		if !ensure_shadow(g, idx, 1) {
-			return .Device
-		}
-		clear := sdl.GPUColorTargetInfo{texture = g.shadow_maps[idx], clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
-		sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
+	g.dummy_shadow = sdl.CreateGPUTexture(g.device, {type = .D2, format = SHADOW_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = 1, height = 1, layer_count_or_depth = 1, num_levels = 1})
+	if g.dummy_shadow == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		return .Device
 	}
+	clear_shadow := sdl.GPUColorTargetInfo{texture = g.dummy_shadow, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear_shadow, 1, nil))
 	clear := sdl.GPUColorTargetInfo{texture = g.dummy_texture, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
 	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
 	if !sdl.SubmitGPUCommandBuffer(cmd) {
@@ -266,13 +256,12 @@ destroy :: proc(g: ^GPU) {
 	if g.device == nil {
 		return
 	}
-	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices, &g.custom_skinned, &g.dynamic_vertices, &g.dynamic_indices}) {
+	job_destroy(g, &g.job)
+	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
 	}
-	delete(g.custom_skinned_verts)
-	delete(g.custom_skinned_first)
 	for tex in g.textures {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(g.device, tex)
@@ -293,10 +282,6 @@ destroy :: proc(g: ^GPU) {
 		release_custom(g, &c)
 	}
 	delete(g.custom)
-	delete(g.order)
-	delete(g.materials)
-	o3d.shader_blocks_destroy(&g.blocks)
-	o3d.expanded_draws_destroy(&g.expanded)
 	for side in o3d.Side {
 		for p in g.pipelines[side] {
 			if p != nil {
@@ -323,14 +308,15 @@ destroy :: proc(g: ^GPU) {
 			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
 		}
 	}
-	release_shadow(g)
 	if g.shadow_sampler != nil {
 		sdl.ReleaseGPUSampler(g.device, g.shadow_sampler)
+	}
+	if g.dummy_shadow != nil {
+		sdl.ReleaseGPUTexture(g.device, g.dummy_shadow)
 	}
 	if g.shadow_frag != nil {
 		sdl.ReleaseGPUShader(g.device, g.shadow_frag)
 	}
-	delete(g.casters)
 	if g.bg_vert != nil {
 		sdl.ReleaseGPUShader(g.device, g.bg_vert)
 	}
@@ -457,12 +443,16 @@ make_background_pipeline :: proc(g: ^GPU) -> ^sdl.GPUGraphicsPipeline {
 }
 
 // A ShaderMaterial's pipeline, its shaders made from oksl's output the first
-// time (nil: they could not be).
+// time (nil: they could not be). `record` only looks it up (`make` false).
 @(private)
-custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: bool) -> ^sdl.GPUGraphicsPipeline {
+custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: bool, make := true) -> ^sdl.GPUGraphicsPipeline {
 	sh := o3d.shader_get(shaders, id)
 	if sh == nil {
 		return nil
+	}
+	if !make {
+		c := &g.custom[id - 1] if int(id) <= len(g.custom) else nil
+		return c.pipelines[side][1 if blend else 0] if c != nil && !c.failed else nil
 	}
 	if len(g.custom) < int(id) {
 		resize(&g.custom, int(id))
@@ -562,35 +552,28 @@ make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side, skinned: bool) -> ^sdl.GPU
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
 }
 
-// The shadow map and its depth buffer at `size` squared.
+// A job's shadow map and its depth buffer at `size` squared.
 @(private)
-ensure_shadow :: proc(g: ^GPU, idx: int, size: u32) -> bool {
-	if g.shadow_sizes[idx] == size && g.shadow_maps[idx] != nil {
+ensure_shadow :: proc(g: ^GPU, job: ^Job, idx: int, size: u32) -> bool {
+	if job.shadow_sizes[idx] == size && job.shadow_maps[idx] != nil {
 		return true
 	}
-	release_shadow_slot(g, idx)
-	g.shadow_maps[idx] = sdl.CreateGPUTexture(g.device, {type = .D2, format = SHADOW_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
-	g.shadow_depths[idx] = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
-	g.shadow_sizes[idx] = size
-	return g.shadow_maps[idx] != nil && g.shadow_depths[idx] != nil
+	release_shadow_slot(g, job, idx)
+	job.shadow_maps[idx] = sdl.CreateGPUTexture(g.device, {type = .D2, format = SHADOW_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
+	job.shadow_depths[idx] = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = size, height = size, layer_count_or_depth = 1, num_levels = 1})
+	job.shadow_sizes[idx] = size
+	return job.shadow_maps[idx] != nil && job.shadow_depths[idx] != nil
 }
 
-@(private = "file")
-release_shadow_slot :: proc(g: ^GPU, idx: int) {
-	if g.shadow_maps[idx] != nil {
-		sdl.ReleaseGPUTexture(g.device, g.shadow_maps[idx])
+@(private)
+release_shadow_slot :: proc(g: ^GPU, job: ^Job, idx: int) {
+	if job.shadow_maps[idx] != nil {
+		sdl.ReleaseGPUTexture(g.device, job.shadow_maps[idx])
 	}
-	if g.shadow_depths[idx] != nil {
-		sdl.ReleaseGPUTexture(g.device, g.shadow_depths[idx])
+	if job.shadow_depths[idx] != nil {
+		sdl.ReleaseGPUTexture(g.device, job.shadow_depths[idx])
 	}
-	g.shadow_maps[idx], g.shadow_depths[idx], g.shadow_sizes[idx] = nil, nil, 0
-}
-
-@(private = "file")
-release_shadow :: proc(g: ^GPU) {
-	for idx in 0 ..< o3d.MAX_SHADOWS {
-		release_shadow_slot(g, idx)
-	}
+	job.shadow_maps[idx], job.shadow_depths[idx], job.shadow_sizes[idx] = nil, nil, 0
 }
 
 @(private = "file")

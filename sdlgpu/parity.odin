@@ -781,14 +781,6 @@ external_check :: proc(g: ^GPU) -> (err: string) {
 		frame, _ := read(g, out, W, H)
 		return frame
 	}
-	differ :: proc(a, b: []u8) -> int {
-		n := 0 if len(a) == len(b) && len(a) > 0 else max(len(a), len(b), 1)
-		for i in 0 ..< min(len(a), len(b)) {
-			n += 1 if a[i] != b[i] else 0
-		}
-		return n
-	}
-
 	plain := frame(g, &a, nil, 0)
 	defer delete(plain)
 	image := frame(g, &a, &images, image_id)
@@ -821,14 +813,147 @@ external_check :: proc(g: ^GPU) -> (err: string) {
 	texture_set_external(g, &externals, external_id, nil)
 
 	switch {
-	case differ(image, plain) == 0:
+	case bytes_differ(image, plain) == 0:
 		return "external: the image draws as no map"
-	case differ(bound, image) != 0:
-		return fmt.tprintf("external: %d bytes differ from the uploaded image's frame", differ(bound, image))
-	case differ(unbound, plain) != 0:
-		return fmt.tprintf("external: unbound, %d bytes differ from no map", differ(unbound, plain))
-	case differ(stale, plain) != 0:
-		return fmt.tprintf("external: bound for another table, %d bytes differ from no map", differ(stale, plain))
+	case bytes_differ(bound, image) != 0:
+		return fmt.tprintf("external: %d bytes differ from the uploaded image's frame", bytes_differ(bound, image))
+	case bytes_differ(unbound, plain) != 0:
+		return fmt.tprintf("external: unbound, %d bytes differ from no map", bytes_differ(unbound, plain))
+	case bytes_differ(stale, plain) != 0:
+		return fmt.tprintf("external: bound for another table, %d bytes differ from no map", bytes_differ(stale, plain))
+	}
+	return ""
+}
+
+// How many bytes of two frames differ (all, when either is missing).
+@(private = "file")
+bytes_differ :: proc(a, b: []u8) -> int {
+	n := 0 if len(a) == len(b) && len(a) > 0 else max(len(a), len(b), 1)
+	for i in 0 ..< min(len(a), len(b)) {
+		n += 1 if a[i] != b[i] else 0
+	}
+	return n
+}
+
+// ---- prepared jobs ----------------------------------------------------------------------
+
+// Jobs (`prepare`, then `record`) as a host recording at points of its own
+// command stream uses them: several cases' scenes on shared tables, each a
+// job at its case's size, all prepared, then recorded in reverse into one
+// command buffer. Each frame is the same bytes as `render` draws alone;
+// recording makes nothing (the GPU's and the jobs' resources are the same
+// before and after); a job records once per prepare, and not after another
+// job's prepare started the mirrors over for other tables. `err` says what
+// differed.
+jobs_check :: proc(g: ^GPU) -> (err: string) {
+	NAMES :: [?]string{"shadow", "manim", "custom", "textures"}
+	N :: len(NAMES)
+	cases: [N]Parity_Case
+	scenes: [N]o3d.Scene
+	a: Parity_Assets
+	defer parity_assets_destroy(&a)
+	defer for &scene in scenes {
+		o3d.scene_destroy(&scene)
+	}
+	for name, i in NAMES {
+		for c in PARITY_CASES {
+			if c.name == name {
+				cases[i] = c
+			}
+		}
+		if e := cases[i].build(&a); e != "" {
+			return fmt.tprintf("jobs: %s: %s", name, e)
+		}
+		scenes[i], a.scene = a.scene, {}
+	}
+
+	outs: [N]^sdl.GPUTexture
+	wants: [N][]u8
+	defer for i in 0 ..< N {
+		if outs[i] != nil {
+			sdl.ReleaseGPUTexture(g.device, outs[i])
+		}
+		delete(wants[i])
+	}
+	for c, i in cases {
+		w, h := u32(c.width), u32(c.height)
+		outs[i] = target(g, w, h)
+		if e := render(g, &scenes[i], &a.geos, &a.shaders, outs[i], w, h, textures = &a.textures); e != nil {
+			return fmt.tprintf("jobs: %s: render: %v", c.name, e)
+		}
+		wants[i], _ = read(g, outs[i], w, h)
+	}
+
+	jobs: [N]Job
+	defer for &job in jobs {
+		job_destroy(g, &job)
+	}
+	for c, i in cases {
+		if e := prepare(g, &jobs[i], &scenes[i], &a.geos, &a.shaders, u32(c.width), u32(c.height), &a.textures); e != nil {
+			return fmt.tprintf("jobs: %s: prepare: %v", c.name, e)
+		}
+	}
+	Made :: struct {
+		color, depth, resolved: ^sdl.GPUTexture,
+		buffers:                [4]^sdl.GPUBuffer,
+		textures, custom:       int,
+		job_buffers:            [N][3]^sdl.GPUBuffer,
+		shadows:                [N][o3d.MAX_SHADOWS][2]^sdl.GPUTexture,
+	}
+	made :: proc(g: ^GPU, jobs: ^[N]Job) -> (m: Made) {
+		m.color, m.depth, m.resolved = g.color, g.depth, g.resolved
+		m.buffers = {g.vertices.buffer, g.skin_vertices.buffer, g.morph_deltas.buffer, g.indices.buffer}
+		m.textures, m.custom = len(g.textures), len(g.custom)
+		for &job, i in jobs {
+			m.job_buffers[i] = {job.dynamic_vertices.buffer, job.dynamic_indices.buffer, job.custom_skinned.buffer}
+			for si in 0 ..< o3d.MAX_SHADOWS {
+				m.shadows[i][si] = {job.shadow_maps[si], job.shadow_depths[si]}
+			}
+		}
+		return
+	}
+	before := made(g, &jobs)
+	cmd := sdl.AcquireGPUCommandBuffer(g.device)
+	if cmd == nil {
+		return "jobs: no command buffer"
+	}
+	for i := N - 1; i >= 0; i -= 1 {
+		if e := record(g, &jobs[i], outs[i], cmd); e != nil {
+			_ = sdl.CancelGPUCommandBuffer(cmd)
+			return fmt.tprintf("jobs: %s: record: %v", cases[i].name, e)
+		}
+	}
+	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+	if fence == nil {
+		return "jobs: submit failed"
+	}
+	_ = sdl.WaitForGPUFences(g.device, true, &fence, 1)
+	sdl.ReleaseGPUFence(g.device, fence)
+	if made(g, &jobs) != before {
+		return "jobs: recording made or replaced a GPU resource"
+	}
+	for c, i in cases {
+		got, _ := read(g, outs[i], u32(c.width), u32(c.height))
+		defer delete(got)
+		if n := bytes_differ(got, wants[i]); n != 0 {
+			return fmt.tprintf("jobs: %s: %d bytes differ from render's frame", c.name, n)
+		}
+	}
+
+	if e := record(g, &jobs[0], outs[0], nil); e != .Not_Prepared {
+		return fmt.tprintf("jobs: recorded twice for one prepare (%v)", e)
+	}
+	other: Parity_Assets
+	defer parity_assets_destroy(&other)
+	test_scene(&other.scene, &other.geos)
+	if e := prepare(g, &jobs[0], &scenes[0], &a.geos, &a.shaders, u32(cases[0].width), u32(cases[0].height), &a.textures); e != nil {
+		return fmt.tprintf("jobs: prepare again: %v", e)
+	}
+	if e := prepare(g, &jobs[1], &other.scene, &other.geos, nil, 160, 120); e != nil {
+		return fmt.tprintf("jobs: prepare on other tables: %v", e)
+	}
+	if e := record(g, &jobs[0], outs[0], nil); e != .Not_Prepared {
+		return fmt.tprintf("jobs: recorded after another prepare started the mirrors over (%v)", e)
 	}
 	return ""
 }
