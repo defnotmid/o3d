@@ -1,5 +1,7 @@
 # o3d
 
+<img src="assets/logo.svg" width="128" alt="o3d: Oxa, a pixel-art axolotl whose gills are the X, Y and Z axes">
+
 3D for Odin in three.js's vocabulary, for rendering video frames: every
 frame is described from scratch (a camera, lights, geometry with materials),
 so a frame is a pure function of whatever drives it. Drawn on the GPU
