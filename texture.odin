@@ -10,7 +10,9 @@ import stbi "vendor:stb/image"
 // by id. Every texture's texels across all mip levels live in one shared flat
 // array (`Textures.texels`); a texture is its dimensions, level count and
 // per-level offsets in `texels`. The GPU mirrors the list, uploading new
-// textures with their mip levels at the start of a frame.
+// textures with their mip levels at the start of a frame. An external
+// texture (`texture_add_external`) has no texels: its pixels are a GPU
+// texture the host binds per frame (a video's frames).
 
 // 0 is no texture.
 Texture_Id :: distinct u32
@@ -24,6 +26,7 @@ Texture :: struct {
 	mips:                     [MAX_MIPS]u32,
 	env_radiance:             Texture_Id,
 	env_irradiance:           Texture_Id,
+	external:                 bool, // levels 0: bound per frame on the GPU
 }
 
 Textures :: struct {
@@ -87,6 +90,17 @@ texture_add :: proc(t: ^Textures, pixels: []u8, width, height: int) -> Texture_I
 	return Texture_Id(len(t.list))
 }
 
+// Adds a texture whose pixels live on the GPU, outside `t`, changing every
+// frame (a video): the GPU renderer samples what the host binds to the id
+// (`o3d_sdlgpu.texture_set_external`) without mipmaps unless that texture
+// has them; the software renderer, with no texels, samples white (the
+// material's own colour). `width x height` is what it expects, for the host.
+texture_add_external :: proc(t: ^Textures, width, height: int) -> Texture_Id {
+	generation_take(&t.generation)
+	append(&t.list, Texture{width = u32(max(width, 0)), height = u32(max(height, 0)), first_texel = u32(len(t.texels)), external = true})
+	return Texture_Id(len(t.list))
+}
+
 // Decodes an image in memory (PNG, JPEG, BMP, TGA, GIF via stb_image) into `t`.
 texture_decode :: proc(t: ^Textures, data: []u8) -> (Texture_Id, bool) {
 	if len(data) == 0 {
@@ -135,7 +149,7 @@ downsample_mip :: proc "contextless" (src: [][4]u8, sw, sh: int, dst: [][4]u8, d
 // chosen from screen derivatives `duv_dx` and `duv_dy` as the GPU does.
 sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: Vec2) -> Vec4 {
 	tex, ok := texture_get(t, id)
-	if !ok {
+	if !ok || tex.external {
 		return {1, 1, 1, 1}
 	}
 	if tex.levels <= 1 {
@@ -162,7 +176,7 @@ sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: 
 // vertical pole clamp (for equirectangular environment and background maps).
 sample_lod :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec4 {
 	tex, ok := texture_get(t, id)
-	if !ok {
+	if !ok || tex.external {
 		return {0, 0, 0, 0}
 	}
 	if tex.levels <= 1 || lod <= 0 {

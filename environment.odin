@@ -107,7 +107,7 @@ texture_environment :: proc "contextless" (t: ^Textures, id: Texture_Id) -> (rad
 // used as `scene.environment` or a blurred `scene.background`.
 environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradiance: Texture_Id, ok: bool) {
 	src_tex, found := texture_get(t, id)
-	if !found {
+	if !found || src_tex.external {
 		return 0, 0, false
 	}
 	if src_tex.env_radiance != 0 && src_tex.env_irradiance != 0 {

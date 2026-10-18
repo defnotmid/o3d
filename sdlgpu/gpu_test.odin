@@ -83,6 +83,19 @@ test_manim_matches_software :: proc(t: ^testing.T) {expect_parity(t, "manim")}
 @(test)
 test_shapes_matches_software :: proc(t: ^testing.T) {expect_parity(t, "shapes")}
 
+// A host's GPU texture bound to an external texture draws as the same
+// pixels uploaded; unbound, or bound for another table, as no map.
+@(test)
+test_external_texture :: proc(t: ^testing.T) {
+	g: GPU
+	if !test_gpu(t, &g) {
+		return
+	}
+	defer destroy(&g)
+	err := external_check(&g)
+	testing.expectf(t, err == "", "%s", err)
+}
+
 // One GPU through every case in turn, as tools/gpu_check and a host that
 // remakes its tables use it: each case's new tables (ids and sizes reused)
 // replace what the GPU mirrored, so nothing stale is drawn or read.

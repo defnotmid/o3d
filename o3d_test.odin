@@ -394,6 +394,47 @@ test_texture_mipmaps :: proc(t: ^testing.T) {
 	testing.expectf(t, abs(avg.r - 130.0 / 255.0) < 0.02, "minified average: %v", avg)
 }
 
+// An external texture (pixels bound on the GPU) has no texels: the software
+// renderer samples it white, draws its material as with no map, and makes no
+// environment maps from it; images added after it still sample their own.
+@(test)
+test_external_texture_software :: proc(t: ^testing.T) {
+	textures: Textures
+	defer textures_destroy(&textures)
+	ext := texture_add_external(&textures, 64, 32)
+	px := [4]u8{200, 10, 10, 255}
+	img := texture_add(&textures, px[:], 1, 1)
+	tex, ok := texture_get(&textures, ext)
+	testing.expect(t, ok && tex.external && tex.levels == 0 && tex.width == 64 && tex.height == 32)
+	testing.expect(t, sample(&textures, ext, {0.3, 0.6}, {1, 0}, {0, 1}) == {1, 1, 1, 1})
+	testing.expect(t, sample_lod(&textures, ext, {0.3, 0.6}, 2) == {})
+	testing.expect(t, sample(&textures, img, {0.5, 0.5}, {}, {}).r > 0.7)
+	_, _, prefiltered := environment_prefilter(&textures, ext)
+	testing.expect(t, !prefiltered)
+
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 3}, fov = 45, near = 0.1, far = 100}
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 2, position = {1, 2, 3}})
+	m := MATERIAL_DEFAULT
+	append(&scene.draws, Draw{plane(&g, 2, 2), compose(), m})
+	W :: 48
+	alone, mapped: Software
+	defer software_destroy(&alone)
+	defer software_destroy(&mapped)
+	want := software_render(&alone, &scene, &g, nil, W, W, nil, &textures)
+	scene.draws.material[0].color_map = ext
+	got := software_render(&mapped, &scene, &g, nil, W, W, nil, &textures)
+	differ := 0
+	for i in 0 ..< len(want) {
+		differ += 1 if got[i] != want[i] else 0
+	}
+	testing.expectf(t, differ == 0, "%d bytes differ from no map", differ)
+}
+
 // Standard material textures on the software renderer: color_map (with
 // v = 1 at the top of the mesh reading row 0 of the image), normal_map
 // (screen-derivative tangents tilting normals toward +X on the left and -X

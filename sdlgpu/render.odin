@@ -18,7 +18,9 @@ sync_mirrors :: proc(g: ^GPU, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, text
 	}
 	if textures != nil && textures.generation != g.mirrored.textures {
 		for tex in g.textures {
-			sdl.ReleaseGPUTexture(g.device, tex)
+			if tex != nil {
+				sdl.ReleaseGPUTexture(g.device, tex)
+			}
 		}
 		clear(&g.textures)
 		g.mirrored.textures = textures.generation
@@ -265,7 +267,8 @@ draw_shadow :: proc(g: ^GPU, scene: ^o3d.Scene, geos: ^o3d.Geometries, shaders: 
 	return nil
 }
 
-// Uploads what `textures` added since the last frame (all mip levels per texture).
+// Uploads what `textures` added since the last frame (all mip levels per
+// texture); an external texture's slot stays nil (its texture is bound).
 @(private)
 upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
 	if textures == nil || len(textures.list) <= len(g.textures) {
@@ -274,6 +277,10 @@ upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, cmd: ^sdl.GPUCommandBu
 	pass := sdl.BeginGPUCopyPass(cmd)
 	defer sdl.EndGPUCopyPass(pass)
 	for tex in textures.list[len(g.textures):] {
+		if tex.external {
+			append(&g.textures, nil)
+			continue
+		}
 		gpu_tex := sdl.CreateGPUTexture(g.device, {
 			type                 = .D2,
 			format               = COLOR_FORMAT,
@@ -315,6 +322,10 @@ upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, cmd: ^sdl.GPUCommandBu
 @(private = "file")
 tex_binding :: #force_inline proc "contextless" (g: ^GPU, id: o3d.Texture_Id, sampler: ^sdl.GPUSampler = nil) -> sdl.GPUTextureSamplerBinding {
 	tex := g.textures[id - 1] if id > 0 && int(id) <= len(g.textures) else g.dummy_texture
+	if tex == nil {
+		ext := g.externals[id - 1] if int(id) <= len(g.externals) else {}
+		tex = ext.texture if ext.texture != nil && ext.generation == g.mirrored.textures else g.dummy_texture
+	}
 	return {texture = tex, sampler = sampler if sampler != nil else g.linear_sampler}
 }
 

@@ -1,5 +1,6 @@
 // Draws every GPU-vs-software parity case (o3d/sdlgpu PARITY_CASES) with
-// both renderers on the main thread and compares them by PSNR: the check
+// both renderers on the main thread and compares them by PSNR, then the
+// external texture check (sdlgpu external_check): the check
 // for backends `odin test` cannot reach, such as Metal, whose SDL driver
 // needs the main thread. Exits 1 if a case fails or no GPU device opens.
 //
@@ -46,7 +47,13 @@ main :: proc() {
 			}
 		}
 	}
-	fmt.printf("%d of %d cases match\n", len(gpu.PARITY_CASES) - failed, len(gpu.PARITY_CASES))
+	if err := gpu.external_check(&g); err != "" {
+		fmt.printf("%-12s FAIL  %s\n", "external", err)
+		failed += 1
+	} else {
+		fmt.printf("%-12s ok    bound = uploaded, unbound = no map\n", "external")
+	}
+	fmt.printf("%d of %d cases match\n", len(gpu.PARITY_CASES) + 1 - failed, len(gpu.PARITY_CASES) + 1)
 	if failed > 0 {
 		os.exit(1)
 	}

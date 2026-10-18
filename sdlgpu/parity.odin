@@ -735,3 +735,100 @@ build_shapes :: proc(a: ^Parity_Assets) -> string {
 	o3d.scene_set_draw_instances(&a.scene, di, o3d.scene_instances(&a.scene, insts[:]))
 	return ""
 }
+
+// ---- external textures ------------------------------------------------------------------
+
+// External textures (`o3d.texture_add_external`): a frame drawn with the
+// host's GPU texture bound to one is the same bytes as with its pixels
+// uploaded as an image (magnified, so neither samples past its base level);
+// with nothing bound, or bound for another table, the same as with no map.
+// Not a software parity case (the software renderer has no such pixels);
+// gpu_test.odin and tools/gpu_check run it. `err` says what differed.
+external_check :: proc(g: ^GPU) -> (err: string) {
+	TW, TH :: 16, 16
+	px: [TW * TH * 4]u8
+	for y in 0 ..< TH {
+		for x in 0 ..< TW {
+			i := (y * TW + x) * 4
+			px[i], px[i + 1], px[i + 2], px[i + 3] = u8(x * 16), u8(y * 16), u8(255 - (x ~ y) * 16), 255
+		}
+	}
+	a: Parity_Assets
+	defer parity_assets_destroy(&a)
+	a.scene.camera = {position = {0, 0, 2.2}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 10}
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1, 2, 3}})
+	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
+	m := o3d.MATERIAL_DEFAULT
+	m.roughness = 0.6
+	append(&a.scene.draws, o3d.Draw{o3d.plane(&a.geos, 2, 2), o3d.compose({0, 0, 0}, {0, 0.3, 0}), m})
+
+	images, externals, other: o3d.Textures
+	defer o3d.textures_destroy(&images)
+	defer o3d.textures_destroy(&externals)
+	defer o3d.textures_destroy(&other)
+	image_id := o3d.texture_add(&images, px[:], TW, TH)
+	external_id := o3d.texture_add_external(&externals, TW, TH)
+	o3d.texture_add_external(&other, TW, TH)
+
+	frame :: proc(g: ^GPU, a: ^Parity_Assets, textures: ^o3d.Textures, id: o3d.Texture_Id) -> []u8 {
+		W, H :: 160, 120
+		a.scene.draws.material[0].color_map = id
+		out := target(g, W, H)
+		defer sdl.ReleaseGPUTexture(g.device, out)
+		if render(g, &a.scene, &a.geos, nil, out, W, H, textures = textures) != nil {
+			return nil
+		}
+		frame, _ := read(g, out, W, H)
+		return frame
+	}
+	differ :: proc(a, b: []u8) -> int {
+		n := 0 if len(a) == len(b) && len(a) > 0 else max(len(a), len(b), 1)
+		for i in 0 ..< min(len(a), len(b)) {
+			n += 1 if a[i] != b[i] else 0
+		}
+		return n
+	}
+
+	plain := frame(g, &a, nil, 0)
+	defer delete(plain)
+	image := frame(g, &a, &images, image_id)
+	defer delete(image)
+	unbound := frame(g, &a, &externals, external_id)
+	defer delete(unbound)
+
+	tex := sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER}, width = TW, height = TH, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
+	if tex == nil {
+		return "external: no GPU texture"
+	}
+	defer sdl.ReleaseGPUTexture(g.device, tex)
+	transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = len(px)})
+	mapped := sdl.MapGPUTransferBuffer(g.device, transfer, false)
+	copy(([^]u8)(mapped)[:len(px)], px[:])
+	sdl.UnmapGPUTransferBuffer(g.device, transfer)
+	cmd := sdl.AcquireGPUCommandBuffer(g.device)
+	pass := sdl.BeginGPUCopyPass(cmd)
+	sdl.UploadToGPUTexture(pass, {transfer_buffer = transfer, pixels_per_row = TW, rows_per_layer = TH}, {texture = tex, w = TW, h = TH, d = 1}, false)
+	sdl.EndGPUCopyPass(pass)
+	_ = sdl.SubmitGPUCommandBuffer(cmd)
+	sdl.ReleaseGPUTransferBuffer(g.device, transfer)
+
+	texture_set_external(g, &other, external_id, tex)
+	stale := frame(g, &a, &externals, external_id)
+	defer delete(stale)
+	texture_set_external(g, &externals, external_id, tex)
+	bound := frame(g, &a, &externals, external_id)
+	defer delete(bound)
+	texture_set_external(g, &externals, external_id, nil)
+
+	switch {
+	case differ(image, plain) == 0:
+		return "external: the image draws as no map"
+	case differ(bound, image) != 0:
+		return fmt.tprintf("external: %d bytes differ from the uploaded image's frame", differ(bound, image))
+	case differ(unbound, plain) != 0:
+		return fmt.tprintf("external: unbound, %d bytes differ from no map", differ(unbound, plain))
+	case differ(stale, plain) != 0:
+		return fmt.tprintf("external: bound for another table, %d bytes differ from no map", differ(stale, plain))
+	}
+	return ""
+}

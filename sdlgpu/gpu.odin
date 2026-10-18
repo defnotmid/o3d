@@ -70,8 +70,12 @@ GPU :: struct {
 	mirrored:                 struct {
 		geometry, textures, shaders: o3d.Generation,
 	},
-	// Per texture (its id - 1): `Textures.list` mirrored on the GPU.
+	// Per texture (its id - 1): `Textures.list` mirrored on the GPU, nil
+	// for an external texture, whose GPU texture (the host's, not released
+	// here) is in `externals` (by id - 1, set by `texture_set_external`, for
+	// the table of that generation only).
 	textures:                 [dynamic]^sdl.GPUTexture,
+	externals:                [dynamic]External_Texture,
 	dummy_texture:            ^sdl.GPUTexture,
 	linear_sampler:           ^sdl.GPUSampler,
 	env_sampler:              ^sdl.GPUSampler,
@@ -96,6 +100,11 @@ GPU :: struct {
 	expanded:                 o3d.Expanded_Draws,
 	custom_skinned_verts:     [dynamic]o3d.Vertex,
 	custom_skinned_first:     [dynamic]i32,
+}
+
+External_Texture :: struct {
+	texture:    ^sdl.GPUTexture,
+	generation: o3d.Generation, // of the `Textures` it was bound for
 }
 
 // A ShaderMaterial's shaders and pipelines (as `GPU.pipelines`), or why
@@ -270,6 +279,7 @@ destroy :: proc(g: ^GPU) {
 		}
 	}
 	delete(g.textures)
+	delete(g.externals)
 	if g.dummy_texture != nil {
 		sdl.ReleaseGPUTexture(g.device, g.dummy_texture)
 	}
@@ -341,6 +351,24 @@ destroy :: proc(g: ^GPU) {
 		sdl.DestroyGPUDevice(g.device)
 	}
 	g^ = {}
+}
+
+// Binds the host's GPU texture to an external texture of `textures`
+// (`o3d.texture_add_external`) for the renders that follow, until bound
+// again: a video's frame, set before each render that draws it. It is
+// sampled as an image is (RGBA, sRGB-encoded bytes in a UNORM format, not an
+// _SRGB one), from the same device with `.SAMPLER` usage, at its own mip
+// levels; the host keeps it alive while bound and unbinds it (nil, then
+// sampled white) before releasing it. A binding for another table (its ids
+// reused) is not used.
+texture_set_external :: proc(g: ^GPU, textures: ^o3d.Textures, id: o3d.Texture_Id, tex: ^sdl.GPUTexture) {
+	if textures == nil || id == 0 {
+		return
+	}
+	if int(id) > len(g.externals) {
+		resize(&g.externals, int(id))
+	}
+	g.externals[id - 1] = {tex, textures.generation}
 }
 
 // A texture to render into (and sample or read back).

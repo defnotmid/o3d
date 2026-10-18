@@ -136,6 +136,10 @@ o3d_sdlgpu.init(&g, device)
 out := o3d_sdlgpu.target(&g, 1920, 1080)
 o3d_sdlgpu.render(&g, &scene, &geos, &shaders, out, 1920, 1080, cmd, &textures)   // or nil cmd: submit and wait
 
+// A texture whose pixels change every frame (a video) and are already on the GPU:
+clip := o3d.texture_add_external(&textures, 1280, 720)   // once; a map like any other
+o3d_sdlgpu.texture_set_external(&g, &textures, clip, frame_texture)   // before each render that draws it
+
 // CPU: the same pixels, rows banded on the caller's thread pool
 sw: o3d.Software
 pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
@@ -151,7 +155,7 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   device unless `O3D_NO_GPU=1` (CI without a GPU; macOS, below).
 - `odin run tools/gpu_check -collection:deps=.. [-- out_dir]`: every
   GPU-vs-software parity case (`PARITY_CASES`) on the main thread, by PSNR,
-  optionally saving both frames. On macOS this is the GPU check: SDL's
+  optionally saving both frames, then the external texture check. On macOS this is the GPU check: SDL's
   Metal driver needs the main thread, which `odin test` does not give.
 - `odin run bench -collection:deps=.. -o:speed`: the zero-allocation
   software benchmark; `odin run demo -collection:deps=.. -- out_dir`: a
@@ -277,6 +281,16 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   them makes them then, in frame time); `texture_environment` looks them up.
   Changing one means changing the other; the tests compare the two
   renderers.
+- **External textures:** `texture_add_external` adds a `Textures` entry
+  with no texels, for pixels the host already has on the GPU and changes
+  every frame (a video's frames). `o3d_sdlgpu.texture_set_external` binds
+  the host's texture to it for the renders that follow: same device,
+  `.SAMPLER` usage, RGBA with sRGB-encoded bytes in a UNORM format (as an
+  image's), sampled at its own mip levels (none unless the host makes
+  them). The binding is for that table only (a remade table's reused ids
+  sample white), the host's texture is never released by o3d, and the host
+  unbinds (nil) before releasing it. The software renderer has no such
+  pixels: it samples an external texture white (the material's own colour).
 - **GPU targets:** the colour (multisampled), resolve and depth targets
   only grow, to the largest frame drawn; a frame renders into their
   top-left width x height (viewport and scissor) and is copied to the
