@@ -75,7 +75,18 @@ What is known about three.js carries over:
   closed)` (a per-frame lit tube through the points), `line_segments(positions)` (pairs of
   endpoints), `polyline(positions, closed)` (connected path),
   `wireframe(src)` (edges of a triangle mesh), and `points(positions)` (point
-  clouds). Any triangle geometry can also be drawn as wireframe lines or
+  clouds). Outlines become geometry as three.js's Shape, ShapeGeometry and
+  ExtrudeGeometry: a `Shape` is an outline and its holes as points (curves
+  flattened by the caller), `shapes_from_contours(contours, fill_rule)` is
+  ShapePath.toShapes (a font's or SVG's closed contours grouped into shapes
+  with holes, nonzero or even-odd), `triangulate_shape(contour, holes)` is
+  ShapeUtils.triangulateShape (earcut), `shape_geometry(shapes)` the flat
+  faces, and `extrude_geometry(shapes, options)` the solid (`depth`,
+  `steps`, `bevel_enabled`, `bevel_thickness`, `bevel_size`, `bevel_offset`,
+  `bevel_segments` from `EXTRUDE_DEFAULT`, WorldUVGenerator's UVs), with its
+  two material groups as geometries of their own (`caps`, `sides`;
+  `geometry_group` is addGroup). three.js's extrusions are flat-faceted;
+  `crease_angle` smooths the walls and bevels instead, caps kept flat. Any triangle geometry can also be drawn as wireframe lines or
   vertex points by setting `material.mode = .Lines` or `.Points`. Line width
   and point size are controlled by `material.size` in world units (perspective
   foreshortened) or in screen pixels when `.No_Size_Attenuation` is in
@@ -121,6 +132,14 @@ o3d.gltf_draw(&scene, &part, o3d.compose({1.5, 0, 0}))
 // o3d.gltf_draw(&scene, &face, anim = 0, time = t, morphs = {{name = "Smile", weight = 0.8}, {index = 1, weight = 0.5}})
 // From several threads, each with its own pose (the model is then only read):
 // o3d.gltf_draw(&scene, &duck, anim = 0, time = t, pose = &thread_pose)
+
+// Text and logos: outlines (flattened to points) grouped into shapes, extruded once, drawn per frame
+shapes := o3d.shapes_from_contours(glyph_contours)          // ShapePath.toShapes; holes found by containment
+opts := o3d.EXTRUDE_DEFAULT
+opts.depth, opts.bevel_segments, opts.crease_angle = 0.4, 4, math.PI / 4
+letter := o3d.extrude_geometry(&geos, shapes, opts)         // kept: .geometry, or .caps and .sides
+o3d.shapes_destroy(shapes)
+append(&scene.draws, o3d.Draw{letter.caps, o3d.compose({0, 1, 0}, {0, t, 0}), face}, o3d.Draw{letter.sides, o3d.compose({0, 1, 0}, {0, t, 0}), rim})
 
 // ShaderMaterial: compiled once (same sources, same id), uniforms per frame
 shaders: o3d.Shaders                       // kept, like geometry
@@ -254,6 +273,20 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   `map_Kd`, `map_Ke`, `map_Bump`, `map_Pr`/`map_Ns`, `map_Pm` textures)
   relative to the file, into the same tables. Faces without `vn` get the 60°
   crease-angle normals. `model_load` picks glTF, 3MF or OBJ by extension.
+- **Shapes (`shape.odin`):** three.js's code ported: earcut (mapbox/earcut
+  as three.js carries it, nodes in a pool linked by index),
+  ShapePath.toShapes' containment (largest first, an interior point tested
+  against the innermost enclosing contour, fill-rule windings), and
+  ExtrudeGeometry's layers (back bevel rings, `steps + 1` wall rings, front
+  bevel rings; getBevelVec's offsets). They run in f64 as three.js does in
+  JavaScript, so the geometry is three.js's, triangle for triangle (checked
+  against three.js r186 to 1e-6, but for a wall's UV on an edge at exactly
+  45°, where x and y tie). Holes are always rewound against the outline
+  (three.js only does so when it reverses the outline). The output is
+  indexed, corners with equal position, normal and UV shared, the caps'
+  triangles first so each group is one index range. With `crease_angle`,
+  a wall corner's normal sums the wall faces there within the angle,
+  weighted by their corner angles.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, spot cone
@@ -403,9 +436,9 @@ For onimite:
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
 
-Metal: checked on an Apple Silicon Mac (macOS 27) at v0.0.11:
-`tools/gpu_check` matches the software renderer in all 10 cases (54 to
-87 dB PSNR), and onimite's notarized macOS release draws its 3D examples
+Metal: checked on an Apple Silicon Mac (macOS 27) at v0.0.14:
+`tools/gpu_check` matches the software renderer in all 11 parity cases (53
+to 87 dB PSNR) and passes the external texture and prepared jobs checks, and onimite's notarized macOS release draws its 3D examples
 on Metal as on the CPU. (v0.0.1's standard shader did not compile there:
 a texel `Load` on a combined texture-sampler, which Slang emits wrongly
 for MSL; the shadow map is now sampled at texel centres.)

@@ -44,6 +44,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"morph", 160, 120, build_morph},
 	{"manim", 200, 150, build_manim},
 	{"shapes", 200, 150, build_shapes},
+	{"extrude", 200, 150, build_extrude},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -733,6 +734,50 @@ build_shapes :: proc(a: ^Parity_Assets) -> string {
 		{transform = o3d.compose({0, 0.5, 0}, {0.3, 1.2, 0}), color = {0.3, 0.6, 1}, has_color = true},
 	}
 	o3d.scene_set_draw_instances(&a.scene, di, o3d.scene_instances(&a.scene, insts[:]))
+	return ""
+}
+
+// ExtrudeGeometry from contours grouped by shapes_from_contours: a bevelled
+// "B" with smoothed walls, its caps and sides drawn with two materials, a
+// flat-faceted ring through it, and a ShapeGeometry plate behind.
+build_extrude :: proc(a: ^Parity_Assets) -> string {
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {0.6, 1.2, 5}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 30}
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {2, 3, 4}})
+	append(&a.scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.3, 0.2, 0.2}, intensity = 0.8})
+
+	body := []o3d.Vec2{{0, 0}, {2.2, 0}, {3, 0.8}, {3, 2.2}, {2.6, 2.5}, {3, 2.8}, {3, 4.2}, {2.2, 5}, {0, 5}}
+	upper := []o3d.Vec2{{1, 3}, {1, 4}, {2, 4}, {2, 3}}
+	lower := []o3d.Vec2{{1, 1}, {1, 2}, {2, 2}, {2, 1}}
+	shapes := o3d.shapes_from_contours({upper, body, lower})
+	defer o3d.shapes_destroy(shapes)
+	o := o3d.EXTRUDE_DEFAULT
+	o.depth, o.bevel_thickness, o.bevel_size, o.bevel_segments, o.crease_angle = 0.8, 0.2, 0.15, 4, math.PI / 4
+	b := o3d.extrude_geometry(&a.geos, shapes, o)
+	at := o3d.compose({-0.9, -1.2, 0}, {0, -0.5, 0}, {0.5, 0.5, 0.5})
+	caps := o3d.MATERIAL_DEFAULT
+	caps.color, caps.roughness = {0.95, 0.35, 0.3}, 0.35
+	sides := o3d.MATERIAL_DEFAULT
+	sides.color, sides.roughness, sides.metalness = {0.95, 0.8, 0.3}, 0.3, 0.6
+	append(&a.scene.draws, o3d.Draw{b.caps, at, caps}, o3d.Draw{b.sides, at, sides})
+
+	outer, inner: [24]o3d.Vec2
+	for i in 0 ..< len(outer) {
+		t := f32(i) / f32(len(outer)) * math.TAU
+		outer[i] = {math.cos(t), math.sin(t)}
+		inner[i] = 0.6 * outer[i]
+	}
+	ring := []o3d.Shape{{outer[:], {inner[:]}}}
+	flat := o3d.EXTRUDE_DEFAULT
+	flat.depth, flat.bevel_thickness, flat.bevel_size, flat.bevel_segments = 0.3, 0.08, 0.05, 2
+	ring_mat := o3d.MATERIAL_DEFAULT
+	ring_mat.color, ring_mat.roughness = {0.3, 0.6, 0.95}, 0.5
+	append(&a.scene.draws, o3d.Draw{o3d.extrude_geometry(&a.geos, ring, flat).geometry, o3d.compose({0.9, 0, 0}, {0.4, 0.9, 0}), ring_mat})
+
+	plate := []o3d.Shape{{[]o3d.Vec2{{-2, -1.5}, {2, -1.5}, {2, 1.5}, {-2, 1.5}}, {inner[:]}}}
+	plate_mat := o3d.MATERIAL_DEFAULT
+	plate_mat.color, plate_mat.roughness = {0.85, 0.85, 0.8}, 0.8
+	append(&a.scene.draws, o3d.Draw{o3d.shape_geometry(&a.geos, plate), o3d.compose({0, 0, -1}), plate_mat})
 	return ""
 }
 

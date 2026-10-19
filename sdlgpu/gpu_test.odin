@@ -83,6 +83,11 @@ test_manim_matches_software :: proc(t: ^testing.T) {expect_parity(t, "manim")}
 @(test)
 test_shapes_matches_software :: proc(t: ^testing.T) {expect_parity(t, "shapes")}
 
+// ExtrudeGeometry (bevels, smoothed walls, caps and sides as two
+// materials) and ShapeGeometry, from shapes_from_contours.
+@(test)
+test_extrude_matches_software :: proc(t: ^testing.T) {expect_parity(t, "extrude")}
+
 // A host's GPU texture bound to an external texture draws as the same
 // pixels uploaded; unbound, or bound for another table, as no map.
 @(test)
