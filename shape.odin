@@ -276,7 +276,10 @@ Extrude_Options :: struct {
 	bevel_enabled:   bool, // true
 	bevel_thickness: f32, // 0.2
 	bevel_size:      f32, // 0.1 (three.js: bevelThickness - 0.1)
-	bevel_offset:    f32, // 0
+	// 0. An inward offset (or bevel_size around a hole) must stay under half
+	// the thinnest feature, or the bevel turns it inside out (as in
+	// three.js): `Extruded.folded` counts the contours where it did.
+	bevel_offset:    f32,
 	bevel_segments:  int, // 3
 	// o3d's own: side faces meeting at less than this angle (radians) share
 	// smoothed normals, so curved walls and round bevels shade smoothly. 0
@@ -300,6 +303,12 @@ EXTRUDE_DEFAULT :: Extrude_Options {
 // (group 1: the walls and bevels) with two.
 Extruded :: struct {
 	geometry, caps, sides: Geometry_Id,
+	// How many of the shapes' contours (outlines and holes) the bevel folds
+	// over: at one of its rings' offsets an edge turns back, the contour's
+	// winding flips, or it crosses itself or another contour of its shape,
+	// where unbevelled it did not. The geometry is still made, as three.js
+	// makes it (caps with holes or overlaps, walls inside out); 0 is clean.
+	folded:                int,
 }
 
 // ExtrudeGeometry(shapes, options): front and back caps, side walls and
@@ -348,6 +357,7 @@ extrude_geometry :: proc(g: ^Geometries, shapes: []Shape, options := EXTRUDE_DEF
 	}
 	whole := geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:])
 	return {
+		folded   = x.folded,
 		geometry = whole,
 		caps     = geometry_group(g, whole, 0, u32(cap_indices)),
 		sides    = geometry_group(g, whole, u32(cap_indices), u32(len(g.scratch.indices) - cap_indices)),
@@ -503,6 +513,12 @@ Extruder :: struct {
 	moves:   [dynamic][2]f64,
 	ring:    [dynamic][2]f64,
 	faces:   [dynamic]u32,
+	folded:  int,
+	// For `folded_contours`: the contours' segments, and per contour
+	// whether it crosses unbevelled and whether it folds.
+	segments: [dynamic]Segment,
+	crossed:  [dynamic]bool,
+	folds:    [dynamic]bool,
 }
 
 @(private = "file")
@@ -516,6 +532,9 @@ extruder_destroy :: proc(x: ^Extruder) {
 	delete(x.moves)
 	delete(x.ring)
 	delete(x.faces)
+	delete(x.segments)
+	delete(x.crossed)
+	delete(x.folds)
 }
 
 // ExtrudeGeometry's addShape, without extrudePath.
@@ -541,6 +560,9 @@ extrude_shape :: proc(x: ^Extruder, shape: Shape, o: Extrude_Options) {
 	}
 	moves := x.moves[:]
 	segs := o.bevel_segments
+	if segs > 0 {
+		x.folded += folded_contours(x, s.rings[:], vertices, moves, o)
+	}
 	base := u32(len(x.points))
 	add_layer :: proc(x: ^Extruder, vertices, moves: [][2]f64, bs, z: f64) {
 		for v, i in vertices {
@@ -605,6 +627,111 @@ extrude_shape :: proc(x: ^Extruder, shape: Shape, o: Extrude_Options) {
 			}
 		}
 		offset += n
+	}
+}
+
+// How many of a shape's contours fold at some bevel ring's offset (the
+// caps' ring at `bevel_offset`, each bevel ring, the walls' ring at
+// `bevel_size + bevel_offset`): an edge reversed against the contour's, the
+// winding flipped, or a crossing the unbevelled contours do not have.
+@(private = "file")
+folded_contours :: proc(x: ^Extruder, rings: []int, vertices, moves: [][2]f64, o: Extrude_Options) -> int {
+	resize(&x.crossed, len(rings))
+	resize(&x.folds, len(rings))
+	slice.fill(x.folds[:], false)
+	slice.fill(x.crossed[:], false)
+	crossings(x, rings, vertices, x.crossed[:])
+	moved := make([][2]f64, len(vertices))
+	defer delete(moved)
+	crossed := make([]bool, len(rings))
+	defer delete(crossed)
+	for b in 0 ..= o.bevel_segments {
+		bs := f64(o.bevel_size) + f64(o.bevel_offset) // the walls' ring
+		if b < o.bevel_segments {
+			t := f64(b) / f64(o.bevel_segments)
+			bs = f64(o.bevel_size) * math.sin(t * math.PI / 2) + f64(o.bevel_offset)
+		}
+		if bs == 0 {
+			continue
+		}
+		for v, i in vertices {
+			moved[i] = v + moves[i] * bs
+		}
+		k := 0
+		for n, r in rings {
+			was, now := vertices[k:][:n], moved[k:][:n]
+			if (ring_area(was) < 0) != (ring_area(now) < 0) {
+				x.folds[r] = true
+			}
+			for i in 0 ..< n {
+				j := (i + 1) % n
+				e, f := was[j] - was[i], now[j] - now[i]
+				if e.x * f.x + e.y * f.y < 0 {
+					x.folds[r] = true
+				}
+			}
+			k += n
+		}
+		slice.fill(crossed, false)
+		crossings(x, rings, moved, crossed)
+		for c, r in crossed {
+			if c && !x.crossed[r] {
+				x.folds[r] = true
+			}
+		}
+	}
+	count := 0
+	for f in x.folds {
+		count += int(f)
+	}
+	return count
+}
+
+@(private = "file")
+Segment :: struct {
+	a, b:   [2]f64,
+	lo, hi: [2]f64,
+	ring:   i32,
+	i, n:   i32, // the edge's index in its ring, the ring's length
+}
+
+// Marks in `crossed` the contours whose edges at `points` properly cross
+// an edge (not a neighbour) of their own or another contour: a sweep over
+// the edges sorted by their left end.
+@(private = "file")
+crossings :: proc(x: ^Extruder, rings: []int, points: [][2]f64, crossed: []bool) {
+	clear(&x.segments)
+	k := 0
+	for n, r in rings {
+		for i in 0 ..< n {
+			a, b := points[k + i], points[k + (i + 1) % n]
+			append(&x.segments, Segment{a, b, {min(a.x, b.x), min(a.y, b.y)}, {max(a.x, b.x), max(a.y, b.y)}, i32(r), i32(i), i32(n)})
+		}
+		k += n
+	}
+	slice.sort_by(x.segments[:], proc(s, t: Segment) -> bool {return s.lo.x < t.lo.x})
+	side :: proc(a, b, p: [2]f64, eps: f64) -> int {
+		d := (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+		return 1 if d > eps else -1 if d < -eps else 0
+	}
+	segs := x.segments[:]
+	for s, i in segs {
+		for t in segs[i + 1:] {
+			if t.lo.x > s.hi.x {
+				break
+			}
+			if t.lo.y > s.hi.y || s.lo.y > t.hi.y {
+				continue
+			}
+			if s.ring == t.ring && ((s.i + 1) % s.n == t.i || (t.i + 1) % t.n == s.i) {
+				continue // neighbours share a point
+			}
+			ls, lt := s.b - s.a, t.b - t.a
+			eps := 1e-9 * math.sqrt((ls.x * ls.x + ls.y * ls.y) * (lt.x * lt.x + lt.y * lt.y))
+			if side(s.a, s.b, t.a, eps) * side(s.a, s.b, t.b, eps) < 0 && side(t.a, t.b, s.a, eps) * side(t.a, t.b, s.b, eps) < 0 {
+				crossed[s.ring], crossed[t.ring] = true, true
+			}
+		}
 	}
 }
 

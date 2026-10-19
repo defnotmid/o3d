@@ -92,7 +92,11 @@ What is known about three.js carries over:
   `bevel_segments` from `EXTRUDE_DEFAULT`, WorldUVGenerator's UVs), with its
   two material groups as geometries of their own (`caps`, `sides`;
   `geometry_group` is addGroup). three.js's extrusions are flat-faceted;
-  `crease_angle` smooths the walls and bevels instead, caps kept flat. Any triangle geometry can also be drawn as wireframe lines or
+  `crease_angle` smooths the walls and bevels instead, caps kept flat.
+  `Extruded.folded` counts the contours a bevel turned inside out (an
+  inward `bevel_offset` over half the thinnest feature, a `bevel_size`
+  over half a hole, pixels touching at a corner under an outward bevel):
+  made as three.js makes them, but a host can warn. Any triangle geometry can also be drawn as wireframe lines or
   vertex points by setting `material.mode = .Lines` or `.Points`. Line width
   and point size are controlled by `material.size` in world units (perspective
   foreshortened) or in screen pixels when `.No_Size_Attenuation` is in
@@ -292,7 +296,10 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   indexed, corners with equal position, normal and UV shared, the caps'
   triangles first so each group is one index range. With `crease_angle`,
   a wall corner's normal sums the wall faces there within the angle,
-  weighted by their corner angles.
+  weighted by their corner angles. Folds are found per shape at each bevel
+  ring's offset: an edge reversed against the contour's, a winding
+  flipped, or a proper crossing (a sweep over the edges) that the
+  unbevelled contours do not have.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, spot cone

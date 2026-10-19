@@ -199,6 +199,7 @@ test_extrude_geometry :: proc(t: ^testing.T) {
 	volume, inward := mesh_volume(vertices, indices)
 	testing.expectf(t, abs(volume - 6) < 1e-4, "volume %v", volume)
 	testing.expect_value(t, inward, 0)
+	testing.expect_value(t, e.folded, 0)
 	caps, sides: Geometry
 	caps, _ = geometry_get(&g, e.caps)
 	sides, _ = geometry_get(&g, e.sides)
@@ -232,6 +233,37 @@ test_extrude_geometry :: proc(t: ^testing.T) {
 		lo, hi = min(lo, v.position.z), max(hi, v.position.z)
 	}
 	testing.expect(t, abs(lo + 0.2) < 1e-6 && abs(hi - 1.2) < 1e-6)
+}
+
+// Extruded.folded: an inward offset over half a feature's width turns it
+// inside out (a comb's 1-wide teeth at -0.6, not at -0.4); a bevel_size
+// over half a hole's width closes it past nothing; contours touching at a
+// point (pixels meeting at a corner) overlap under any outward bevel.
+@(test)
+test_extrude_folded :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	comb := []Vec2{{0, 0}, {5, 0}, {5, 4}, {4, 4}, {4, 1}, {3, 1}, {3, 4}, {2, 4}, {2, 1}, {1, 1}, {1, 4}, {0, 4}}
+	o := EXTRUDE_DEFAULT
+	o.bevel_size, o.bevel_offset = 0.4, -0.4
+	testing.expect_value(t, extrude_geometry(&g, {{contour = comb}}, o).folded, 0)
+	o.bevel_size, o.bevel_offset = 0.6, -0.6
+	testing.expect_value(t, extrude_geometry(&g, {{contour = comb}}, o).folded, 1)
+
+	outer, hole := square(2, true), square(0.2, false)
+	o.bevel_size, o.bevel_offset = 0.15, 0
+	testing.expect_value(t, extrude_geometry(&g, {{outer[:], {hole[:]}}}, o).folded, 0)
+	o.bevel_size = 0.25
+	testing.expect_value(t, extrude_geometry(&g, {{outer[:], {hole[:]}}}, o).folded, 1)
+
+	// Pixels touching at a corner as tools/mascot traces them: a ring of
+	// eight around an empty middle, its corner pixel out, so the outline
+	// turns around each pixel's corner at (2, -2) and passes it twice.
+	pinch := []Vec2{{0, 0}, {3, 0}, {3, -2}, {2, -2}, {2, -1}, {1, -1}, {1, -2}, {2, -2}, {2, -3}, {0, -3}}
+	o.bevel_size, o.bevel_offset = 0.1, 0
+	testing.expect_value(t, extrude_geometry(&g, {{contour = pinch}}, o).folded, 1)
+	o.bevel_size, o.bevel_offset = 0.1, -0.1
+	testing.expect_value(t, extrude_geometry(&g, {{contour = pinch}}, o).folded, 0)
 }
 
 // A crease angle smooths a round wall (its normals radial and level) and
