@@ -7,6 +7,12 @@ frame is described from scratch (a camera, lights, geometry with materials),
 so a frame is a pure function of whatever drives it. Drawn on the GPU
 through SDL_GPU (Vulkan, Metal), with a software renderer that draws the
 same pixels on the CPU and is the reference the GPU is tested against.
+
+The mascot, Oxa, is drawn by `tools/mascot/oxa.py`: `assets/logo.svg`
+keeps its gills, eyes and mouths as layers a script switches by id, each
+colour one traced path, plus a hidden `silhouette` (all of Oxa as one
+outline with its hole) to extrude, morph or collide.
+
 MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, cgltf,
 stb_image, SDL 3, three.js's models, Odin's packages) is in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

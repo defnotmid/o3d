@@ -6,6 +6,11 @@
 #   body         outline, head, body, tail, feet, cheeks (always on)
 #   eyes_open    (on)                          eyes_closed  a happy blink
 #   mouth_smile  (on)                          mouth_o      a little "o"
+#   silhouette   every visible pixel as one outline (off): the shape to
+#                extrude, morph or collide (found by id)
+#
+# Each layer is one path per colour, its pixels traced into merged outlines
+# (the tracer is ovg's tools/mascot, ported).
 #
 #   python3 tools/mascot/oxa.py assets/logo.svg   (also prints the body)
 #
@@ -113,11 +118,61 @@ LAYERS = [('gills_a', gills(0), True), ('gills_b', gills(1), False), ('body', bo
           ('eyes_open', eyes_open, True), ('eyes_closed', eyes_closed, False),
           ('mouth_smile', mouth_smile, True), ('mouth_o', mouth_o, False)]
 
+# Writes the outline of the mask's pixels as path data: one closed loop per
+# boundary, the pixels on its right (clockwise on screen), so holes wind the
+# other way and fill as holes under either fill rule. Straight runs are
+# single segments; pixels touching only at a corner stay apart.
+def trace(mask):
+    at = lambda x, y: 0 <= x < W and 0 <= y < H and mask[y][x]
+    # Boundary edges by start vertex (at most two: pixels touching at a corner).
+    out = {}
+    def add(x0, y0, x1, y1):
+        out.setdefault((x0, y0), []).append((x1, y1))
+    for y in range(H):
+        for x in range(W):
+            if not mask[y][x]:
+                continue
+            if not at(x, y - 1): add(x, y, x + 1, y)
+            if not at(x + 1, y): add(x + 1, y, x + 1, y + 1)
+            if not at(x, y + 1): add(x + 1, y + 1, x, y + 1)
+            if not at(x - 1, y): add(x, y + 1, x, y)
+    d = []
+    for start in sorted(out, key=lambda v: (v[1], v[0])):
+        while out[start]:
+            # Walk the loop, writing a point where the direction changes.
+            pts, v, dir = [], start, (0, 0)
+            while True:
+                k = 0
+                if len(out[v]) == 2:
+                    # At a corner touch, turn right: keep to the pixels on the right.
+                    right = (-dir[1], dir[0])
+                    for j in range(2):
+                        if pts and (out[v][j][0] - v[0], out[v][j][1] - v[1]) == right:
+                            k = j
+                nxt = out[v][k]
+                out[v][k] = out[v][-1]
+                out[v].pop()
+                step = (nxt[0] - v[0], nxt[1] - v[1])
+                if not pts or step != dir:
+                    pts.append(v)
+                dir, v = step, nxt
+                if v == start:
+                    break
+            d.append(f'M{pts[0][0]} {pts[0][1]}')
+            for prev, p in zip(pts, pts[1:]):
+                d.append(f'H{p[0]}' if p[1] == prev[1] else f'V{p[1]}')
+            d.append('Z')
+    return ''.join(d)
+
 out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W * 8}" height="{H * 8}" shape-rendering="crispEdges">']
 for name, g, on in LAYERS:
-    rects = ''.join(f'<rect x="{x}" y="{y}" width="1" height="1" fill="{PAL[g[y][x]]}"/>'
-                    for y in range(H) for x in range(W) if g[y][x] != '.')
-    out.append(f'<g id="{name}"{"" if on else " display=\"none\""}>{rects}</g>')
+    paths = ''
+    for c in dict.fromkeys(g[y][x] for y in range(H) for x in range(W) if g[y][x] != '.'):
+        paths += f'<path fill="{PAL[c]}" d="{trace([[cell == c for cell in row] for row in g])}"/>'
+    out.append(f'<g id="{name}"{"" if on else " display=\"none\""}>{paths}</g>')
+# The visible layers' union, the whole of Oxa as one outline (off).
+every = [[any(on and g[y][x] != '.' for _, g, on in LAYERS) for x in range(W)] for y in range(H)]
+out.append(f'<g id="silhouette" display="none"><path fill="{PAL["O"]}" d="{trace(every)}"/></g>')
 out.append('</svg>\n')
 open(sys.argv[1], 'w').write('\n'.join(out))
 print('\n'.join(''.join(r) for r in body))
