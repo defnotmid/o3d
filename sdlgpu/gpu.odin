@@ -23,6 +23,12 @@ SKINNED_VERT_MSL :: #load("../shaders/o3d.skinned_vert.msl")
 FRAG_MSL :: #load("../shaders/o3d.frag.msl")
 SHADOW_SPV :: #load("../shaders/o3d.shadow.spv")
 SHADOW_MSL :: #load("../shaders/o3d.shadow.msl")
+CURVES_VERT_SPV :: #load("../shaders/o3d.curves_vert.spv")
+CURVES_VERT_MSL :: #load("../shaders/o3d.curves_vert.msl")
+CURVES_FRAG_SPV :: #load("../shaders/o3d.curves_frag.spv")
+CURVES_FRAG_MSL :: #load("../shaders/o3d.curves_frag.msl")
+SHADOW_CURVES_SPV :: #load("../shaders/o3d.shadow_curves.spv")
+SHADOW_CURVES_MSL :: #load("../shaders/o3d.shadow_curves.msl")
 BG_VERT_SPV :: #load("../shaders/background.vert.spv")
 BG_FRAG_SPV :: #load("../shaders/background.frag.spv")
 BG_VERT_MSL :: #load("../shaders/background.vert.msl")
@@ -49,6 +55,13 @@ GPU :: struct {
 	// By the material's side, then blended or not.
 	pipelines:                [o3d.Side][2]^sdl.GPUGraphicsPipeline,
 	skinned_pipelines:        [o3d.Side][2]^sdl.GPUGraphicsPipeline,
+	// Exact shapes and glyph runs (`.Curves`): their vertex shader (each
+	// vertex's quad), fragment shader (coverage from the quad's curve set
+	// in `curve_words`: by area blended, by sample opaque) and pipelines,
+	// as `pipelines`.
+	curves_vert:              ^sdl.GPUShader,
+	curves_frag:              ^sdl.GPUShader,
+	curve_pipelines:          [o3d.Side][2]^sdl.GPUGraphicsPipeline,
 	bg_pipeline:              ^sdl.GPUGraphicsPipeline,
 	// The multisampled colour and depth targets, at `size`.
 	// The frame's targets, at `capacity`: a frame draws into their top-left
@@ -62,6 +75,7 @@ GPU :: struct {
 	skin_vertices:            Pool_Buffer,
 	morph_deltas:             Pool_Buffer,
 	indices:                  Pool_Buffer,
+	curve_words:              Pool_Buffer,
 	// The generations of the tables mirrored (geometry, textures, shaders'
 	// pipelines): a different one (new contents, ids reused) starts over.
 	mirrored:                 Mirrored,
@@ -82,6 +96,8 @@ GPU :: struct {
 	shadow_frag:              ^sdl.GPUShader,
 	shadow_pipelines:         [o3d.Side]^sdl.GPUGraphicsPipeline,
 	shadow_skinned_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
+	shadow_curves_frag:       ^sdl.GPUShader,
+	shadow_curve_pipelines:   [o3d.Side]^sdl.GPUGraphicsPipeline,
 	shadow_sampler:           ^sdl.GPUSampler,
 	dummy_shadow:             ^sdl.GPUTexture, // bound for a job's unused shadow slots
 	// `render`'s own job.
@@ -121,7 +137,9 @@ Material_Uniforms :: struct {
 	flags:                              o3d.Shading_Flags,
 	alpha_cutoff:                       f32,
 	uv_sets:                            u32,
-	_, _:                               u32,
+	// An exact shape's or glyph run's table of its quads' curve sets in
+	// `curve_words` (o3d.Geometry.curve_table).
+	curve_table, _:                     u32,
 	uv_transforms:                      [12][4]f32,
 }
 #assert(size_of(Material_Uniforms) == 256)
@@ -171,20 +189,24 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	// slangc names the SPIR-V entry points "main" and keeps the names for Metal.
 	formats := sdl.GetGPUShaderFormats(g.device)
-	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code: []u8
+	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code, curves_vert_code, curves_code, shadow_curves_code: []u8
 	format: sdl.GPUShaderFormat
-	vs_entry, skinned_vs_entry, fs_entry, shadow_entry: cstring
+	vs_entry, skinned_vs_entry, fs_entry, shadow_entry, curves_vs_entry, curves_entry, shadow_curves_entry: cstring
 	switch {
 	case .SPIRV in formats:
 		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_SPV, SKINNED_VERT_SPV, FRAG_SPV, SHADOW_SPV
 		bg_vert_code, bg_frag_code = BG_VERT_SPV, BG_FRAG_SPV
+		curves_vert_code, curves_code, shadow_curves_code = CURVES_VERT_SPV, CURVES_FRAG_SPV, SHADOW_CURVES_SPV
 		format = {.SPIRV}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "main", "main", "main", "main"
+		curves_vs_entry, curves_entry, shadow_curves_entry = "main", "main", "main"
 	case .MSL in formats:
 		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_MSL, SKINNED_VERT_MSL, FRAG_MSL, SHADOW_MSL
 		bg_vert_code, bg_frag_code = BG_VERT_MSL, BG_FRAG_MSL
+		curves_vert_code, curves_code, shadow_curves_code = CURVES_VERT_MSL, CURVES_FRAG_MSL, SHADOW_CURVES_MSL
 		format = {.MSL}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "vs_main", "vs_skinned", "fs_main", "fs_shadow"
+		curves_vs_entry, curves_entry, shadow_curves_entry = "vs_curves", "fs_curves", "fs_shadow_curves"
 	case:
 		return .Device
 	}
@@ -192,9 +214,12 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	g.skinned_vert = sdl.CreateGPUShader(g.device, {code_size = len(skinned_vert_code), code = raw_data(skinned_vert_code), entrypoint = skinned_vs_entry, format = format, stage = .VERTEX, num_storage_buffers = 1, num_uniform_buffers = 2})
 	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 12, num_uniform_buffers = 2})
 	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
+	g.curves_vert = sdl.CreateGPUShader(g.device, {code_size = len(curves_vert_code), code = raw_data(curves_vert_code), entrypoint = curves_vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
+	g.curves_frag = sdl.CreateGPUShader(g.device, {code_size = len(curves_code), code = raw_data(curves_code), entrypoint = curves_entry, format = format, stage = .FRAGMENT, num_samplers = 12, num_storage_buffers = 1, num_uniform_buffers = 2})
+	g.shadow_curves_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_curves_code), code = raw_data(shadow_curves_code), entrypoint = shadow_curves_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_storage_buffers = 1, num_uniform_buffers = 1})
 	g.bg_vert = sdl.CreateGPUShader(g.device, {code_size = len(bg_vert_code), code = raw_data(bg_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
 	g.bg_frag = sdl.CreateGPUShader(g.device, {code_size = len(bg_frag_code), code = raw_data(bg_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
-	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.bg_vert == nil || g.bg_frag == nil {
+	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.curves_vert == nil || g.curves_frag == nil || g.shadow_curves_frag == nil || g.bg_vert == nil || g.bg_frag == nil {
 		return .Shader
 	}
 	g.depth_format = .D32_FLOAT
@@ -209,13 +234,15 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 		for blend in 0 ..< 2 {
 			g.pipelines[side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend == 1, false, false)
 			g.skinned_pipelines[side][blend] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend == 1, false, true)
-			if g.pipelines[side][blend] == nil || g.skinned_pipelines[side][blend] == nil {
+			g.curve_pipelines[side][blend] = make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, blend == 1, false, false)
+			if g.pipelines[side][blend] == nil || g.skinned_pipelines[side][blend] == nil || g.curve_pipelines[side][blend] == nil {
 				return .Shader
 			}
 		}
-		g.shadow_pipelines[side] = make_shadow_pipeline(g, side, false)
-		g.shadow_skinned_pipelines[side] = make_shadow_pipeline(g, side, true)
-		if g.shadow_pipelines[side] == nil || g.shadow_skinned_pipelines[side] == nil {
+		g.shadow_pipelines[side] = make_shadow_pipeline(g, g.vert, g.shadow_frag, side, false)
+		g.shadow_skinned_pipelines[side] = make_shadow_pipeline(g, g.skinned_vert, g.shadow_frag, side, true)
+		g.shadow_curve_pipelines[side] = make_shadow_pipeline(g, g.curves_vert, g.shadow_curves_frag, side, false)
+		if g.shadow_pipelines[side] == nil || g.shadow_skinned_pipelines[side] == nil || g.shadow_curve_pipelines[side] == nil {
 			return .Shader
 		}
 	}
@@ -229,7 +256,9 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	g.dummy_texture = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = 1, height = 1, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 	g.morph_deltas.capacity = 64 << 10
 	g.morph_deltas.buffer = sdl.CreateGPUBuffer(g.device, {usage = {.GRAPHICS_STORAGE_READ}, size = g.morph_deltas.capacity})
-	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.dummy_texture == nil || g.morph_deltas.buffer == nil {
+	g.curve_words.capacity = 64 << 10
+	g.curve_words.buffer = sdl.CreateGPUBuffer(g.device, {usage = {.GRAPHICS_STORAGE_READ}, size = g.curve_words.capacity})
+	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.dummy_texture == nil || g.morph_deltas.buffer == nil || g.curve_words.buffer == nil {
 		return .Device
 	}
 	// 1x1 fallback shadow and colour textures, cleared, bound for unused slots.
@@ -257,7 +286,7 @@ destroy :: proc(g: ^GPU) {
 		return
 	}
 	job_destroy(g, &g.job)
-	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices}) {
+	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices, &g.curve_words}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
@@ -293,6 +322,11 @@ destroy :: proc(g: ^GPU) {
 				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
 			}
 		}
+		for p in g.curve_pipelines[side] {
+			if p != nil {
+				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+			}
+		}
 	}
 	if g.bg_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(g.device, g.bg_pipeline)
@@ -308,14 +342,21 @@ destroy :: proc(g: ^GPU) {
 			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
 		}
 	}
+	for p in g.shadow_curve_pipelines {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
+	}
 	if g.shadow_sampler != nil {
 		sdl.ReleaseGPUSampler(g.device, g.shadow_sampler)
 	}
 	if g.dummy_shadow != nil {
 		sdl.ReleaseGPUTexture(g.device, g.dummy_shadow)
 	}
-	if g.shadow_frag != nil {
-		sdl.ReleaseGPUShader(g.device, g.shadow_frag)
+	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.shadow_curves_frag}) {
+		if sh != nil {
+			sdl.ReleaseGPUShader(g.device, sh)
+		}
 	}
 	if g.bg_vert != nil {
 		sdl.ReleaseGPUShader(g.device, g.bg_vert)
@@ -521,9 +562,11 @@ release_custom :: proc(g: ^GPU, c: ^Custom) {
 }
 
 // The shadow pass's pipeline for casters of a material side: depth into the
-// R32_FLOAT map (nearest kept by the depth test), the other side drawn.
+// R32_FLOAT map (nearest kept by the depth test), the other side drawn, by
+// `vert` and `frag` (`vert` or `skinned_vert` and `shadow_frag`, or
+// `curves_vert` and `shadow_curves_frag` for exact shapes).
 @(private = "file")
-make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side, skinned: bool) -> ^sdl.GPUGraphicsPipeline {
+make_shadow_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, side: o3d.Side, skinned: bool) -> ^sdl.GPUGraphicsPipeline {
 	buffers := [2]sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX},
 		{slot = 1, pitch = size_of(o3d.Skin_Vertex), input_rate = .VERTEX},
@@ -540,8 +583,8 @@ make_shadow_pipeline :: proc(g: ^GPU, side: o3d.Side, skinned: bool) -> ^sdl.GPU
 		cull = .NONE
 	}
 	info := sdl.GPUGraphicsPipelineCreateInfo {
-		vertex_shader = g.skinned_vert if skinned else g.vert,
-		fragment_shader = g.shadow_frag,
+		vertex_shader = vert,
+		fragment_shader = frag,
 		vertex_input_state = {vertex_buffer_descriptions = &buffers[0], num_vertex_buffers = 2 if skinned else 1, vertex_attributes = raw_data(attrs), num_vertex_attributes = u32(len(attrs))},
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},

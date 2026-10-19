@@ -661,9 +661,11 @@ effective_draw_mode :: #force_inline proc "contextless" (m: Material, geo: Geome
 }
 
 // Expands instanced draws into individual draws, inverted-hull outlines
-// (`outline_width > 0`) into back-face extruded shells, and `.Lines` / `.Points`
-// draws into camera-facing quad triangles in `exp`, returning `scene`
-// unchanged when no draw uses instancing, outlines, lines, or points.
+// (`outline_width > 0`) into back-face extruded shells, `.Lines` / `.Points`
+// draws into camera-facing quad triangles, and `.Curves` draws' quads grown
+// by half a pixel for the view (`dilate_curve_quads`) in `exp`, returning
+// `scene` unchanged when no draw uses instancing, outlines, lines, points
+// or curves.
 expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, view, proj: Mat4, width, height: int) -> ^Scene {
 	clear(&exp.geos)
 	clear(&exp.vertices)
@@ -716,6 +718,42 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 		m_range := scene.draw_morphs[di] if di < len(scene.draw_morphs) else Morph_Range{}
 		insts := scene_draw_instances(scene, di)
 		mode := effective_draw_mode(d.material, geo)
+		if mode == .Curves && geo.mode != .Curves {
+			// Asked of geometry without curves: its triangles as they are.
+			mode = .Triangles
+			d.material.mode = .Triangles
+		}
+		if mode == .Curves {
+			// The cover quads grown for this view, per instance.
+			src_v, src_i, _ := scene_geometry_mesh(scene, geos, d.geometry)
+			default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
+			run_insts := insts if len(insts) > 0 else default_inst[:]
+			base_lin := linear(d.material.color)
+			for inst in run_insts {
+				M := d.model * inst.transform if len(insts) > 0 else d.model
+				first_v := u32(len(exp.vertices))
+				first_i := u32(len(exp.indices))
+				table_grow_non_zero(&exp.vertices, int(first_v) + len(src_v))
+				dst := exp.vertices[first_v:]
+				dilate_curve_quads(src_v, dst, view_proj * M, width, height)
+				r_max: f32
+				for v in dst {
+					r_max = max(r_max, linalg.length(v.position))
+				}
+				append(&exp.indices, ..src_i)
+				dyn := geo
+				dyn.first_vertex, dyn.first_index = first_v, first_i
+				dyn.skinned, dyn.morph_targets, dyn.radius = false, 0, r_max
+				append(&exp.geos, dyn)
+				mat := d.material
+				mat.mode = .Curves
+				if len(insts) > 0 && (inst.has_color || inst.color != {}) {
+					mat.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
+				}
+				append(&out.draws, Draw{geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos) - 1), model = M, material = mat})
+			}
+			continue
+		}
 		if mode == .Triangles {
 			src_geo := d.geometry
 			if d.geometry >= SCENE_GEO_BIT {
@@ -1029,10 +1067,10 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 }
 
 // Blended over what is behind: transparent, with opacity under 1 or alpha
-// from elsewhere (a colour map's, a ShaderMaterial's), as three.js blends
-// any transparent material.
+// from elsewhere (a colour map's, a ShaderMaterial's, an exact shape's
+// coverage), as three.js blends any transparent material.
 blended :: proc "contextless" (m: Material) -> bool {
-	return .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.shader != 0)
+	return .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.shader != 0 || m.mode == .Curves)
 }
 
 // ---- shading ----------------------------------------------------------------------------
@@ -1164,6 +1202,9 @@ Shading_Flag :: enum u8 {
 	Ao_Map,
 	Alpha_Mask,
 	Toon,
+	// An exact shape (`Draw_Mode.Curves`): coverage from its curves, by
+	// area when blended, by sample otherwise.
+	Curves,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1211,6 +1252,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		}
 		if .Alpha_Mask in m.flags {
 			f += {.Alpha_Mask}
+		}
+		if m.mode == .Curves && m.shader == 0 {
+			f += {.Curves}
 		}
 		if has_tex(textures, m.color_map) {
 			f += {.Color_Map}

@@ -123,12 +123,16 @@ skin_vertex :: #force_inline proc "contextless" (v: Vertex, sv: Skin_Vertex, joi
 
 // How a geometry or draw is rasterized: indexed triangles (Mesh), line
 // segments (LineSegments: pairs of vertices or mesh edges expanded into
-// camera-facing ribbons), or points (Points: vertices expanded into
-// camera-facing quads).
+// camera-facing ribbons), points (Points: vertices expanded into
+// camera-facing quads), or quads covering curves whose pixels take their
+// coverage from them (`exact_shape_geometry`, `glyph_run_geometry`,
+// curve.odin; a geometry's own mode, not one for a material to ask of
+// other geometry).
 Draw_Mode :: enum u8 {
 	Triangles = 0,
 	Lines     = 1,
 	Points    = 2,
+	Curves    = 3,
 }
 
 Geometry :: struct {
@@ -138,6 +142,10 @@ Geometry :: struct {
 	first_morph, morph_targets: u32,
 	skinned:                    bool,
 	mode:                       Draw_Mode,
+	// `.Curves`: where its quads' entries start in `Geometries.curve_words`,
+	// one a quad (its curve set's first word, `CURVE_EVEN_ODD` set for that
+	// fill rule); `uv1` is each quad's shape coordinate.
+	curve_table:                u32,
 	// Distance from the origin to the farthest vertex (culling, sorting),
 	// and the largest morph position delta length across targets.
 	radius, morph_radius:       f32,
@@ -189,6 +197,10 @@ Geometries :: struct {
 	skin_vertices: [dynamic]Skin_Vertex,
 	morph_deltas:  [dynamic]Morph_Delta,
 	indices:       [dynamic]u32,
+	// Curve sets' blocks of ovg curves' words, and `.Curves` geometries'
+	// tables of their quads' sets (curve.odin).
+	curve_words:   [dynamic]u32,
+	curve_sets:    [dynamic]Curve_Set,
 	list:          [dynamic]Geometry,
 	keys:          map[Geometry_Key]Geometry_Id,
 	// A primitive is built here, then appended to the shared arrays.
@@ -203,6 +215,8 @@ geometries_destroy :: proc(g: ^Geometries) {
 	delete(g.skin_vertices)
 	delete(g.morph_deltas)
 	delete(g.indices)
+	delete(g.curve_words)
+	delete(g.curve_sets)
 	delete(g.list)
 	delete(g.keys)
 	delete(g.scratch.vertices)

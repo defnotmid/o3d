@@ -39,10 +39,18 @@ BAND_ROWS :: 32
 CHUNK_TRIS :: 8192
 // Quads shaded by one oksl call (a run of one draw's triangles).
 QUAD_BATCH :: 256
-// The standard material's corner floats: world position, normal, and uv + uv1 when textured.
+// The standard material's corner floats: world position, normal, and uv + uv1 when textured
+// (or an exact shape's: uv1 is its shape coordinate).
 UNTEX_FLOATS :: 6
 STANDARD_FLOATS :: 10
+// The shadow map's corner floats: the alpha mask's colour map uv, then an
+// exact shape's coordinate, each when there is one.
 SHADOW_MASK_FLOATS :: 2
+
+@(private)
+shadow_floats :: #force_inline proc "contextless" (masked, curved: bool) -> int {
+	return SHADOW_MASK_FLOATS * (int(masked) + int(curved))
+}
 
 Software :: struct {
 	width, height: int,
@@ -97,14 +105,16 @@ software_destroy :: proc(s: ^Software) {
 	s^ = {}
 }
 
-// A triangle ready to draw: screen positions (x, y, depth) with 1/w, and
+// A triangle ready to draw: screen positions (x, y, depth) with 1/w,
 // where its corners' floats are in its chunk's `values` (per corner, the
-// draw's floats, divided by w unless flat).
+// draw's floats, divided by w unless flat), and an exact shape's quad's
+// entry (`curve_quad_entry`).
 @(private)
 Tri :: struct {
 	p:            [3]Vec3,
 	inv_w:        [3]f32,
 	values:       u32,
+	curve:        u32,
 	draw:         int,
 	min_y, max_y: int,
 	front:        bool, // facing the camera (before back faces were turned)
@@ -337,14 +347,16 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	}
 	count := int(hi - lo) + 1
 	sh := shader_get(job.shaders, m.shader) if !job.depth_only else nil
-	textured := m.flags & TEXTURE_FLAGS != {}
+	textured := m.flags & (TEXTURE_FLAGS + {.Curves}) != {}
 	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS if textured else UNTEX_FLOATS)
+	masked, curved: bool
 	if job.depth_only {
 		if .Alpha_Mask in m.flags && .Color_Map not_in m.flags && m.opacity < m.alpha_cutoff {
 			slice.zero(s.chunk_bands[ci * job.bands:][:job.bands])
 			return
 		}
-		nf = SHADOW_MASK_FLOATS if (.Alpha_Mask in m.flags && .Color_Map in m.flags) else 0
+		masked, curved = .Alpha_Mask in m.flags && .Color_Map in m.flags, .Curves in m.flags
+		nf = shadow_floats(masked, curved)
 	}
 	flat := shader_flat(sh) if sh != nil else nil
 	table_grow_non_zero(&w.positions, count)
@@ -362,8 +374,11 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 				v.position, v.normal = skin_vertex(v, skin[vi], joints)
 			}
 			w.positions[i] = mvp * Vec4{v.position.x, v.position.y, v.position.z, 1}
-			if nf == SHADOW_MASK_FLOATS {
-				(^Vec2)(&w.values[i * SHADOW_MASK_FLOATS])^ = v.uv1 if use_uv1 else v.uv
+			if masked {
+				(^Vec2)(&w.values[i * nf])^ = v.uv1 if use_uv1 else v.uv
+			}
+			if curved {
+				(^Vec2)(&w.values[i * nf + nf - SHADOW_MASK_FLOATS])^ = v.uv1
 			}
 		}
 	} else if sh == nil {
@@ -418,11 +433,13 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	}
 	side := shadow_side(d.material.side) if job.depth_only else d.material.side
 	values := raw_data(w.values) // nil with no floats (the shadow map): never read
+	curved_geo := geo.mode == .Curves && .Curves in m.flags
 	for t := 0; t + 2 < len(indices); t += 3 {
 		v := [3]int{int(indices[t] - lo), int(indices[t + 1] - lo), int(indices[t + 2] - lo)}
 		clip := [3]Vec4{w.positions[v[0]], w.positions[v[1]], w.positions[v[2]]}
+		curve := curve_quad_entry(job.geos, geo, indices[t] / 4) if curved_geo else 0
 		if clip[0].z >= 0 && clip[1].z >= 0 && clip[2].z >= 0 {
-			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, job.width, job.height, side)
+			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, curve, job.width, job.height, side)
 			continue
 		}
 		corners: [3]Corner = ---
@@ -430,7 +447,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 			corners[k].c = clip[k]
 			copy(corners[k].v[:nf], w.values[v[k] * nf:][:nf])
 		}
-		clip_near(c, &corners, nf, flat, di, job.width, job.height, side)
+		clip_near(c, &corners, nf, flat, di, curve, job.width, job.height, side)
 	}
 	counts := s.chunk_bands[ci * job.bands:][:job.bands]
 	slice.zero(counts)
@@ -489,7 +506,7 @@ list_chunk :: proc(data: rawptr, ci, _: int) {
 // what is left as one or two screen triangles; `nf` floats per corner,
 // the `flat` ones the first vertex's, carried, not interpolated.
 @(private = "file")
-clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw, width, height: int, side: Side) {
+clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side) {
 	for f in flat {
 		tri[1].v[f], tri[2].v[f] = tri[0].v[f], tri[0].v[f]
 	}
@@ -515,7 +532,7 @@ clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw, width, 
 		}
 	}
 	for k in 1 ..< count - 1 {
-		emit(c, {in_[0].c, in_[k].c, in_[k + 1].c}, {&in_[0].v[0], &in_[k].v[0], &in_[k + 1].v[0]}, nf, flat, draw, width, height, side)
+		emit(c, {in_[0].c, in_[k].c, in_[k + 1].c}, {&in_[0].v[0], &in_[k].v[0], &in_[k + 1].v[0]}, nf, flat, draw, curve, width, height, side)
 	}
 }
 
@@ -523,9 +540,10 @@ clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw, width, 
 // reaches a row: its corners' `nf` floats each (`values`), divided by w
 // except the flat ones, the first corner's.
 @(private = "file")
-emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, draw, width, height: int, side: Side) {
+emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side) {
 	t: Tri
 	t.draw = draw
+	t.curve = curve
 	for k in 0 ..< 3 {
 		clip := clip[k]
 		w := clip.w if abs(clip.w) > 1e-9 else 1e-9

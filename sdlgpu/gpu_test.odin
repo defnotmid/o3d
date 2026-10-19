@@ -88,6 +88,20 @@ test_shapes_matches_software :: proc(t: ^testing.T) {expect_parity(t, "shapes")}
 @(test)
 test_extrude_matches_software :: proc(t: ^testing.T) {expect_parity(t, "extrude")}
 
+// Exact shapes: coverage by area (transparent) and by sample (opaque), the
+// even-odd rule, a slanted and a small one, a colour map.
+@(test)
+test_curves_match_software :: proc(t: ^testing.T) {expect_parity(t, "curves")}
+
+// Exact shapes cast their outlines' shadows.
+@(test)
+test_curve_shadow_matches_software :: proc(t: ^testing.T) {expect_parity(t, "curve_shadow")}
+
+// Glyph runs: quads of shared curve sets, overlapping, mirrored, grazing,
+// shadowed and colour-mapped.
+@(test)
+test_text_matches_software :: proc(t: ^testing.T) {expect_parity(t, "text")}
+
 // A host's GPU texture bound to an external texture draws as the same
 // pixels uploaded; unbound, or bound for another table, as no map.
 @(test)

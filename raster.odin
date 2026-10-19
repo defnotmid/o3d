@@ -5,10 +5,11 @@ import "core:math/linalg"
 import "core:slice"
 
 import "deps:oksl"
+import "deps:ovg/curves"
 
 // Phase 3 of the software renderer: each band clears its rows, rasterizes its
 // triangles in drawing order (per pixel when untextured, in 2x2 quads when
-// textured or running an oksl ShaderMaterial), and resolves 4x MSAA samples
+// textured, an exact shape's, or running an oksl ShaderMaterial), and resolves 4x MSAA samples
 // into premultiplied RGBA8 pixels (compositing the equirectangular background
 // on uncovered or partially transparent pixels).
 
@@ -97,12 +98,22 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 		}
 		m := &s.materials[t.draw]
 		masked := .Alpha_Mask in m.flags && .Color_Map in m.flags
-		uv: [3]Vec2 = ---
-		if masked {
-			vs := s.chunks[ref.chunk].values[t.values:][:3 * SHADOW_MASK_FLOATS]
-			for k in 0 ..< 3 {
-				uv[k] = (^Vec2)(&vs[k * SHADOW_MASK_FLOATS])^
+		curved := .Curves in m.flags
+		nf := shadow_floats(masked, curved)
+		uv, rc: [3]Vec2 = ---, ---
+		vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
+		for k in 0 ..< 3 {
+			if masked {
+				uv[k] = (^Vec2)(&vs[k * nf])^
 			}
+			if curved {
+				rc[k] = (^Vec2)(&vs[k * nf + nf - SHADOW_MASK_FLOATS])^
+			}
+		}
+		words: []u32
+		even_odd: bool
+		if curved {
+			words, even_odd = curve_entry_words(job.geos, t.curve)
 		}
 		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
 		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
@@ -118,8 +129,11 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 				z := b0 * t.p[0].z + b1 * t.p[1].z + b2 * t.p[2].z
 				i := y * size + x
 				if z >= 0 && z <= 1 && z < smap[i] {
+					iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+					if curved && !curves_inside(words, (rc[0] * b0 + rc[1] * b1 + rc[2] * b2) / iw, even_odd) {
+						continue
+					}
 					if masked {
-						iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
 						raw := (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) / iw
 						xf := m.uv_transforms[.Color]
 						uv_col := Vec2{
@@ -162,7 +176,8 @@ slot_uv :: #force_inline proc "contextless" (m: ^Shading_Material, slot: Texture
 
 // A standard-material triangle's rows in the band: per pixel when untextured,
 // or in 2x2 quads when textured so uv and world derivatives give the mip level
-// and the normal map's tangent frame.
+// and the normal map's tangent frame (and an exact shape's coordinate its
+// pixel footprint).
 @(private = "file")
 draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0, y1: int) {
 	t := t // a local the pixel loop keeps in registers (a parameter is a reference)
@@ -174,7 +189,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 	if area == 0 {
 		return
 	}
-	if m.flags & TEXTURE_FLAGS != {} {
+	if m.flags & (TEXTURE_FLAGS + {.Curves}) != {} {
 		draw_standard_textured(job, ref, t, m, y0, y1, area, blend, receive)
 		return
 	}
@@ -244,6 +259,12 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 		w0 := world[0] / t.inv_w[0]
 		flat_n = linalg.normalize(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
 	}
+	curved := .Curves in m.flags
+	words: []u32
+	even_odd: bool
+	if curved {
+		words, even_odd = curve_entry_words(job.geos, t.curve)
+	}
 	inv_area := 1 / area
 	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width) &~ 1
 	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
@@ -294,6 +315,21 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 						opacity = 1
 					}
 				}
+				covered := lanes[l]
+				if curved {
+					if blend {
+						cov := curve_coverage(words, uv1s[l], d1x, d1y, even_odd)
+						if cov <= 0 {
+							continue
+						}
+						opacity *= cov
+					} else {
+						covered &= curve_samples(words, uv1s[l], d1x, d1y, even_odd)
+						if covered == {} {
+							continue
+						}
+					}
+				}
 				if .Roughness_Map in m.flags {
 					r_uv, r_dx, r_dy := slot_uv(m, .Roughness, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
 					pm.roughness *= sample(job.textures, m.roughness_map, r_uv, r_dx, r_dy).g
@@ -330,10 +366,39 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				}
 				lit := shade(&pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
 				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				write_samples(s, t, x, y, area, lanes[l], pack(lit, opacity), blend)
+				write_samples(s, t, x, y, area, covered, pack(lit, opacity), blend)
 			}
 		}
 	}
+}
+
+// The area of the pixel at shape coordinate `rc` the shape covers, the
+// pixel's footprint the parallelogram its screen derivatives span
+// (shaders/o3d.slang's `fs_curves` likewise): exact under rotation, skew
+// and grazing views, so never faded to the shape's mean (`curves.fade`),
+// which it reaches by itself once the footprint holds the whole shape.
+@(private = "file")
+curve_coverage :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, even_odd: bool) -> f32 {
+	if len(words) == 0 {
+		return 0
+	}
+	return curves.coverage_affine(words, rc, dx, dy, even_odd)
+}
+
+// The pixel's samples inside the shape: the shape coordinate at each sample
+// position from the centre's and its derivatives.
+@(private = "file")
+curve_samples :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, even_odd: bool) -> (inside: Sample_Mask) {
+	if len(words) == 0 {
+		return
+	}
+	for k in 0 ..< SAMPLES {
+		o := SAMPLE_OFFSETS[k] - 0.5
+		if curves_inside(words, rc + dx * o.x + dy * o.y, even_odd) {
+			inside += {k}
+		}
+	}
+	return
 }
 
 

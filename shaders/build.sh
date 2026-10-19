@@ -6,12 +6,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-FLAGS=(-matrix-layout-column-major -O2 -I .)
+# ovg's curves.slang (exact shapes' coverage) from its checkout beside o3d.
+FLAGS=(-matrix-layout-column-major -O2 -I . -I ../../ovg/shaders)
 UNITS=(
 	o3d:vert:vs_main
 	o3d:skinned_vert:vs_skinned
+	o3d:curves_vert:vs_curves
 	o3d:frag:fs_main
 	o3d:shadow:fs_shadow
+	o3d:curves_frag:fs_curves
+	o3d:shadow_curves:fs_shadow_curves
 	background:vert:vs_main
 	background:frag:fs_main
 )

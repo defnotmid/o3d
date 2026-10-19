@@ -195,6 +195,34 @@ main :: proc() {
 	}
 
 	{
+		// Exact shapes (curve.odin) over the small scene: a circle opaque
+		// (coverage by sample) and transparent (by area).
+		geos: o3d.Geometries
+		defer o3d.geometries_destroy(&geos)
+		scene: o3d.Scene
+		defer o3d.scene_destroy(&scene)
+		build_small_scene(&scene, &geos, nil)
+		path: o3d.Path
+		defer o3d.path_destroy(&path)
+		k: f32 = 0.5522847498
+		o3d.path_move_to(&path, {1, 0})
+		o3d.path_bezier_curve_to(&path, {1, k}, {k, 1}, {0, 1})
+		o3d.path_bezier_curve_to(&path, {-k, 1}, {-1, k}, {-1, 0})
+		o3d.path_bezier_curve_to(&path, {-1, -k}, {-k, -1}, {0, -1})
+		o3d.path_bezier_curve_to(&path, {k, -1}, {1, -k}, {1, 0})
+		circle := o3d.exact_shape_geometry(&geos, &path)
+		solid := o3d.MATERIAL_DEFAULT
+		solid.color = {0.95, 0.3, 0.3}
+		clear := solid
+		clear.color, clear.flags = {0.3, 0.6, 0.95}, {.Transparent}
+		append(&scene.draws, o3d.Draw{circle, o3d.compose({-1, 1.2, 0.8}, {0, 0.3, 0}, {0.5, 0.5, 0.5}), solid})
+		append(&scene.draws, o3d.Draw{circle, o3d.compose({1, 1.2, 0.8}, {0, -0.3, 0}, {0.5, 0.5, 0.5}), clear})
+
+		run_case("small_curves     (1T, 0-alloc)", &sw, &scene, &geos, nil, nil, W, H, WARMUP, ITERS)
+		run_case("small_curves     (pool)", &sw, &scene, &geos, nil, &pool, W, H, WARMUP, ITERS)
+	}
+
+	{
 		geos: o3d.Geometries
 		defer o3d.geometries_destroy(&geos)
 		textures: o3d.Textures

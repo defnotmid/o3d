@@ -14,6 +14,7 @@ import o3d ".."
 sync_mirrors :: proc(g: ^GPU, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, textures: ^o3d.Textures) {
 	if geos != nil && geos.generation != g.mirrored.geometry {
 		g.vertices.uploaded, g.skin_vertices.uploaded, g.morph_deltas.uploaded, g.indices.uploaded = 0, 0, 0, 0
+		g.curve_words.uploaded = 0
 		g.mirrored.geometry = geos.generation
 	}
 	if textures != nil && textures.generation != g.mirrored.textures {
@@ -107,6 +108,7 @@ upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, pass: ^sdl.GPUCopyPass) 
 	upload_pool(g, &g.skin_vertices, {.VERTEX}, mem.slice_to_bytes(geos.skin_vertices[:]), pass) or_return
 	upload_pool(g, &g.morph_deltas, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(geos.morph_deltas[:]), pass) or_return
 	upload_pool(g, &g.indices, {.INDEX}, mem.slice_to_bytes(geos.indices[:]), pass) or_return
+	upload_pool(g, &g.curve_words, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(geos.curve_words[:]), pass) or_return
 	return nil
 }
 
@@ -193,7 +195,7 @@ make_draw_uniforms :: #force_inline proc "contextless" (mvp, model: o3d.Mat4, ge
 }
 
 @(private = "file")
-make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Material) -> (mu: Material_Uniforms) {
+make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Material, geo: o3d.Geometry) -> (mu: Material_Uniforms) {
 	mu = {
 		color        = {m.base.r, m.base.g, m.base.b, m.opacity},
 		emissive     = {m.emissive.r, m.emissive.g, m.emissive.b, 0},
@@ -203,6 +205,7 @@ make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Mate
 		flags        = m.flags,
 		alpha_cutoff = m.alpha_cutoff,
 		uv_sets      = m.uv_sets,
+		curve_table  = geo.curve_table,
 	}
 	for s, i in o3d.Texture_Slot {
 		t := m.uv_transforms[s]
@@ -280,16 +283,23 @@ draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
 		}
 		joints := o3d.scene_draw_joints(scene, di)
 		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
+		curved := .Curves in m.flags
 		p := g.shadow_skinned_pipelines[d.material.side] if skinned else g.shadow_pipelines[d.material.side]
+		if curved {
+			p = g.shadow_curve_pipelines[d.material.side]
+		}
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
+		}
+		if curved {
+			sdl.BindGPUFragmentStorageBuffers(pass, 0, &g.curve_words.buffer, 1)
 		}
 		color_sampler := tex_binding(g, m.color_map)
 		sdl.BindGPUFragmentSamplers(pass, 0, &color_sampler, 1)
 		du := make_draw_uniforms(shadow.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
-		mu := make_material_uniforms(m)
+		mu := make_material_uniforms(m, geo)
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {
 			vbs := [2]sdl.GPUBufferBinding {
@@ -302,7 +312,8 @@ draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
 			copy(ju[:], joints)
 			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
-		} else if du.morph_info.x > 0 && geo.first_vertex > 0 {
+		} else if (du.morph_info.x > 0 || curved) && geo.first_vertex > 0 {
+			// Vertices counted from 0 (SV_VertexID: morph deltas, curves' quads).
 			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
 			bound_vb = nil
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
@@ -609,10 +620,17 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		}
 		joints := o3d.scene_draw_joints(scene, di)
 		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
+		curved := .Curves in m.flags
 		p := g.skinned_pipelines[d.material.side][1 if blend else 0] if skinned else g.pipelines[d.material.side][1 if blend else 0]
+		if curved {
+			p = g.curve_pipelines[d.material.side][1 if blend else 0]
+		}
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
+		}
+		if curved {
+			sdl.BindGPUFragmentStorageBuffers(pass, 0, &g.curve_words.buffer, 1)
 		}
 		samplers := [12]sdl.GPUTextureSamplerBinding {
 			tex_binding(g, m.color_map),
@@ -631,7 +649,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], len(samplers))
 		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
-		mu := make_material_uniforms(m)
+		mu := make_material_uniforms(m, geo)
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {
 			vbs := [2]sdl.GPUBufferBinding {
@@ -644,7 +662,8 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 			copy(ju[:], joints)
 			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
-		} else if du.morph_info.x > 0 && geo.first_vertex > 0 {
+		} else if (du.morph_info.x > 0 || curved) && geo.first_vertex > 0 {
+			// Vertices counted from 0 (SV_VertexID: morph deltas, curves' quads).
 			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
 			bound_vb = nil
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)

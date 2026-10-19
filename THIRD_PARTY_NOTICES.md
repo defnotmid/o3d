@@ -9,6 +9,8 @@ these (onimite's notices list them).
 | Component | What it does | License file |
 | --- | --- | --- |
 | oksl | compiles ShaderMaterials (`deps:oksl`) | `LICENSES/oksl-MIT.txt` |
+| ovg's curves package | exact shapes' per-pixel coverage (`deps:ovg/curves`, and `shaders/curves.slang` compiled into the curve shaders) | `LICENSES/ovg-MIT.txt` |
+| Slug (Eric Lengyel's reference shaders, Copyright 2017; dual MIT OR Apache-2.0, used under MIT; the patent is dedicated to the public domain) | listed by ovg for its curves package, which o3d's exact shapes and text use | `LICENSES/Slug-MIT.txt` |
 | cgltf (`vendor:cgltf`) | glTF 2.0 / GLB parsing (`gltf.odin`) | `LICENSES/cgltf-MIT.txt` |
 | stb_image (`vendor:stb/image`) | texture decoding (used under MIT) | `LICENSES/stb-MIT.txt` |
 | SDL 3 (`vendor:sdl3`) | the GPU renderer's device and SDL_GPU (`o3d/sdlgpu`) | `LICENSES/SDL3-Zlib.txt` |

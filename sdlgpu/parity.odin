@@ -6,6 +6,8 @@ import "core:math"
 
 import sdl "vendor:sdl3"
 
+import "deps:ovg/curves"
+
 import o3d ".."
 
 // GPU-vs-software parity: scenes that cover every shading path (standard
@@ -45,6 +47,9 @@ PARITY_CASES := [?]Parity_Case {
 	{"manim", 200, 150, build_manim},
 	{"shapes", 200, 150, build_shapes},
 	{"extrude", 200, 150, build_extrude},
+	{"curves", 240, 180, build_curves},
+	{"curve_shadow", 200, 150, build_curve_shadow},
+	{"text", 240, 180, build_text},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -778,6 +783,150 @@ build_extrude :: proc(a: ^Parity_Assets) -> string {
 	plate_mat := o3d.MATERIAL_DEFAULT
 	plate_mat.color, plate_mat.roughness = {0.85, 0.85, 0.8}, 0.8
 	append(&a.scene.draws, o3d.Draw{o3d.shape_geometry(&a.geos, plate), o3d.compose({0, 0, -1}), plate_mat})
+	return ""
+}
+
+// A heart of two cubics and a ring of two circles (cubic arcs), as paths.
+@(private = "file")
+curve_paths :: proc(heart, ring: ^o3d.Path) {
+	o3d.path_move_to(heart, {0, -1})
+	o3d.path_bezier_curve_to(heart, {-1.6, -0.1}, {-0.9, 1.2}, {0, 0.5})
+	o3d.path_bezier_curve_to(heart, {0.9, 1.2}, {1.6, -0.1}, {0, -1})
+	for r in ([2]f32{1, 0.55}) {
+		k := r * 0.5522847498
+		o3d.path_move_to(ring, {r, 0})
+		o3d.path_bezier_curve_to(ring, {r, k}, {k, r}, {0, r})
+		o3d.path_bezier_curve_to(ring, {-k, r}, {-r, k}, {-r, 0})
+		o3d.path_bezier_curve_to(ring, {-r, -k}, {-k, -r}, {0, -r})
+		o3d.path_bezier_curve_to(ring, {k, -r}, {r, -k}, {r, 0})
+	}
+}
+
+// Exact shapes (curve.odin): an opaque heart (coverage by sample) and a
+// slanted even-odd ring (transparent: coverage by area) over a lit plate, a
+// small far heart (its pixel footprint near its bands), and a colour-mapped
+// ring, both of whose edges cross a mesh's.
+build_curves :: proc(a: ^Parity_Assets) -> string {
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {0.3, 0.5, 4}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 30}
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {2, 3, 4}})
+	append(&a.scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.3, 0.2, 0.2}, intensity = 0.8})
+	heart, ring: o3d.Path
+	defer o3d.path_destroy(&heart)
+	defer o3d.path_destroy(&ring)
+	curve_paths(&heart, &ring)
+	heart_geo := o3d.exact_shape_geometry(&a.geos, &heart)
+	ring_geo := o3d.exact_shape_geometry(&a.geos, &ring, .Even_Odd)
+
+	plate := o3d.MATERIAL_DEFAULT
+	plate.color, plate.roughness = {0.35, 0.4, 0.5}, 0.8
+	append(&a.scene.draws, o3d.Draw{o3d.plane(&a.geos, 5, 3), o3d.compose({0, 0, -0.6}), plate})
+	red := o3d.MATERIAL_DEFAULT
+	red.color, red.roughness = {0.95, 0.3, 0.3}, 0.4
+	append(&a.scene.draws, o3d.Draw{heart_geo, o3d.compose({-1, 0.3, 0}, {0, 0.4, 0.2}, {0.8, 0.8, 0.8}), red})
+	glass := o3d.MATERIAL_DEFAULT
+	glass.color, glass.roughness, glass.flags, glass.side = {0.4, 0.8, 1}, 0.3, {.Transparent}, .Double
+	append(&a.scene.draws, o3d.Draw{ring_geo, o3d.compose({0.9, 0.3, 0.2}, {-0.9, 0.3, 0}, {0.7, 0.7, 0.7}), glass})
+	small := o3d.MATERIAL_DEFAULT
+	small.color, small.flags = {1, 0.9, 0.4}, {.Basic, .Transparent}
+	append(&a.scene.draws, o3d.Draw{heart_geo, o3d.compose({0, -0.7, 0.5}, {}, {0.06, 0.06, 0.06}), small})
+	T :: 16
+	px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			px[i], px[i + 1], px[i + 2], px[i + 3] = u8(x * 16), 200, u8(y * 16), 255
+		}
+	}
+	mapped := o3d.MATERIAL_DEFAULT
+	mapped.color_map = o3d.texture_add(&a.textures, px[:], T, T)
+	append(&a.scene.draws, o3d.Draw{ring_geo, o3d.compose({0.2, -0.5, 0.3}, {-0.3, 0, 0}, {0.35, 0.35, 0.35}), mapped})
+	return ""
+}
+
+// Exact shapes' shadows: an opaque heart and a transparent ring standing over
+// a floor, both cast their outlines (not their quads) into the map.
+build_curve_shadow :: proc(a: ^Parity_Assets) -> string {
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {1.5, 2, 4}, target = {0, 0.4, 0}, fov = 45, near = 0.1, far = 30}
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1.5, 4, 2.5}, cast_shadow = true, shadow = {map_size = 1024, height = 6, bias = -0.0005, normal_bias = 0.01}})
+	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
+	heart, ring: o3d.Path
+	defer o3d.path_destroy(&heart)
+	defer o3d.path_destroy(&ring)
+	curve_paths(&heart, &ring)
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness, floor.flags = {0.8, 0.8, 0.75}, 0.9, {.Receive_Shadow}
+	append(&a.scene.draws, o3d.Draw{o3d.plane(&a.geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	red := o3d.MATERIAL_DEFAULT
+	red.color, red.flags, red.side = {0.95, 0.3, 0.3}, {.Cast_Shadow, .Receive_Shadow}, .Double
+	append(&a.scene.draws, o3d.Draw{o3d.exact_shape_geometry(&a.geos, &heart), o3d.compose({-0.7, 0.8, 0}, {0, 0.5, 0}, {0.6, 0.6, 0.6}), red})
+	glass := o3d.MATERIAL_DEFAULT
+	glass.color, glass.flags, glass.side = {0.4, 0.8, 1}, {.Transparent, .Cast_Shadow}, .Double
+	append(&a.scene.draws, o3d.Draw{o3d.exact_shape_geometry(&a.geos, &ring, .Even_Odd), o3d.compose({0.8, 0.7, 0.2}, {0, -0.4, 0}, {0.55, 0.55, 0.55}), glass})
+	return ""
+}
+
+// Glyph runs (curve.odin): sets shared across runs and glyphs, a y-down
+// glyph from ovg's builder (as a font's), glyphs whose quads overlap and a
+// mark over another glyph. An opaque run stands tilted over a shadowed
+// floor and casts its glyphs' outlines; a transparent mirrored run (font
+// units, y down) lies far along the floor (grazing, small); a
+// colour-mapped one faces the eye.
+build_text :: proc(a: ^Parity_Assets) -> string {
+	o3d.scene_clear(&a.scene)
+	a.scene.camera = {position = {0.1, 1.2, 2.5}, target = {-0.1, 0.5, 0.4}, fov = 45, near = 0.1, far = 30}
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1, 4, 3}, cast_shadow = true, shadow = {map_size = 1024, height = 6, bias = -0.0005, normal_bias = 0.01}})
+	append(&a.scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.3, 0.2, 0.2}, intensity = 0.8})
+	heart, ring: o3d.Path
+	defer o3d.path_destroy(&heart)
+	defer o3d.path_destroy(&ring)
+	curve_paths(&heart, &ring)
+	heart_set := o3d.curve_set_add(&a.geos, &heart)
+	ring_set := o3d.curve_set_add(&a.geos, &ring, .Even_Odd)
+	// A bowl with a stem, y down from the pen as a font's glyph.
+	b: curves.Builder
+	defer curves.builder_destroy(&b)
+	curves.move_to(&b, {0, 0})
+	curves.line_to(&b, {0, -1.4})
+	curves.line_to(&b, {0.25, -1.4})
+	curves.line_to(&b, {0.25, -0.7})
+	curves.quad_to(&b, {1.1, -1.1}, {1.1, -0.35})
+	curves.quad_to(&b, {1.1, 0.4}, {0.25, 0})
+	curves.close(&b)
+	words, origin, extent, ok := curves.build(&b)
+	if !ok {
+		return "text: the glyph's curves did not build"
+	}
+	defer delete(words)
+	bowl_set := o3d.curve_set_add_words(&a.geos, words, origin, extent)
+	if heart_set == 0 || ring_set == 0 || bowl_set == 0 {
+		return "text: a curve set was not made"
+	}
+	upright := []o3d.Glyph{{heart_set, {0, 0}}, {ring_set, {0.37, 0}}, {heart_set, {0.68, 0}}, {ring_set, {0.68, 0.05}}, {heart_set, {1.01, 0}}}
+	opaque_run := o3d.glyph_run_geometry(&a.geos, upright, 0.22)
+	font_run := o3d.glyph_run_geometry(&a.geos, []o3d.Glyph{{bowl_set, {0, 0}}, {bowl_set, {0.27, 0}}, {heart_set, {0.68, 0.12}}, {bowl_set, {0.88, 0}}}, {0.25, -0.25})
+
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness, floor.flags = {0.8, 0.8, 0.75}, 0.9, {.Receive_Shadow}
+	append(&a.scene.draws, o3d.Draw{o3d.plane(&a.geos, 8, 8), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	red := o3d.MATERIAL_DEFAULT
+	red.color, red.roughness, red.flags, red.side = {0.95, 0.3, 0.3}, 0.4, {.Cast_Shadow, .Receive_Shadow}, .Double
+	append(&a.scene.draws, o3d.Draw{opaque_run, o3d.compose({-0.7, 0.55, 0}, {-0.2, 0.3, 0}), red})
+	ink := o3d.MATERIAL_DEFAULT
+	ink.color, ink.flags = {0.1, 0.15, 0.4}, {.Basic, .Transparent}
+	append(&a.scene.draws, o3d.Draw{font_run, o3d.compose({-0.4, 0.002, 0.75}, {-math.PI / 2, 0, 0.1}, {0.8, 0.8, 0.8}), ink})
+	T :: 16
+	px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			px[i], px[i + 1], px[i + 2], px[i + 3] = u8(x * 16), 200, u8(y * 16), 255
+		}
+	}
+	mapped := o3d.MATERIAL_DEFAULT
+	mapped.color_map, mapped.flags = o3d.texture_add(&a.textures, px[:], T, T), {.Transparent}
+	append(&a.scene.draws, o3d.Draw{font_run, o3d.compose({-0.3, 0.95, 0.3}, {}, {0.6, 0.6, 0.6}), mapped})
 	return ""
 }
 

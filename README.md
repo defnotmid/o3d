@@ -13,8 +13,9 @@ keeps its gills, eyes and mouths as layers a script switches by id, each
 colour one traced path, plus a hidden `silhouette` (all of Oxa as one
 outline with its hole) to extrude, morph or collide.
 
-MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, cgltf,
-stb_image, SDL 3, three.js's models, Odin's packages) is in
+MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ovg's curves
+and Slug, cgltf, stb_image, SDL 3, three.js's models, Odin's
+packages) is in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Conventions (three.js's)
@@ -96,7 +97,22 @@ What is known about three.js carries over:
   `Extruded.folded` counts the contours a bevel turned inside out (an
   inward `bevel_offset` over half the thinnest feature, a `bevel_size`
   over half a hole, pixels touching at a corner under an outward bevel):
-  made as three.js makes them, but a host can warn. Any triangle geometry can also be drawn as wireframe lines or
+  made as three.js makes them, but a host can warn. A `Path` keeps the
+  curves (three.js's Path / ShapePath: `path_move_to`, `path_line_to`,
+  `path_quadratic_curve_to`, `path_bezier_curve_to`, `path_close`);
+  `path_contours(path, curve_segments)` flattens it as getPoints does, for
+  the above, and `exact_shape_geometry(path, fill_rule)` is ShapeGeometry
+  with exact edges: one quad whose pixels take their coverage from the
+  curves (the exact area each pixel covers, by ovg's curves package), so the outline has
+  no facets at any distance. Any standard material draws it: a
+  `.Transparent` one blends each pixel by the area it covers (the exact
+  edge), an opaque one writes the samples inside the curves (4x MSAA's
+  edge, exact curves, no sorting); shadows take the outline. Text is the
+  same with a quad per glyph: `curve_set_add(path)` (or
+  `curve_set_add_words` for an ovg font's glyph shapes) keeps a glyph's
+  curves once, and `glyph_run_geometry(glyphs, scale)` places them as the
+  caller's layout says (positions in run units; a negative y scale takes
+  a font's y-down units Y up), one geometry and one draw a run. Any triangle geometry can also be drawn as wireframe lines or
   vertex points by setting `material.mode = .Lines` or `.Points`. Line width
   and point size are controlled by `material.size` in world units (perspective
   foreshortened) or in screen pixels when `.No_Size_Attenuation` is in
@@ -151,6 +167,22 @@ letter := o3d.extrude_geometry(&geos, shapes, opts)         // kept: .geometry, 
 o3d.shapes_destroy(shapes)
 append(&scene.draws, o3d.Draw{letter.caps, o3d.compose({0, 1, 0}, {0, t, 0}), face}, o3d.Draw{letter.sides, o3d.compose({0, 1, 0}, {0, t, 0}), rim})
 
+// Flat outlines with exact edges: the curves kept, one quad, coverage per pixel
+logo: o3d.Path
+o3d.path_move_to(&logo, {0, -1})
+o3d.path_bezier_curve_to(&logo, {-1.6, -0.1}, {-0.9, 1.2}, {0, 0.5})
+o3d.path_bezier_curve_to(&logo, {0.9, 1.2}, {1.6, -0.1}, {0, -1})
+heart := o3d.exact_shape_geometry(&geos, &logo)           // kept, like any geometry
+o3d.path_destroy(&logo)
+ink := o3d.MATERIAL_DEFAULT
+ink.flags = {.Transparent}                                  // coverage by area (opaque: by sample)
+append(&scene.draws, o3d.Draw{heart, o3d.compose({0, 2, 0}), ink})
+
+// Text: each glyph's curves kept once (here an ovg font's), placed by the layout
+glyph_a := o3d.curve_set_add_words(&geos, a.data, a.origin, a.extent)   // a: ovg.font_glyph_shape(font, gi)
+run := o3d.glyph_run_geometry(&geos, []o3d.Glyph{{glyph_a, {0, 0}}, {glyph_a, {0.6, 0}}}, {1.0 / 1000, -1.0 / 1000})   // font units, y down
+append(&scene.draws, o3d.Draw{run, o3d.compose({0, 3, 0}), ink})
+
 // ShaderMaterial: compiled once (same sources, same id), uniforms per frame
 shaders: o3d.Shaders                       // kept, like geometry
 wave, errors := o3d.shader(&shaders, vertex_glsl, fragment_glsl)   // errors: "Fragment:3:7: ..."
@@ -179,9 +211,11 @@ sw: o3d.Software
 pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
 ```
 
-o3d imports oksl as `deps:oksl`: clone
-[oksl](https://github.com/defnotmid/oksl) next to o3d, and builds pass
-`-collection:deps=..` (the directory holding both). `vendor:cgltf` needs its library built once
+o3d imports oksl as `deps:oksl` and ovg's core-only curves package as
+`deps:ovg/curves`: clone [oksl](https://github.com/defnotmid/oksl) and
+[ovg](https://github.com/defnotmid/ovg) next to o3d, and builds pass
+`-collection:deps=..` (the directory holding them). `shaders/build.sh`
+includes ovg's `shaders/curves.slang` from there too. `vendor:cgltf` needs its library built once
 per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
 
 - `odin test . -collection:deps=..` and `odin test sdlgpu
@@ -392,9 +426,42 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   `(sum |w_t|) * morph_radius`, scaled with the draw, or covering the posed
   joints for a skinned draw) is outside the view, or whose shader failed,
   are skipped; then opaque and alpha-masked draws as listed, then blended
-  ones (transparent with opacity under 1, or a transparent ShaderMaterial)
-  farthest first, without writing depth (`draw_order`, shared by both
-  renderers).
+  ones (transparent with opacity under 1, a transparent ShaderMaterial, or
+  a transparent exact shape) farthest first, without writing depth
+  (`draw_order`, shared by both renderers).
+- **Exact shapes and text (`curve.odin`):** a path's contours go to
+  ovg's curves package as they are (cubics split into quadratics within a
+  tolerance), which builds the shape's block of 32-bit words (monotone
+  pieces in a grid of cells, each cell with its backdrop winding, so a
+  pixel's cost is the pieces near it; and a mean coverage), or an ovg
+  glyph's block is copied: a curve set.
+  `Geometries.curve_words` keeps every set's block, and every `.Curves`
+  geometry's table of its quads' sets (a word a quad: the set's first
+  word, the top bit for even-odd), and the GPU mirrors it as one storage
+  buffer. The geometry is a `.Curves` quad per glyph (an exact shape is a
+  run of one) over its set's bounds, `uv1` the shape coordinate; the
+  fragment finds its quad's entry by the quad (`vs_curves` passes vertex
+  index / 4 flat, the draw's vertices bound from its first so they count
+  from 0, as morphed draws are; software keeps each triangle's entry).
+  Each frame `expand_draws` grows each quad
+  by half a pixel's footprint around each edge for the view (from the
+  model-view-projection's derivative at each corner), so edge pixels just
+  outside the bounds are drawn. A pixel's footprint is the shape
+  coordinate's derivatives within its 2x2 quad (fine derivatives on the
+  GPU, the quad's differences in software): a blended draw's alpha is
+  `curves.coverage_affine`, the exact area of the footprint's
+  parallelogram inside the shape (Green's theorem over the curves crossing
+  it, so exact at grazing angles too; never faded to the shape's mean,
+  which it already is once the footprint holds the whole shape); an
+  opaque draw's
+  sample mask (`SV_Coverage`) is the winding
+  at the four sample positions, extrapolated from the centre. Both
+  renderers call the same procedures (`curves.odin`, `curves.slang`), so
+  they agree as the other cases do. The shadow pass keeps texels whose
+  centre is inside. Coverage by sample writes depth and needs no sorting;
+  coverage by area blends, so it is drawn with the blended draws. Shapes are flat in their
+  XY plane (the quad grows along x and y); a ShaderMaterial draws the bare
+  quad.
 - **Shaders:** the standard material's are Slang compiled offline
   (`shaders/build.sh`) to committed SPIR-V and MSL, as ovg's are.
   ShaderMaterials are compiled at run time by oksl, which is plain Odin in
@@ -448,9 +515,12 @@ For onimite:
 4. **ShaderMaterial textures** (small here): `uniform sampler2D` bound to
    `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
    `texture()` wait on oksl (deferred there).
+5. **Exact extrusion caps**, optional: extrusions' caps as exact shapes
+   (unbevelled first; a bevelled cap is an offset outline). Opaque caps
+   draw by sample, which equals the mesh, so this waits on a need.
 
-Metal: checked on an Apple Silicon Mac (macOS 27) at v0.0.14:
-`tools/gpu_check` matches the software renderer in all 11 parity cases (53
+Metal: checked on an Apple Silicon Mac (macOS 27), last with exact shapes:
+`tools/gpu_check` matches the software renderer in all 14 parity cases (53
 to 87 dB PSNR) and passes the external texture and prepared jobs checks, and onimite's notarized macOS release draws its 3D examples
 on Metal as on the CPU. (v0.0.1's standard shader did not compile there:
 a texel `Load` on a combined texture-sampler, which Slang emits wrongly

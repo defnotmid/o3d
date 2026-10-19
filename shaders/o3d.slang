@@ -5,7 +5,12 @@
 //
 // SDL_GPU binding convention: vertex uniforms set 1, fragment uniforms
 // set 3.
+//
+// Exact shapes (curve.odin) draw with fs_curves, which takes coverage from
+// their curves by ovg's curves.slang (each pixel's exact covered area), as raster.odin
+// does with ovg's curves package.
 import common;
+#include "curves.slang"
 
 static const int MAX_LIGHTS = 8;
 static const int MAX_SHADOWS = 4;
@@ -35,6 +40,7 @@ static const uint FLAG_METALNESS_MAP = 512;
 static const uint FLAG_AO_MAP = 1024;
 static const uint FLAG_ALPHA_MASK = 2048;
 static const uint FLAG_TOON = 4096;
+static const uint FLAG_CURVES = 8192;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -59,6 +65,8 @@ struct Draw_VS {
 
 // Shading_Material: color is linear rgb, a = opacity (1 unless blended or
 // alpha-masked); emissive is linear rgb times intensity; flags are FLAG_* bits.
+// curve_table: an exact shape's or glyph run's table of its quads' entries
+// in curveWords (each its curve set's first word, bit 31 for even-odd).
 struct Material {
     float4 color;
     float4 emissive;
@@ -68,7 +76,8 @@ struct Material {
     uint flags;
     float alpha_cutoff;
     uint uv_sets;
-    uint2 pad;
+    uint curve_table;
+    uint pad;
     float4 uv_transforms[12];
 };
 
@@ -122,6 +131,12 @@ struct Joints_VS {
 [[vk::binding(9, 2)]] Sampler2D<float> shadowMap1 : register(t9, space2);
 [[vk::binding(10, 2)]] Sampler2D<float> shadowMap2 : register(t10, space2);
 [[vk::binding(11, 2)]] Sampler2D<float> shadowMap3 : register(t11, space2);
+// Exact shapes' curves (Geometries.curve_words): after the samplers in
+// SPIR-V's set 2, after the uniform buffers on Metal (slang numbers the
+// buffer from the register; no DXIL for these entries): fs_curves' at
+// [[buffer(2)]], fs_shadow_curves' at [[buffer(1)]].
+[[vk::binding(12, 2)]] StructuredBuffer<uint> curveWords : register(t2, space2);
+[[vk::binding(1, 2)]] StructuredBuffer<uint> shadowCurveWords : register(t1, space2);
 
 struct VS_In {
     float3 position : TEXCOORD0;
@@ -164,6 +179,40 @@ VS_Out vs_main(VS_In i, uint vid : SV_VertexID) {
     o.normal = mul(draw.normal, float4(norm, 0)).xyz;
     o.uv = i.uv;
     o.uv1 = i.uv1;
+    return o;
+}
+
+// An exact shape's or glyph run's vertex: as vs_main's (no morphs), and its
+// quad (vertices 4q..4q+3, the draw counting from 0) for the fragment to
+// find its curve set by.
+struct VS_Curves_Out {
+    float4 position : SV_Position;
+    float3 world : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float2 uv : TEXCOORD2;
+    float2 uv1 : TEXCOORD3;
+    nointerpolation uint quad : TEXCOORD4;
+};
+
+VS_Out curves_surface_in(VS_Curves_Out i) {
+    VS_Out o;
+    o.position = i.position;
+    o.world = i.world;
+    o.normal = i.normal;
+    o.uv = i.uv;
+    o.uv1 = i.uv1;
+    return o;
+}
+
+[shader("vertex")]
+VS_Curves_Out vs_curves(VS_In i, uint vid : SV_VertexID) {
+    VS_Curves_Out o;
+    o.position = mul(draw.mvp, float4(i.position, 1));
+    o.world = mul(draw.model, float4(i.position, 1)).xyz;
+    o.normal = mul(draw.normal, float4(i.normal, 0)).xyz;
+    o.uv = i.uv;
+    o.uv1 = i.uv1;
+    o.quad = vid / 4;
     return o;
 }
 
@@ -358,8 +407,9 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
     return o;
 }
 
-[shader("fragment")]
-float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
+// The standard material's colour at a fragment (premultiplied sRGB), as
+// fs_main writes it.
+float4 surface(VS_Out i, bool front) {
     uint flags = material.flags;
     float3 base = material.color.rgb;
     float a = material.color.a;
@@ -455,9 +505,90 @@ float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
     return float4(linear_to_srgb(c.r) * a, linear_to_srgb(c.g) * a, linear_to_srgb(c.b) * a, a);
 }
 
-// The shadow pass: the depth of the nearest caster per texel.
 [shader("fragment")]
-float fs_shadow(VS_Out i) : SV_Target {
+float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
+    return surface(i, front);
+}
+
+// Sample positions in a pixel (the standard 4x MSAA pattern, software.odin's
+// SAMPLE_OFFSETS), by sample index.
+static const float2 SAMPLE_OFFSETS[4] = { float2(0.375, 0.125), float2(0.875, 0.375), float2(0.125, 0.625), float2(0.625, 0.875) };
+
+bool curves_inside(StructuredBuffer<uint> words, uint s, float2 rc, bool even_odd) {
+    int w = curves_winding(words, s, rc);
+    return even_odd ? (w & 1) != 0 : w != 0;
+}
+
+static const uint CURVE_EVEN_ODD = 0x80000000u;
+
+// Fine derivatives (within the 2x2 quad's row or column) where the target
+// names them; Metal's dfdx has no coarse kind to choose.
+float2 fine_ddx(float2 v) {
+    __target_switch {
+    case metal:
+        return ddx(v);
+    default:
+        return ddx_fine(v);
+    }
+}
+
+float2 fine_ddy(float2 v) {
+    __target_switch {
+    case metal:
+        return ddy(v);
+    default:
+        return ddy_fine(v);
+    }
+}
+
+struct Curves_Out {
+    float4 color : SV_Target;
+    uint mask : SV_Coverage;
+};
+
+// An exact shape's fragment: uv1 is its shape coordinate in its quad's
+// curve set (the quad's entry in the draw's table). Blended, the
+// pixel's covered area scales its colour (raster.odin's `curve_coverage`);
+// opaque, the samples inside the shape are
+// written (the coordinate at each from the centre's and its derivatives,
+// raster.odin's `curve_samples`). Derivatives are fine (per row and column
+// of the 2x2 quad, as the software renderer's) and taken before any
+// discard.
+[shader("fragment")]
+Curves_Out fs_curves(VS_Curves_Out i, bool front : SV_IsFrontFace) {
+    float2 dx = fine_ddx(i.uv1);
+    float2 dy = fine_ddy(i.uv1);
+    uint entry = curveWords[material.curve_table + i.quad];
+    uint s = entry & ~CURVE_EVEN_ODD;
+    bool even_odd = (entry & CURVE_EVEN_ODD) != 0u;
+    float4 color = surface(curves_surface_in(i), front);
+    Curves_Out o;
+    if ((material.flags & FLAG_BLENDED) != 0) {
+        float cov = curves_coverage_affine(curveWords, s, i.uv1, dx, dy, even_odd);
+        if (cov <= 0.0) {
+            discard;
+        }
+        o.color = color * cov;
+        o.mask = 0xFu;
+    } else {
+        uint mask = 0;
+        for (uint k = 0; k < 4; k++) {
+            float2 off = SAMPLE_OFFSETS[k] - 0.5;
+            if (curves_inside(curveWords, s, i.uv1 + dx * off.x + dy * off.y, even_odd)) {
+                mask |= 1u << k;
+            }
+        }
+        if (mask == 0u) {
+            discard;
+        }
+        o.color = color;
+        o.mask = mask;
+    }
+    return o;
+}
+
+// The shadow pass: the depth of the nearest caster per texel.
+float shadow_depth(VS_Out i) {
     if ((material.flags & FLAG_ALPHA_MASK) != 0) {
         float a = material.color.a;
         if ((material.flags & FLAG_COLOR_MAP) != 0) {
@@ -472,4 +603,19 @@ float fs_shadow(VS_Out i) : SV_Target {
         }
     }
     return i.position.z;
+}
+
+[shader("fragment")]
+float fs_shadow(VS_Out i) : SV_Target {
+    return shadow_depth(i);
+}
+
+// An exact shape's shadow: the texels inside its outline.
+[shader("fragment")]
+float fs_shadow_curves(VS_Curves_Out i) : SV_Target {
+    uint entry = shadowCurveWords[material.curve_table + i.quad];
+    if (!curves_inside(shadowCurveWords, entry & ~CURVE_EVEN_ODD, i.uv1, (entry & CURVE_EVEN_ODD) != 0u)) {
+        discard;
+    }
+    return shadow_depth(curves_surface_in(i));
 }
