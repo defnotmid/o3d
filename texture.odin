@@ -54,12 +54,20 @@ texture_add :: proc(t: ^Textures, pixels: []u8, width, height: int) -> Texture_I
 	if width <= 0 || height <= 0 || len(pixels) < width * height * 4 {
 		return 0
 	}
+	tex := texture_grow(t, width, height)
+	mem.copy(raw_data(t.texels[tex.first_texel:]), raw_data(pixels), width * height * 4)
+	return texture_finish(t, &tex)
+}
+
+// A texture's levels laid out at the end of `t.texels`, grown once to hold
+// them all; level 0 is for the caller to fill.
+@(private = "file")
+texture_grow :: proc(t: ^Textures, width, height: int) -> Texture {
 	tex := Texture {
 		width       = u32(width),
 		height      = u32(height),
 		first_texel = u32(len(t.texels)),
 	}
-	// Pass 1: count total texels across all mip levels.
 	mw, mh := u32(width), u32(height)
 	total: u32
 	for l in 0 ..< u32(MAX_MIPS) {
@@ -72,11 +80,13 @@ texture_add :: proc(t: ^Textures, pixels: []u8, width, height: int) -> Texture_I
 		mw, mh = max(mw >> 1, 1), max(mh >> 1, 1)
 	}
 	tex.texel_count = total
-
-	// Pass 2: single contiguous growth, copy level 0 and downsample mip chain.
 	table_grow_non_zero(&t.texels, int(tex.first_texel + total))
-	mem.copy(raw_data(t.texels[tex.first_texel:]), raw_data(pixels), width * height * 4)
+	return tex
+}
 
+// Downsamples level 0 of a grown texture into its mip chain and lists it.
+@(private = "file")
+texture_finish :: proc(t: ^Textures, tex: ^Texture) -> Texture_Id {
 	sw, sh := int(tex.width), int(tex.height)
 	for l in 1 ..< int(tex.levels) {
 		dw, dh := max(sw >> 1, 1), max(sh >> 1, 1)
@@ -86,7 +96,7 @@ texture_add :: proc(t: ^Textures, pixels: []u8, width, height: int) -> Texture_I
 		sw, sh = dw, dh
 	}
 	generation_take(&t.generation)
-	append(&t.list, tex)
+	append(&t.list, tex^)
 	return Texture_Id(len(t.list))
 }
 
@@ -104,13 +114,17 @@ texture_add_external :: proc(t: ^Textures, width, height: int) -> Texture_Id {
 // Decodes an image in memory (PNG, JPEG, GIF, BMP, TGA, QOI or WebP, by
 // odecs' image package; an animation's first frame) into `t`.
 texture_decode :: proc(t: ^Textures, data: []u8) -> (Texture_Id, bool) {
-	img, err := image.decode(data)
-	if err != .None {
+	info, err := image.info(data)
+	if err != .None || info.width <= 0 || info.height <= 0 {
 		return 0, false
 	}
-	defer image.destroy_image(&img)
-	id := texture_add(t, img.pixels, img.width, img.height)
-	return id, id != 0
+	// Straight into level 0 of the texel table.
+	tex := texture_grow(t, info.width, info.height)
+	if image.decode_into(data, mem.slice_to_bytes(t.texels[tex.first_texel:][:info.width * info.height])) != .None {
+		resize(&t.texels, int(tex.first_texel))
+		return 0, false
+	}
+	return texture_finish(t, &tex), true
 }
 
 // The pixels an image in memory would decode to, without decoding it (0:
