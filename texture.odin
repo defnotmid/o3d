@@ -116,6 +116,17 @@ texture_decode :: proc(t: ^Textures, data: []u8) -> (Texture_Id, bool) {
 	return id, id != 0
 }
 
+// The pixels an image in memory would decode to, without decoding it (0:
+// not an image texture_decode reads).
+@(private)
+texture_pixels :: proc(data: []u8) -> int {
+	w, h, ch: i32
+	if len(data) == 0 || len(data) > int(max(i32)) || stbi.info_from_memory(raw_data(data), i32(len(data)), &w, &h, &ch) == 0 {
+		return 0
+	}
+	return int(w) * int(h)
+}
+
 // Loads an image file from disk into `t`.
 texture_load :: proc(t: ^Textures, path: string) -> (Texture_Id, bool) {
 	data, err := os.read_entire_file(path, context.allocator)

@@ -1,15 +1,17 @@
 package o3d
 
 import "core:encoding/base64"
+import "core:fmt"
 import "core:math"
 import "core:math/linalg"
+import "core:os"
 import "core:slice"
 import "core:strings"
-import "vendor:cgltf"
 
-// glTF 2.0 / GLB import (`vendor:cgltf`): meshes, metallic-roughness PBR
-// materials and textures, topologically ordered node hierarchy, and keyframe
-// animations (`STEP`, `LINEAR`, `CUBICSPLINE`) stored in flat arrays.
+// glTF 2.0 / GLB import: `gltf_read` (gltf_read.odin) reads the file, and
+// this builds meshes, metallic-roughness PBR materials and textures, a
+// topologically ordered node hierarchy, and keyframe animations (`STEP`,
+// `LINEAR`, `CUBICSPLINE`) from it, stored in flat arrays.
 // `gltf_draw` evaluates the hierarchy (and optional animation at `time`) in a
 // single forward pass and appends draws to `Scene` with zero heap allocations.
 //
@@ -50,6 +52,8 @@ Gltf_Error :: enum u8 {
 	// extensionsRequired names an extension o3d does not implement;
 	// `Model.unsupported_extension` has its name.
 	Unsupported_Extension,
+	// A `Max` limit (limits.odin) was passed; `Model.warnings` says which.
+	Limit,
 }
 
 @(rodata)
@@ -68,58 +72,7 @@ GLTF_ERROR_TEXT := [Gltf_Error]string {
 	.Buffer_Io             = "a buffer file it names could not be read",
 	.Invalid               = "an accessor, view or index points past its data",
 	.Unsupported_Extension = "requires an unsupported glTF extension",
-}
-
-@(private = "file", rodata)
-SUPPORTED_EXTENSIONS := [?]string {
-	"KHR_materials_unlit",
-	"KHR_materials_emissive_strength",
-	"KHR_texture_transform",
-	"KHR_mesh_quantization",
-	"KHR_lights_punctual",
-}
-
-@(private = "file")
-unsupported_required_extension :: proc(data: ^cgltf.data) -> (string, bool) {
-	outer: for raw in data.extensions_required {
-		if raw == nil {
-			continue
-		}
-		ext := string(raw)
-		for sup in SUPPORTED_EXTENSIONS {
-			if ext == sup {
-				continue outer
-			}
-		}
-		return strings.clone(ext), true
-	}
-	return "", false
-}
-
-// A cgltf result as a Gltf_Error; `buffers`: from loading external buffers.
-@(private = "file")
-gltf_error :: proc "contextless" (r: cgltf.result, buffers := false) -> Gltf_Error {
-	switch r {
-	case .success:
-		return .None
-	case .data_too_short:
-		return .Data_Too_Short
-	case .unknown_format:
-		return .Unknown_Format
-	case .invalid_json:
-		return .Invalid_Json
-	case .invalid_gltf, .invalid_options:
-		return .Invalid_Gltf
-	case .file_not_found:
-		return .Buffer_Not_Found if buffers else .File_Not_Found
-	case .io_error:
-		return .Buffer_Io if buffers else .Io
-	case .out_of_memory:
-		return .Out_Of_Memory
-	case .legacy_gltf:
-		return .Legacy_Gltf
-	}
-	return .Invalid_Gltf
+	.Limit                 = "too large to read (a limit was reached)",
 }
 
 Animation_Path :: enum u8 {
@@ -206,6 +159,9 @@ Model :: struct {
 	morph_values:          [dynamic]f32,
 	// Set when `gltf_load` or `gltf_parse` returns `.Unsupported_Extension`.
 	unsupported_extension: string,
+	// What was skipped (limits reached, images that did not decode); with
+	// `.Limit`, the limit.
+	warnings:              [dynamic]string,
 	// The pose `gltf_draw` uses when the caller gives none.
 	scratch:               Model_Pose,
 }
@@ -260,61 +216,49 @@ model_destroy :: proc(m: ^Model) {
 	delete(m.values)
 	delete(m.morph_values)
 	delete(m.unsupported_extension)
+	for w in m.warnings {
+		delete(w)
+	}
+	delete(m.warnings)
 	model_pose_destroy(&m.scratch)
 	m^ = {}
 }
 
+
 // Loads a `.gltf` or `.glb` file from disk into flat `Model`, `Geometries`,
-// and `Textures` tables; `err` says why not (GLTF_ERROR_TEXT).
-gltf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -> (m: Model, err: Gltf_Error) {
-	cpath := strings.clone_to_cstring(path, context.temp_allocator)
-	opts: cgltf.options
-	data, res := cgltf.parse_file(opts, cpath)
-	if res != .success || data == nil {
-		return {}, gltf_error(res) if res != .success else .Invalid_Gltf
+// and `Textures` tables; `err` says why not (GLTF_ERROR_TEXT). `limits`
+// bounds the work (nil: DEFAULT_LIMITS).
+gltf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil, limits: ^Limits = nil) -> (m: Model, err: Gltf_Error) {
+	bytes, read_err := os.read_entire_file(path, context.allocator)
+	if read_err != nil {
+		return {}, .Io if os.exists(path) else .File_Not_Found
 	}
-	defer cgltf.free(data)
-	if ext, bad := unsupported_required_extension(data); bad {
-		return {unsupported_extension = ext}, .Unsupported_Extension
-	}
-	if r := cgltf.load_buffers(opts, data, cpath); r != .success {
-		return {}, gltf_error(r, buffers = true)
-	}
-	if cgltf.validate(data) != .success {
-		return {}, .Invalid
-	}
-	slash := strings.last_index_byte(path, '/')
-	base_dir := path[:slash] if slash >= 0 else ""
-	return build_model(data, geos, textures, base_dir), .None
+	defer delete(bytes)
+	slash := max(strings.last_index_byte(path, '/'), strings.last_index_byte(path, '\\'))
+	return gltf_parse(bytes, geos, textures, path[:slash] if slash >= 0 else "", limits)
 }
 
 // Parses a `.gltf` or `.glb` byte slice in memory into flat `Model`,
 // `Geometries`, and `Textures` tables; `err` says why not (GLTF_ERROR_TEXT).
-gltf_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, base_dir := "") -> (m: Model, err: Gltf_Error) {
-	if len(bytes) == 0 {
-		return {}, .Empty
+// Files it names resolve against `base_dir` (the working directory when
+// empty).
+gltf_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, base_dir := "", limits: ^Limits = nil) -> (m: Model, err: Gltf_Error) {
+	doc: Gltf_Document
+	doc, err = gltf_read(bytes, base_dir, limits)
+	defer gltf_document_destroy(&doc)
+	#partial switch err {
+	case .None:
+	case .Unsupported_Extension:
+		return {unsupported_extension = strings.clone(doc.unsupported_extension)}, err
+	case .Limit:
+		budget_warn(&doc.budget, &m.warnings)
+		return {warnings = m.warnings}, err
+	case:
+		return {}, err
 	}
-	opts: cgltf.options
-	data, res := cgltf.parse(opts, raw_data(bytes), uint(len(bytes)))
-	if res != .success || data == nil {
-		return {}, gltf_error(res) if res != .success else .Invalid_Gltf
-	}
-	defer cgltf.free(data)
-	if ext, bad := unsupported_required_extension(data); bad {
-		return {unsupported_extension = ext}, .Unsupported_Extension
-	}
-	cpath: cstring = ""
-	if len(base_dir) > 0 {
-		dummy := strings.concatenate({base_dir, "/scene.gltf"}, context.temp_allocator)
-		cpath = strings.clone_to_cstring(dummy, context.temp_allocator)
-	}
-	if r := cgltf.load_buffers(opts, data, cpath); r != .success {
-		return {}, gltf_error(r, buffers = true)
-	}
-	if cgltf.validate(data) != .success {
-		return {}, .Invalid
-	}
-	return build_model(data, geos, textures, base_dir), .None
+	m = build_model(&doc, geos, textures, base_dir)
+	budget_warn(&doc.budget, &m.warnings)
+	return m, .None
 }
 
 // Finds an animation's index by name (-1 if not found).
@@ -515,33 +459,34 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 	}
 }
 
+
 // ---- model builder ----------------------------------------------------------------------
 
 @(private = "file")
-build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, base_dir: string) -> (m: Model) {
+build_model :: proc(doc: ^Gltf_Document, geos: ^Geometries, textures: ^Textures, base_dir: string) -> (m: Model) {
 	// 1. Decode images into `textures` once per glTF image.
-	img_ids := make([]Texture_Id, len(data.images), context.temp_allocator)
+	img_ids := make([]Texture_Id, len(doc.images), context.temp_allocator)
 	if textures != nil {
-		for &img, i in data.images {
-			img_ids[i] = load_gltf_image(textures, &img, base_dir)
+		for i in 0 ..< len(doc.images) {
+			img_ids[i] = load_gltf_image(doc, textures, i, base_dir, &m.warnings)
 		}
 	}
 
 	// 2. Import KHR_lights_punctual lights.
-	reserve(&m.lights, len(data.lights))
-	for &gl in data.lights {
+	reserve(&m.lights, len(doc.lights))
+	for gl in doc.lights {
 		kind: Light_Kind = .Point
-		switch gl.type {
-		case .directional:
+		switch gl.kind {
+		case .Directional:
 			kind = .Directional
-		case .point:
+		case .Point:
 			kind = .Point
-		case .spot:
+		case .Spot:
 			kind = .Spot
-		case .invalid:
+		case .Invalid:
 		}
-		outer := gl.spot_outer_cone_angle if gl.spot_outer_cone_angle > 0 else math.PI / 4
-		inner := clamp(gl.spot_inner_cone_angle, 0, outer)
+		outer := gl.outer_cone if gl.outer_cone > 0 else math.PI / 4
+		inner := clamp(gl.inner_cone, 0, outer)
 		penumbra := clamp(1 - inner / outer, 0, 1) if outer > 0 else 0
 		append(&m.lights, Light{
 			kind      = kind,
@@ -555,26 +500,31 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 	}
 
 	// 3. Build meshes and primitives into `geos` and `m.primitives`.
-	reserve(&m.meshes, len(data.meshes))
-	v_scratch := make([dynamic]Vertex, context.temp_allocator)
-	s_scratch := make([dynamic]Skin_Vertex, context.temp_allocator)
-	d_scratch := make([dynamic]Morph_Delta, context.temp_allocator)
-	i_scratch := make([dynamic]u32, context.temp_allocator)
-	f_scratch := make([dynamic]f32, context.temp_allocator)
+	reserve(&m.meshes, len(doc.meshes))
+	scratch := Build_Scratch{
+		verts   = make([dynamic]Vertex, context.temp_allocator),
+		skin    = make([dynamic]Skin_Vertex, context.temp_allocator),
+		morphs  = make([dynamic]Morph_Delta, context.temp_allocator),
+		indices = make([dynamic]u32, context.temp_allocator),
+		floats  = make([dynamic]f32, context.temp_allocator),
+		uints   = make([dynamic]u32, context.temp_allocator),
+	}
 
-	for &gm in data.meshes {
+	for gm in doc.meshes {
 		first_prim := u32(len(m.primitives))
-		max_targets := max(len(gm.weights), len(gm.target_names))
-		for &gp in gm.primitives {
-			if gp.type != .triangles {
+		weights := doc.floats[gm.weights.first:][:gm.weights.count]
+		names := doc.strings[gm.target_names.first:][:gm.target_names.count]
+		max_targets := max(len(weights), len(names))
+		for &gp in doc.primitives[gm.primitives.first:][:gm.primitives.count] {
+			if gp.mode != 4 {
 				continue
 			}
-			max_targets = max(max_targets, len(gp.targets))
-			geo_id, has_normals, has_skin := build_primitive(geos, &gp, &v_scratch, &s_scratch, &d_scratch, &i_scratch, &f_scratch)
+			max_targets = max(max_targets, int(gp.targets.count))
+			geo_id, has_normals, has_skin := build_primitive(doc, geos, &gp, &scratch)
 			if geo_id == 0 {
 				continue
 			}
-			material := convert_material(data, gp.material, img_ids)
+			material := convert_material(doc, gp.material, img_ids)
 			if !has_normals {
 				material.flags += {.Flat_Shading}
 			}
@@ -582,26 +532,15 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 		}
 		first_weight := u32(len(m.mesh_weights))
 		for ti in 0 ..< max_targets {
-			w := gm.weights[ti] if ti < len(gm.weights) else 0
-			append(&m.mesh_weights, w)
+			append(&m.mesh_weights, weights[ti] if ti < len(weights) else 0)
 		}
 		first_name := u32(len(m.mesh_target_names))
-		name_count := min(len(gm.target_names), max_targets)
+		name_count := min(len(names), max_targets)
 		for ti in 0 ..< name_count {
-			raw_name := gm.target_names[ti]
-			cloned := strings.clone(string(raw_name)) if raw_name != nil && len(raw_name) > 0 else ""
+			cloned := strings.clone(names[ti]) if len(names[ti]) > 0 else ""
 			append(&m.mesh_target_names, cloned)
-			if len(cloned) > 0 {
-				seen := false
-				for existing in m.target_names {
-					if existing == cloned {
-						seen = true
-						break
-					}
-				}
-				if !seen {
-					append(&m.target_names, cloned)
-				}
+			if len(cloned) > 0 && !slice.contains(m.target_names[:], cloned) {
+				append(&m.target_names, cloned)
 			}
 		}
 		append(&m.meshes, Model_Mesh{
@@ -616,31 +555,32 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 
 	// 4. Flatten the default scene's node hierarchy (every root when the file
 	// names no scene) in topological order (parents always before children).
-	node_map := make([]i32, len(data.nodes), context.temp_allocator)
+	node_map := make([]i32, len(doc.nodes), context.temp_allocator)
 	slice.fill(node_map, -1)
-	scene := data.scene
-	if scene == nil && len(data.scenes) > 0 {
-		scene = &data.scenes[0]
+	scene := doc.scene
+	if scene < 0 && len(doc.scenes) > 0 {
+		scene = 0
 	}
-	if scene != nil {
-		for root in scene.nodes {
-			emit_node(data, root, -1, &m, node_map)
+	if scene >= 0 {
+		roots := doc.scenes[scene]
+		for root in doc.node_lists[roots.first:][:roots.count] {
+			emit_node(doc, root, -1, &m, node_map)
 		}
 	} else {
-		for &gn in data.nodes {
-			if gn.parent == nil {
-				emit_node(data, &gn, -1, &m, node_map)
+		for n, i in doc.nodes {
+			if n.parent < 0 {
+				emit_node(doc, i32(i), -1, &m, node_map)
 			}
 		}
 	}
-	for &gs in data.skins {
-		for jn in gs.joints {
-			emit_node(data, jn, -1, &m, node_map)
+	for gs in doc.skins {
+		for jn in doc.node_lists[gs.joints.first:][:gs.joints.count] {
+			emit_node(doc, jn, -1, &m, node_map)
 		}
 	}
 
 	// 5. Flatten skins (joint node indices and inverse bind matrices).
-	build_skins(data, &m, node_map, &f_scratch)
+	build_skins(doc, &m, node_map, &scratch.floats)
 
 	num_nodes := len(m.nodes)
 	resize(&m.scratch.translation, num_nodes)
@@ -652,77 +592,101 @@ build_model :: proc(data: ^cgltf.data, geos: ^Geometries, textures: ^Textures, b
 	resize(&m.scratch.morph_weights, len(m.node_weights))
 
 	// 6. Flatten animations and keyframe samplers.
-	build_animations(data, &m, node_map, &f_scratch)
+	build_animations(doc, &m, node_map, &scratch.floats)
 	return m
 }
 
+// An image's texture (0: none): from its buffer view, a data: URI, or a
+// file beside the glTF.
 @(private = "file")
-load_gltf_image :: proc(t: ^Textures, img: ^cgltf.image, base_dir: string) -> Texture_Id {
-	if img.buffer_view != nil {
-		ptr := cgltf.buffer_view_data(img.buffer_view)
-		if ptr != nil && img.buffer_view.size > 0 {
-			id, _ := texture_decode(t, ptr[:img.buffer_view.size])
-			return id
+load_gltf_image :: proc(doc: ^Gltf_Document, t: ^Textures, i: int, base_dir: string, warnings: ^[dynamic]string) -> Texture_Id {
+	img := doc.images[i]
+	data, owned: []u8
+	defer delete(owned)
+	if img.view >= 0 {
+		v := doc.views[img.view]
+		if buf := doc.buffers[v.buffer]; buf != nil && v.length > 0 {
+			data = buf[v.offset:][:v.length]
 		}
 	}
-	if img.uri != nil {
-		uri := string(img.uri)
-		if strings.has_prefix(uri, "data:") {
-			if comma := strings.index_byte(uri, ','); comma >= 0 {
-				decoded, err := base64.decode(uri[comma + 1:], allocator = context.temp_allocator)
-				if err == nil {
-					id, _ := texture_decode(t, decoded)
-					return id
-				}
+	if data == nil && len(img.uri) > 0 {
+		if strings.has_prefix(img.uri, "data:") {
+			comma := strings.index_byte(img.uri, ',')
+			if comma < 0 {
+				return 0
 			}
-			return 0
+			decoded, err := base64.decode(img.uri[comma + 1:], allocator = context.temp_allocator)
+			if err != nil {
+				return 0
+			}
+			data = decoded
+		} else {
+			read_err: os.Error
+			data, read_err = os.read_entire_file(gltf_resolve(base_dir, img.uri, context.temp_allocator), context.allocator)
+			if read_err != nil {
+				return 0
+			}
+			owned = data
 		}
-		path := strings.concatenate({base_dir, "/", uri}, context.temp_allocator) if len(base_dir) > 0 else uri
-		id, _ := texture_load(t, path)
-		return id
 	}
-	return 0
+	if data == nil {
+		return 0
+	}
+	if !budget_take(&doc.budget, .Image_Pixels, texture_pixels(data)) {
+		return 0
+	}
+	id, ok := texture_decode(t, data)
+	if !ok {
+		append(warnings, strings.clone(fmt.tprintf("glTF image %d could not be decoded", i)))
+	}
+	return id
+}
+
+@(private = "file")
+Build_Scratch :: struct {
+	verts:   [dynamic]Vertex,
+	skin:    [dynamic]Skin_Vertex,
+	morphs:  [dynamic]Morph_Delta,
+	indices: [dynamic]u32,
+	floats:  [dynamic]f32,
+	uints:   [dynamic]u32,
+}
+
+// Accessor `acc` into `out` (resized to `n` and zero past what it has).
+@(private = "file")
+unpack_floats_to :: proc(doc: ^Gltf_Document, acc: i32, out: ^[dynamic]f32, n: int) {
+	table_grow_non_zero(out, n)
+	wrote := gltf_accessor_floats(doc, acc, out[:n])
+	slice.zero(out[wrote:n])
 }
 
 // A triangle primitive into `geos` (0: none), and whether it had normals and skinning.
 @(private = "file")
-build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dynamic]Vertex, skin: ^[dynamic]Skin_Vertex, morphs: ^[dynamic]Morph_Delta, indices: ^[dynamic]u32, floats: ^[dynamic]f32) -> (id: Geometry_Id, has_normals, has_skin: bool) {
-	pos_acc, norm_acc, uv_acc, uv1_acc, joints_acc, weights_acc: ^cgltf.accessor
-	for &attr in prim.attributes {
-		switch attr.type {
-		case .position:
-			if attr.index == 0 {
-				pos_acc = attr.data
-			}
-		case .normal:
-			if attr.index == 0 {
-				norm_acc = attr.data
-			}
-		case .texcoord:
-			if attr.index == 0 {
-				uv_acc = attr.data
-			} else if attr.index == 1 {
-				uv1_acc = attr.data
-			}
-		case .joints:
-			if attr.index == 0 {
-				joints_acc = attr.data
-			}
-		case .weights:
-			if attr.index == 0 {
-				weights_acc = attr.data
-			}
-		case .invalid, .tangent, .color, .custom:
-		}
-	}
-	if pos_acc == nil || pos_acc.count == 0 {
+build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Primitive, s: ^Build_Scratch) -> (id: Geometry_Id, has_normals, has_skin: bool) {
+	if prim.position < 0 || doc.accessors[prim.position].count == 0 {
 		return 0, false, false
 	}
-	vcount := int(pos_acc.count)
-	table_grow(verts, vcount)
+	vcount := doc.accessors[prim.position].count
+	count_of :: proc(doc: ^Gltf_Document, acc: i32, vcount: int) -> bool {
+		return acc >= 0 && doc.accessors[acc].count == vcount
+	}
+	has_normals = count_of(doc, prim.normal, vcount)
+	has_uv := count_of(doc, prim.texcoord[0], vcount)
+	has_uv1 := count_of(doc, prim.texcoord[1], vcount)
+	has_skin = count_of(doc, prim.joints, vcount) && count_of(doc, prim.weights, vcount)
+	targets := doc.targets[prim.targets.first:][:prim.targets.count]
+	icount := doc.accessors[prim.indices].count if prim.indices >= 0 else 0
 
-	table_grow_non_zero(floats, vcount * 3)
-	_ = cgltf.accessor_unpack_floats(pos_acc, raw_data(floats^), uint(vcount * 3))
+	// What this primitive unpacks, counted before any of it is (counts come
+	// from the file, so in i128).
+	per_vertex := 3 + (3 if has_normals else 0) + (2 if has_uv else 0) + (2 if has_uv1 else 0) + (8 if has_skin else 0) + 14 * len(targets)
+	if !budget_take_wide(&doc.budget, .Gltf_Values, i128(vcount) * i128(per_vertex) + i128(icount)) {
+		return 0, false, false
+	}
+
+	verts, floats := &s.verts, &s.floats
+	table_grow(verts, vcount)
+	unpack_floats_to(doc, prim.position, floats, vcount * 3)
 	for i in 0 ..< vcount {
 		verts[i].position = {floats[i * 3], floats[i * 3 + 1], floats[i * 3 + 2]}
 		verts[i].normal = {0, 1, 0}
@@ -730,39 +694,41 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 		verts[i].uv1 = {}
 	}
 
-	if norm_acc != nil && int(norm_acc.count) == vcount {
-		_ = cgltf.accessor_unpack_floats(norm_acc, raw_data(floats^), uint(vcount * 3))
+	if has_normals {
+		unpack_floats_to(doc, prim.normal, floats, vcount * 3)
 		for i in 0 ..< vcount {
 			n := Vec3{floats[i * 3], floats[i * 3 + 1], floats[i * 3 + 2]}
 			verts[i].normal = linalg.normalize(n) if linalg.length2(n) > 1e-12 else Vec3{0, 1, 0}
 		}
 	}
 
-	if uv_acc != nil && int(uv_acc.count) == vcount {
-		table_grow_non_zero(floats, vcount * 2)
-		_ = cgltf.accessor_unpack_floats(uv_acc, raw_data(floats^), uint(vcount * 2))
+	if has_uv {
+		unpack_floats_to(doc, prim.texcoord[0], floats, vcount * 2)
 		for i in 0 ..< vcount {
 			// glTF TEXCOORD has v = 0 at top; o3d's Vertex.uv has v = 1 at top.
 			verts[i].uv = {floats[i * 2], 1 - floats[i * 2 + 1]}
 		}
 	}
 
-	if uv1_acc != nil && int(uv1_acc.count) == vcount {
-		table_grow_non_zero(floats, vcount * 2)
-		_ = cgltf.accessor_unpack_floats(uv1_acc, raw_data(floats^), uint(vcount * 2))
+	if has_uv1 {
+		unpack_floats_to(doc, prim.texcoord[1], floats, vcount * 2)
 		for i in 0 ..< vcount {
 			verts[i].uv1 = {floats[i * 2], 1 - floats[i * 2 + 1]}
 		}
 	}
 
-	has_skin = joints_acc != nil && weights_acc != nil && int(joints_acc.count) == vcount && int(weights_acc.count) == vcount
 	if has_skin {
-		table_grow_non_zero(skin, vcount)
-		table_grow_non_zero(floats, vcount * 4)
-		_ = cgltf.accessor_unpack_floats(weights_acc, raw_data(floats^), uint(vcount * 4))
+		table_grow_non_zero(&s.skin, vcount)
+		unpack_floats_to(doc, prim.weights, floats, vcount * 4)
+		// Up to 4 joint components per vertex (fewer leave the rest 0).
+		jcomps := type_components(doc.accessors[prim.joints].type)
+		table_grow_non_zero(&s.uints, vcount * jcomps)
+		gltf_accessor_uints(doc, prim.joints, s.uints[:vcount * jcomps])
 		for i in 0 ..< vcount {
 			j: [4]u32
-			_ = cgltf.accessor_read_uint(joints_acc, uint(i), &j[0], 4)
+			if jcomps <= 4 {
+				copy(j[:jcomps], s.uints[i * jcomps:][:jcomps])
+			}
 			w := Vec4{
 				max(floats[i * 4 + 0], 0),
 				max(floats[i * 4 + 1], 0),
@@ -775,36 +741,25 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 			for k in 0 ..< 4 {
 				joints[k] = u16(min(j[k], u32(MAX_JOINTS - 1))) if w[k] > 0 else 0
 			}
-			skin[i] = {joints, w}
+			s.skin[i] = {joints, w}
 		}
 	}
 
-	has_morphs := len(prim.targets) > 0
+	has_morphs := len(targets) > 0
 	if has_morphs {
-		tcount := len(prim.targets)
+		morphs := &s.morphs
 		clear(morphs)
-		table_grow(morphs, tcount * vcount)
-		table_grow_non_zero(floats, vcount * 3)
-		for &target, ti in prim.targets {
-			t_pos, t_norm: ^cgltf.accessor
-			for &attr in target.attributes {
-				switch attr.type {
-				case .position:
-					t_pos = attr.data
-				case .normal:
-					t_norm = attr.data
-				case .invalid, .tangent, .texcoord, .color, .joints, .weights, .custom:
-				}
-			}
+		table_grow(morphs, len(targets) * vcount)
+		for t, ti in targets {
 			base := ti * vcount
-			if t_pos != nil && int(t_pos.count) == vcount {
-				_ = cgltf.accessor_unpack_floats(t_pos, raw_data(floats^), uint(vcount * 3))
+			if count_of(doc, t.position, vcount) {
+				unpack_floats_to(doc, t.position, floats, vcount * 3)
 				for i in 0 ..< vcount {
 					morphs[base + i].position = {floats[i * 3], floats[i * 3 + 1], floats[i * 3 + 2], 0}
 				}
 			}
-			if t_norm != nil && int(t_norm.count) == vcount {
-				_ = cgltf.accessor_unpack_floats(t_norm, raw_data(floats^), uint(vcount * 3))
+			if count_of(doc, t.normal, vcount) {
+				unpack_floats_to(doc, t.normal, floats, vcount * 3)
 				for i in 0 ..< vcount {
 					morphs[base + i].normal = {floats[i * 3], floats[i * 3 + 1], floats[i * 3 + 2], 0}
 				}
@@ -812,11 +767,12 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 		}
 	}
 
-	if prim.indices != nil {
-		icount := int(prim.indices.count)
+	indices := &s.indices
+	if prim.indices >= 0 {
 		table_grow_non_zero(indices, icount)
-		_ = cgltf.accessor_unpack_indices(prim.indices, raw_data(indices^), size_of(u32), uint(icount))
-		// validate checked them; a renderer indexes vertices by them unchecked.
+		gltf_accessor_uints(doc, prim.indices, indices[:icount])
+		// Sparse indices are not checked by gltf_read; a renderer indexes
+		// vertices by them unchecked.
 		for i in indices^ {
 			if int(i) >= vcount {
 				return 0, false, false
@@ -831,16 +787,12 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 
 	// Without NORMAL the primitive is flat shaded (its material says so);
 	// smooth normals from the faces still give shadows' normal bias one.
-	has_normals = norm_acc != nil && int(norm_acc.count) == vcount
 	if !has_normals {
 		for &v in verts^ {
 			v.normal = {}
 		}
 		for t := 0; t + 2 < len(indices); t += 3 {
 			i0, i1, i2 := indices[t], indices[t + 1], indices[t + 2]
-			if int(i0) >= vcount || int(i1) >= vcount || int(i2) >= vcount {
-				continue
-			}
 			fn := linalg.cross(verts[i1].position - verts[i0].position, verts[i2].position - verts[i0].position)
 			verts[i0].normal += fn
 			verts[i1].normal += fn
@@ -851,66 +803,62 @@ build_primitive :: proc(geos: ^Geometries, prim: ^cgltf.primitive, verts: ^[dyna
 		}
 	}
 
-	return geometry_add(geos, verts[:], indices[:], skin[:] if has_skin else nil, morphs[:] if has_morphs else nil), has_normals, has_skin
+	return geometry_add(geos, verts[:], indices[:], s.skin[:vcount] if has_skin else nil, s.morphs[:] if has_morphs else nil), has_normals, has_skin
 }
 
 @(private = "file")
-tex_from_view :: proc(data: ^cgltf.data, view: cgltf.texture_view, img_ids: []Texture_Id) -> Texture_Id {
-	if view.texture == nil || view.texture.image_ == nil || len(data.images) == 0 {
+tex_from_ref :: proc(doc: ^Gltf_Document, ref: Gltf_Texture_Ref, img_ids: []Texture_Id) -> Texture_Id {
+	if ref.texture < 0 {
 		return 0
 	}
-	idx := int(uintptr(view.texture.image_) - uintptr(raw_data(data.images))) / size_of(cgltf.image)
-	if idx < 0 || idx >= len(img_ids) {
-		return 0
-	}
-	return img_ids[idx]
+	img := doc.textures[ref.texture]
+	return img_ids[img] if img >= 0 else 0
 }
 
 @(private = "file")
-view_transform :: proc "contextless" (view: cgltf.texture_view) -> (t: Texture_Transform) {
+ref_transform :: proc "contextless" (ref: Gltf_Texture_Ref) -> (t: Texture_Transform) {
 	t.scale = {1, 1}
-	t.tex_coord = u8(clamp(view.texcoord, 0, 1))
-	if view.has_transform {
-		xf := view.transform
-		t.offset = xf.offset
-		t.rotation = xf.rotation
-		t.scale = xf.scale
-		if xf.has_texcoord {
-			t.tex_coord = u8(clamp(xf.texcoord, 0, 1))
+	t.tex_coord = u8(clamp(ref.tex_coord, 0, 1))
+	if ref.has_transform {
+		t.offset = ref.offset
+		t.rotation = ref.rotation
+		t.scale = ref.transform_scale
+		if ref.has_tex_coord {
+			t.tex_coord = u8(clamp(ref.transform_coord, 0, 1))
 		}
 	}
 	return
 }
 
 @(private = "file")
-convert_material :: proc(data: ^cgltf.data, gm: ^cgltf.material, img_ids: []Texture_Id) -> Material {
-	if gm == nil {
+convert_material :: proc(doc: ^Gltf_Document, mi: i32, img_ids: []Texture_Id) -> Material {
+	if mi < 0 {
 		return MATERIAL_DEFAULT
 	}
+	gm := &doc.materials[mi]
 	m := MATERIAL_DEFAULT
-	if gm.has_pbr_metallic_roughness {
-		pbr := gm.pbr_metallic_roughness
-		m.color = linear_to_srgb_vec3(pbr.base_color_factor.rgb)
-		m.opacity = pbr.base_color_factor[3]
-		m.metalness = pbr.metallic_factor
-		m.roughness = pbr.roughness_factor
-		m.color_map = tex_from_view(data, pbr.base_color_texture, img_ids)
-		m.color_transform = view_transform(pbr.base_color_texture)
+	if gm.has_pbr {
+		m.color = linear_to_srgb_vec3(gm.base_color.rgb)
+		m.opacity = gm.base_color[3]
+		m.metalness = gm.metallic
+		m.roughness = gm.roughness
+		m.color_map = tex_from_ref(doc, gm.base_color_texture, img_ids)
+		m.color_transform = ref_transform(gm.base_color_texture)
 		// Roughness in green, metalness in blue, one texture.
-		m.roughness_map = tex_from_view(data, pbr.metallic_roughness_texture, img_ids)
-		m.roughness_transform = view_transform(pbr.metallic_roughness_texture)
+		m.roughness_map = tex_from_ref(doc, gm.metal_rough_texture, img_ids)
+		m.roughness_transform = ref_transform(gm.metal_rough_texture)
 		m.metalness_map = m.roughness_map
 		m.metalness_transform = m.roughness_transform
 	}
-	m.normal_map = tex_from_view(data, gm.normal_texture, img_ids)
-	m.normal_transform = view_transform(gm.normal_texture)
-	m.emissive_map = tex_from_view(data, gm.emissive_texture, img_ids)
-	m.emissive_transform = view_transform(gm.emissive_texture)
-	m.ao_map = tex_from_view(data, gm.occlusion_texture, img_ids)
-	m.ao_transform = view_transform(gm.occlusion_texture)
-	m.ao_map_intensity = gm.occlusion_texture.scale if gm.occlusion_texture.texture != nil else 1
-	m.emissive = linear_to_srgb_vec3(Vec3(gm.emissive_factor))
-	m.emissive_intensity = gm.emissive_strength.emissive_strength if gm.has_emissive_strength else 1
+	m.normal_map = tex_from_ref(doc, gm.normal_texture, img_ids)
+	m.normal_transform = ref_transform(gm.normal_texture)
+	m.emissive_map = tex_from_ref(doc, gm.emissive_texture, img_ids)
+	m.emissive_transform = ref_transform(gm.emissive_texture)
+	m.ao_map = tex_from_ref(doc, gm.occlusion_texture, img_ids)
+	m.ao_transform = ref_transform(gm.occlusion_texture)
+	m.ao_map_intensity = gm.occlusion_texture.scale if gm.occlusion_texture.texture >= 0 else 1
+	m.emissive = linear_to_srgb_vec3(Vec3(gm.emissive))
+	m.emissive_intensity = gm.emissive_strength
 	if gm.double_sided {
 		m.side = .Double
 	}
@@ -918,67 +866,46 @@ convert_material :: proc(data: ^cgltf.data, gm: ^cgltf.material, img_ids: []Text
 		m.flags += {.Basic}
 	}
 	switch gm.alpha_mode {
-	case .opaque:
+	case .Opaque:
 		m.opacity = 1
-	case .mask:
+	case .Mask:
 		m.flags += {.Alpha_Mask}
 		m.alpha_cutoff = gm.alpha_cutoff
-	case .blend:
+	case .Blend:
 		m.flags += {.Transparent}
 	}
 	return m
 }
 
+// Emits node `ni` then its children; a node whose parent is not emitted
+// emits that parent first (skin joints outside the scene).
 @(private = "file")
-emit_node :: proc(data: ^cgltf.data, gn: ^cgltf.node, parent_idx: i32, m: ^Model, node_map: []i32) {
-	if gn == nil || len(data.nodes) == 0 {
+emit_node :: proc(doc: ^Gltf_Document, ni: i32, parent_idx: i32, m: ^Model, node_map: []i32) {
+	if ni < 0 || node_map[ni] >= 0 {
 		return
 	}
-	raw_idx := int(uintptr(gn) - uintptr(raw_data(data.nodes))) / size_of(cgltf.node)
-	if raw_idx < 0 || raw_idx >= len(node_map) || node_map[raw_idx] >= 0 {
-		return
-	}
+	gn := &doc.nodes[ni]
 	parent := parent_idx
-	if parent < 0 && gn.parent != nil {
-		p_raw := int(uintptr(gn.parent) - uintptr(raw_data(data.nodes))) / size_of(cgltf.node)
-		if p_raw >= 0 && p_raw < len(node_map) {
-			if node_map[p_raw] < 0 {
-				emit_node(data, gn.parent, -1, m, node_map)
-			}
-			parent = node_map[p_raw]
+	if parent < 0 && gn.parent >= 0 {
+		if node_map[gn.parent] < 0 {
+			emit_node(doc, gn.parent, -1, m, node_map)
 		}
+		parent = node_map[gn.parent]
 	}
 
 	mesh_idx: i32 = -1
 	first_weight, weight_count: u32
-	if gn.mesh != nil && len(data.meshes) > 0 {
-		mi := int(uintptr(gn.mesh) - uintptr(raw_data(data.meshes))) / size_of(cgltf.mesh)
-		if mi >= 0 && mi < len(m.meshes) {
-			mesh_idx = i32(mi)
-			mesh := m.meshes[mi]
-			if mesh.weight_count > 0 {
-				first_weight = u32(len(m.node_weights))
-				weight_count = mesh.weight_count
-				defaults := m.mesh_weights[mesh.first_weight:][:mesh.weight_count]
-				for ti in 0 ..< int(weight_count) {
-					w := gn.weights[ti] if ti < len(gn.weights) else defaults[ti]
-					append(&m.node_weights, w)
-				}
+	if gn.mesh >= 0 {
+		mesh_idx = gn.mesh
+		mesh := m.meshes[gn.mesh]
+		if mesh.weight_count > 0 && budget_take(&doc.budget, .Gltf_Values, int(mesh.weight_count)) {
+			first_weight = u32(len(m.node_weights))
+			weight_count = mesh.weight_count
+			defaults := m.mesh_weights[mesh.first_weight:][:mesh.weight_count]
+			node_w := doc.floats[gn.weights.first:][:gn.weights.count]
+			for ti in 0 ..< int(weight_count) {
+				append(&m.node_weights, node_w[ti] if ti < len(node_w) else defaults[ti])
 			}
-		}
-	}
-	skin_idx: i32 = -1
-	if gn.skin != nil && len(data.skins) > 0 {
-		si := int(uintptr(gn.skin) - uintptr(raw_data(data.skins))) / size_of(cgltf.skin)
-		if si >= 0 && si < len(data.skins) {
-			skin_idx = i32(si)
-		}
-	}
-	light_idx: i32 = -1
-	if gn.light != nil && len(data.lights) > 0 {
-		li := int(uintptr(gn.light) - uintptr(raw_data(data.lights))) / size_of(cgltf.light)
-		if li >= 0 && li < len(m.lights) {
-			light_idx = i32(li)
 		}
 	}
 
@@ -999,49 +926,42 @@ emit_node :: proc(data: ^cgltf.data, gn: ^cgltf.node, parent_idx: i32, m: ^Model
 	}
 
 	my_idx := i32(len(m.nodes))
-	node_map[raw_idx] = my_idx
+	node_map[ni] = my_idx
 	append(&m.nodes, Model_Node{
 		parent       = parent,
 		mesh         = mesh_idx,
-		skin         = skin_idx,
-		light        = light_idx,
+		skin         = gn.skin,
+		light        = gn.light,
 		first_weight = first_weight,
 		weight_count = weight_count,
-		has_matrix   = bool(gn.has_matrix),
+		has_matrix   = gn.has_matrix,
 		translation  = t,
 		rotation     = r,
 		scale        = s,
 		local        = local,
 	})
-	for child in gn.children {
-		emit_node(data, child, my_idx, m, node_map)
+	for child := gn.first_child; child >= 0; child = doc.nodes[child].next {
+		emit_node(doc, child, my_idx, m, node_map)
 	}
 }
 
 @(private = "file")
-build_skins :: proc(data: ^cgltf.data, m: ^Model, node_map: []i32, floats: ^[dynamic]f32) {
-	if len(data.skins) == 0 || len(data.nodes) == 0 {
+build_skins :: proc(doc: ^Gltf_Document, m: ^Model, node_map: []i32, floats: ^[dynamic]f32) {
+	if len(doc.skins) == 0 || len(doc.nodes) == 0 {
 		return
 	}
-	reserve(&m.skins, len(data.skins))
-	for &gs in data.skins {
+	reserve(&m.skins, len(doc.skins))
+	for gs in doc.skins {
 		first_joint := u32(len(m.skin_joints))
-		jcount := min(len(gs.joints), MAX_JOINTS)
-		has_ibm := gs.inverse_bind_matrices != nil && int(gs.inverse_bind_matrices.count) >= jcount
+		joints := doc.node_lists[gs.joints.first:][:gs.joints.count]
+		jcount := min(len(joints), MAX_JOINTS)
+		ibm_acc := gs.inverse_bind_matrices
+		has_ibm := ibm_acc >= 0 && doc.accessors[ibm_acc].count >= jcount && budget_take(&doc.budget, .Gltf_Values, jcount * 16)
 		if has_ibm {
-			table_grow_non_zero(floats, jcount * 16)
-			_ = cgltf.accessor_unpack_floats(gs.inverse_bind_matrices, raw_data(floats^), uint(jcount * 16))
+			unpack_floats_to(doc, ibm_acc, floats, jcount * 16)
 		}
 		for j in 0 ..< jcount {
-			jn := gs.joints[j]
-			node_idx: u32
-			if jn != nil {
-				raw_node := int(uintptr(jn) - uintptr(raw_data(data.nodes))) / size_of(cgltf.node)
-				if raw_node >= 0 && raw_node < len(node_map) && node_map[raw_node] >= 0 {
-					node_idx = u32(node_map[raw_node])
-				}
-			}
-			append(&m.skin_joints, node_idx)
+			append(&m.skin_joints, u32(max(node_map[joints[j]], 0)))
 			ibm := linalg.MATRIX4F32_IDENTITY
 			if has_ibm {
 				cm := floats[j * 16:]
@@ -1064,67 +984,63 @@ build_skins :: proc(data: ^cgltf.data, m: ^Model, node_map: []i32, floats: ^[dyn
 // ---- animations -------------------------------------------------------------------------
 
 @(private = "file")
-build_animations :: proc(data: ^cgltf.data, m: ^Model, node_map: []i32, floats: ^[dynamic]f32) {
-	if len(data.animations) == 0 || len(data.nodes) == 0 {
+build_animations :: proc(doc: ^Gltf_Document, m: ^Model, node_map: []i32, floats: ^[dynamic]f32) {
+	if len(doc.animations) == 0 || len(doc.nodes) == 0 {
 		return
 	}
-	reserve(&m.animations, len(data.animations))
-	for &ga in data.animations {
+	reserve(&m.animations, len(doc.animations))
+	for ga in doc.animations {
 		first_ch := u32(len(m.channels))
 		duration: f32
-		for &gc in ga.channels {
-			if gc.sampler == nil || gc.target_node == nil || gc.sampler.input == nil || gc.sampler.output == nil {
+		for gc in doc.channels[ga.channels.first:][:ga.channels.count] {
+			if gc.node < 0 || node_map[gc.node] < 0 {
 				continue
 			}
-			raw_node := int(uintptr(gc.target_node) - uintptr(raw_data(data.nodes))) / size_of(cgltf.node)
-			if raw_node < 0 || raw_node >= len(node_map) || node_map[raw_node] < 0 {
-				continue
-			}
-			node_idx := u32(node_map[raw_node])
+			node_idx := u32(node_map[gc.node])
 
 			path: Animation_Path
 			comps: int
-			switch gc.target_path {
-			case .translation:
+			switch gc.path {
+			case .Translation:
 				path, comps = .Translation, 3
-			case .rotation:
+			case .Rotation:
 				path, comps = .Rotation, 4
-			case .scale:
+			case .Scale:
 				path, comps = .Scale, 3
-			case .weights:
+			case .Weights:
 				path = .Weights
 				comps = int(m.nodes.weight_count[node_idx])
 				if comps <= 0 {
 					continue
 				}
-			case .invalid:
+			case .Invalid:
 				continue
 			}
 
-			gs := gc.sampler
-			kcount := int(gs.input.count)
+			gs := doc.samplers[gc.sampler]
+			kcount := doc.accessors[gs.input].count
 			if kcount == 0 {
 				continue
 			}
 			interp: Interpolation
 			switch gs.interpolation {
-			case .linear:
+			case .Linear:
 				interp = .Linear
-			case .step:
+			case .Step:
 				interp = .Step
-			case .cubic_spline:
+			case .Cubic_Spline:
 				interp = .Cubic_Spline
 			}
 			val_mult := 3 if interp == .Cubic_Spline else 1
 			total_vecs := kcount * val_mult
-			expected_count := total_vecs * comps if path == .Weights else total_vecs
-			if int(gs.output.count) < expected_count {
+			if i128(doc.accessors[gs.output].count) < i128(total_vecs) * i128(comps if path == .Weights else 1) || !budget_take_wide(&doc.budget, .Gltf_Values, i128(kcount) + i128(total_vecs) * i128(comps)) {
 				continue
 			}
 
 			first_time := u32(len(m.times))
 			table_grow_non_zero(&m.times, int(first_time) + kcount)
-			_ = cgltf.accessor_unpack_floats(gs.input, raw_data(m.times[first_time:]), uint(kcount))
+			wrote := gltf_accessor_floats(doc, gs.input, m.times[first_time:])
+			slice.zero(m.times[int(first_time) + wrote:])
 			if m.times[int(first_time) + kcount - 1] > duration {
 				duration = m.times[int(first_time) + kcount - 1]
 			}
@@ -1133,7 +1049,8 @@ build_animations :: proc(data: ^cgltf.data, m: ^Model, node_map: []i32, floats: 
 				first_val := u32(len(m.morph_values))
 				total_floats := total_vecs * comps
 				table_grow_non_zero(&m.morph_values, int(first_val) + total_floats)
-				_ = cgltf.accessor_unpack_floats(gs.output, raw_data(m.morph_values[first_val:]), uint(total_floats))
+				wrote = gltf_accessor_floats(doc, gs.output, m.morph_values[first_val:])
+				slice.zero(m.morph_values[int(first_val) + wrote:])
 				append(&m.channels, Model_Channel{
 					node          = node_idx,
 					path          = .Weights,
@@ -1146,8 +1063,7 @@ build_animations :: proc(data: ^cgltf.data, m: ^Model, node_map: []i32, floats: 
 				continue
 			}
 
-			table_grow_non_zero(floats, total_vecs * comps)
-			_ = cgltf.accessor_unpack_floats(gs.output, raw_data(floats^), uint(total_vecs * comps))
+			unpack_floats_to(doc, gs.output, floats, total_vecs * comps)
 
 			first_val := u32(len(m.values))
 			table_grow_non_zero(&m.values, int(first_val) + total_vecs)
@@ -1170,7 +1086,7 @@ build_animations :: proc(data: ^cgltf.data, m: ^Model, node_map: []i32, floats: 
 			})
 		}
 		append(&m.animations, Model_Animation{
-			name          = strings.clone(string(ga.name)) if ga.name != nil else "",
+			name          = strings.clone(ga.name),
 			duration      = duration,
 			first_channel = first_ch,
 			channel_count = u32(len(m.channels)) - first_ch,

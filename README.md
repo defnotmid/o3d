@@ -14,7 +14,7 @@ colour one traced path, plus a hidden `silhouette` (all of Oxa as one
 outline with its hole) to extrude, morph or collide.
 
 MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ovg's curves,
-cgltf, stb_image, SDL 3, three.js's models, Odin's
+stb_image, SDL 3, three.js's models, Odin's
 packages) is in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -215,8 +215,7 @@ o3d imports oksl as `deps:oksl` and ovg's core-only curves package as
 `deps:ovg/curves`: clone [oksl](https://github.com/defnotmid/oksl) and
 [ovg](https://github.com/defnotmid/ovg) next to o3d, and builds pass
 `-collection:deps=..` (the directory holding them). `shaders/build.sh`
-includes ovg's `shaders/curves.slang` from there too. `vendor:cgltf` needs its library built once
-per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
+includes ovg's `shaders/curves.slang` from there too.
 
 - `odin test . -collection:deps=..` and `odin test sdlgpu
   -collection:deps=..`: the CPU and GPU tests. A GPU test fails without a
@@ -248,7 +247,21 @@ per Odin install (`$(odin root)/vendor/cgltf/src/build_cgltf.sh`).
   mirrors the static geometry arrays in vertex, index, and storage buffers
   (uploading only what is new) and uploads any expanded line/point vertices
   into reusable dynamic vertex/index buffers.
-- **glTF (`gltf.odin`):** `gltf_load` and `gltf_parse` (`vendor:cgltf`)
+- **glTF (`gltf_read.odin`, `gltf.odin`):** `gltf_read` reads a `.gltf`
+  (external, data-URI or GLB buffers) or `.glb` into a `Gltf_Document`, the
+  file's tables as flat arrays referring to each other by index, its JSON
+  parsed by `core:encoding/json` into a scratch arena, its buffers loaded,
+  and the whole checked by the rules cgltf's validation used (accessors and
+  views inside their data, indices and sparse indices in range, one count
+  per primitive, morph weights matching targets, no node with two parents
+  or in a cycle); `gltf_accessor_floats` / `gltf_accessor_uints` unpack an
+  accessor in one sweep per component type (strides, normalized integers,
+  padded matrix columns, sparse values). Files may come from anyone, so a
+  `Limits` table (`limits.odin`, as ovg's) bounds JSON and hierarchy depth,
+  node and accessor counts, buffer bytes, unpacked values and image pixels:
+  a `Max` limit fails the file (`Gltf_Error.Limit`), a `Total` one skips
+  the primitive, channel or image it would pass, each with a line in
+  `Model.warnings`. From the document `gltf_load` and `gltf_parse`
   unpack meshes (`POSITION`, `NORMAL`, `TEXCOORD_0`, `TEXCOORD_1`,
   `JOINTS_0`, `WEIGHTS_0` with weights normalized, including normalized and
   non-normalized integer attributes from `KHR_mesh_quantization`, plus morph

@@ -10,7 +10,6 @@ these (onimite's notices list them).
 | --- | --- | --- |
 | oksl | compiles ShaderMaterials (`deps:oksl`) | `LICENSES/oksl-MIT.txt` |
 | ovg's curves package | exact shapes' per-pixel coverage (`deps:ovg/curves`, and `shaders/curves.slang` compiled into the curve shaders) | `LICENSES/ovg-MIT.txt` |
-| cgltf (`vendor:cgltf`) | glTF 2.0 / GLB parsing (`gltf.odin`) | `LICENSES/cgltf-MIT.txt` |
 | stb_image (`vendor:stb/image`) | texture decoding (used under MIT) | `LICENSES/stb-MIT.txt` |
 | SDL 3 (`vendor:sdl3`) | the GPU renderer's device and SDL_GPU (`o3d/sdlgpu`) | `LICENSES/SDL3-Zlib.txt` |
 | three.js | o3d follows its conventions and models: MeshStandardMaterial's shading, PCF shadows, equirectangular environment lighting, GLTFLoader's material and scene rules; `shape.odin` ports its ShapePath.toShapes and ExtrudeGeometry | `LICENSES/three.js-MIT.txt` |
