@@ -13,8 +13,8 @@ keeps its gills, eyes and mouths as layers a script switches by id, each
 colour one traced path, plus a hidden `silhouette` (all of Oxa as one
 outline with its hole) to extrude, morph or collide.
 
-MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ovg's curves
-and Slug, cgltf, stb_image, SDL 3, three.js's models, Odin's
+MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ovg's curves,
+cgltf, stb_image, SDL 3, three.js's models, Odin's
 packages) is in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
