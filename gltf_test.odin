@@ -5,8 +5,10 @@ import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:mem"
+import "core:os"
 import "core:strings"
 import "core:testing"
+import image "deps:odecs/image"
 
 // Builds a self-contained glTF 2.0 JSON (with embedded base64 binary buffer)
 // containing:
@@ -1191,3 +1193,114 @@ f -3//1 -2//1 -1//1
 	testing.expect(t, abs(scene.draws.material[0].outline_width - 0.03) < 1e-6)
 }
 
+
+// A 2x2 RGBA PNG (red, green / blue, half-transparent white), and whether
+// texture `id`'s top level holds exactly its pixels.
+@(private = "file")
+TEST_PIXELS :: [16]u8{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128}
+
+@(private = "file")
+test_png :: proc() -> []u8 {
+	pixels := TEST_PIXELS
+	png, _ := image.encode_png(pixels[:], 2, 2, context.temp_allocator)
+	return png
+}
+
+@(private = "file")
+holds_test_pixels :: proc(textures: ^Textures, id: Texture_Id) -> bool {
+	tex := texture_get(textures, id) or_return
+	pixels := TEST_PIXELS
+	return tex.width == 2 && tex.height == 2 && mem.compare(mem.slice_to_bytes(textures.texels[tex.mips[0]:][:4]), pixels[:]) == 0
+}
+
+// A 3MF's `<m:texture2d>` is decoded from its archive entry into a material's
+// colour map.
+@(test)
+test_threemf_texture2d :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	textures: Textures
+	defer textures_destroy(&textures)
+
+	rels_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+	<Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>`
+	model_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02" requiredextensions="m">
+	<resources>
+		<m:texture2d id="1" path="/3D/Textures/a.png" contenttype="image/png"/>
+		<m:texture2d id="2" path="/3D/Textures/bad.png" contenttype="image/png"/>
+		<m:texture2dgroup id="3" texid="1">
+			<m:tex2coord u="0" v="0"/>
+			<m:tex2coord u="1" v="0"/>
+			<m:tex2coord u="0" v="1"/>
+		</m:texture2dgroup>
+		<object id="4" type="model" pid="3" pindex="0">
+			<mesh>
+				<vertices>
+					<vertex x="0" y="0" z="0"/>
+					<vertex x="1" y="0" z="0"/>
+					<vertex x="0" y="1" z="0"/>
+				</vertices>
+				<triangles>
+					<triangle v1="0" v2="1" v3="2" p1="0" p2="1" p3="2"/>
+				</triangles>
+			</mesh>
+		</object>
+	</resources>
+	<build>
+		<item objectid="4"/>
+	</build>
+</model>`
+	zip_bytes := make_test_zip({
+		{name = "_rels/.rels", data = rels_xml},
+		{name = "3D/3dmodel.model", data = model_xml},
+		{name = "3D/Textures/a.png", data = string(test_png())},
+		{name = "3D/Textures/bad.png", data = "\x89PNG\r\n\x1a\nnot a png"},
+	})
+	m, err := threemf_parse(zip_bytes, &geos, &textures)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Threemf_Error.None)
+	testing.expect_value(t, len(textures.list), 1)
+	testing.expect_value(t, len(m.primitives), 1)
+	testing.expect(t, holds_test_pixels(&textures, m.primitives[0].material.color_map), "the texture2d's pixels")
+}
+
+// An MTL's `map_Kd` is loaded from a file next to the OBJ.
+@(test)
+test_obj_map_kd :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	textures: Textures
+	defer textures_destroy(&textures)
+
+	dir, derr := os.make_directory_temp("", "o3d_obj_*", context.temp_allocator)
+	testing.expect_value(t, derr, nil)
+	defer os.remove_all(dir)
+	write :: proc(dir, name: string, data: []u8) -> bool {
+		return os.write_entire_file(fmt.tprintf("%s/%s", dir, name), data) == nil
+	}
+	testing.expect(t, write(dir, "a.png", test_png()))
+	testing.expect(t, write(dir, "a.mtl", transmute([]u8)string("newmtl lit\nKd 1 1 1\nmap_Kd -bm 1.0 a.png\nnewmtl missing\nmap_Kd none.png\n")))
+	obj_src := `mtllib a.mtl
+v 0 0 0
+v 1 0 0
+v 0 1 0
+vt 0 0
+vt 1 0
+vt 0 1
+usemtl lit
+f 1/1 2/2 3/3
+usemtl missing
+f 3/3 2/2 1/1
+`
+	m, err := obj_parse(transmute([]u8)obj_src, &geos, &textures, dir)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Obj_Error.None)
+	testing.expect_value(t, len(m.primitives), 2)
+	testing.expect_value(t, len(textures.list), 1)
+	testing.expect(t, holds_test_pixels(&textures, m.primitives[0].material.color_map), "map_Kd's pixels")
+	testing.expect_value(t, m.primitives[1].material.color_map, Texture_Id(0))
+}

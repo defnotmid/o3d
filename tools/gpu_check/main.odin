@@ -13,8 +13,7 @@ package o3d_gpu_check
 
 import "core:fmt"
 import "core:os"
-import "core:strings"
-import stbi "vendor:stb/image"
+import image "deps:odecs/image"
 
 import gpu "../../sdlgpu"
 
@@ -43,8 +42,7 @@ main :: proc() {
 		}
 		if dir != "" && err == "" {
 			for px, i in ([2][]u8{gpu_px, cpu_px}) {
-				path := strings.clone_to_cstring(fmt.tprintf("%s/%s.%s.png", dir, c.name, "gpu" if i == 0 else "software"), context.temp_allocator)
-				stbi.write_png(path, i32(c.width), i32(c.height), 4, raw_data(px), i32(c.width * 4))
+				image.write_png(fmt.tprintf("%s/%s.%s.png", dir, c.name, "gpu" if i == 0 else "software"), px, c.width, c.height)
 			}
 		}
 	}

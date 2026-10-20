@@ -8,7 +8,6 @@ import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
-import stbi "vendor:stb/image"
 
 // 3MF (3D Manufacturing Format) import: reads `.3mf` ZIP archives (`3D/3dmodel.model`
 // and any production-extension sub-model `.model` parts) into the same flat
@@ -743,12 +742,7 @@ threemf_parse_resources :: proc(b: ^Threemf_Builder, part_idx: int, doc: ^xml.Do
 			tex_id: Texture_Id
 			if has_path && b.textures != nil {
 				if img_bytes, ok := zip_extract(b.archive, b.entries, path); ok && len(img_bytes) > 0 {
-					w, h, ch: i32
-					pixels := stbi.load_from_memory(raw_data(img_bytes), i32(len(img_bytes)), &w, &h, &ch, 4)
-					if pixels != nil {
-						tex_id = texture_add(b.textures, pixels[:w * h * 4], int(w), int(h))
-						stbi.image_free(pixels)
-					}
+					tex_id, _ = texture_decode(b.textures, img_bytes)
 				}
 			}
 			append(&b.tex2ds, Threemf_Tex2D{id = tid, tex = tex_id})

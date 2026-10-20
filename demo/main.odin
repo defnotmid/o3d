@@ -1,12 +1,11 @@
 // Renders the test scene with the GPU and the software renderer to PNGs:
 //
-//     odin run demo -collection:deps=.. -- out_dir   (deps: the directory holding o3d and oksl)
+//     odin run demo -collection:deps=.. -- out_dir   (deps: the directory holding o3d, oksl, ovg and odecs)
 package o3d_demo
 
 import "core:fmt"
 import "core:os"
-import "core:strings"
-import stbi "vendor:stb/image"
+import image "deps:odecs/image"
 
 import o3d ".."
 import gpu "../sdlgpu"
@@ -38,7 +37,7 @@ main :: proc() {
 }
 
 save :: proc(dir, name: string, px: []u8, w, h: int) {
-	path := strings.clone_to_cstring(fmt.tprintf("%s/%s", dir, name))
-	stbi.write_png(path, i32(w), i32(h), 4, raw_data(px), i32(w * 4))
+	path := fmt.tprintf("%s/%s", dir, name)
+	image.write_png(path, px, w, h)
 	fmt.println(path)
 }

@@ -4,7 +4,7 @@ import "core:math"
 import "core:math/linalg"
 import "core:mem"
 import "core:os"
-import stbi "vendor:stb/image"
+import image "deps:odecs/image"
 
 // Textures: RGBA8 images with their mipmap chains, made once and referred to
 // by id. Every texture's texels across all mip levels live in one shared flat
@@ -101,18 +101,15 @@ texture_add_external :: proc(t: ^Textures, width, height: int) -> Texture_Id {
 	return Texture_Id(len(t.list))
 }
 
-// Decodes an image in memory (PNG, JPEG, BMP, TGA, GIF via stb_image) into `t`.
+// Decodes an image in memory (PNG, JPEG, GIF, BMP, TGA, QOI or WebP, by
+// odecs' image package; an animation's first frame) into `t`.
 texture_decode :: proc(t: ^Textures, data: []u8) -> (Texture_Id, bool) {
-	if len(data) == 0 {
+	img, err := image.decode(data)
+	if err != .None {
 		return 0, false
 	}
-	w, h, ch: i32
-	px := stbi.load_from_memory(raw_data(data), i32(len(data)), &w, &h, &ch, 4)
-	if px == nil {
-		return 0, false
-	}
-	defer stbi.image_free(px)
-	id := texture_add(t, px[:w * h * 4], int(w), int(h))
+	defer image.destroy_image(&img)
+	id := texture_add(t, img.pixels, img.width, img.height)
 	return id, id != 0
 }
 
@@ -120,11 +117,11 @@ texture_decode :: proc(t: ^Textures, data: []u8) -> (Texture_Id, bool) {
 // not an image texture_decode reads).
 @(private)
 texture_pixels :: proc(data: []u8) -> int {
-	w, h, ch: i32
-	if len(data) == 0 || len(data) > int(max(i32)) || stbi.info_from_memory(raw_data(data), i32(len(data)), &w, &h, &ch) == 0 {
+	info, err := image.info(data)
+	if err != .None {
 		return 0
 	}
-	return int(w) * int(h)
+	return info.width * info.height
 }
 
 // Loads an image file from disk into `t`.

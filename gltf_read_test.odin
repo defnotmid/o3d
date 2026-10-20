@@ -67,7 +67,7 @@ test_gltf_read_glb_and_sparse :: proc(t: ^testing.T) {
     {"bufferView": 6, "componentType": 5120, "normalized": true, "count": 3, "type": "VEC2"}],
   "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 2}, "indices": 1}]}],
   "nodes": [{"mesh": 0}]}`
-	glb := make_glb(src, transmute([]u8)(([^]u8)(&b)[:size_of(Bin)]))
+	glb := make_glb(src, ([^]u8)(&b)[:size_of(Bin)])
 
 	doc, err := gltf_read(glb)
 	defer gltf_document_destroy(&doc)

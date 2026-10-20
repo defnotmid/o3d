@@ -14,7 +14,7 @@ colour one traced path, plus a hidden `silhouette` (all of Oxa as one
 outline with its hole) to extrude, morph or collide.
 
 MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ovg's curves,
-stb_image, SDL 3, three.js's models, Odin's
+odecs' image package, SDL 3, three.js's models, Odin's
 packages) is in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -211,9 +211,11 @@ sw: o3d.Software
 pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
 ```
 
-o3d imports oksl as `deps:oksl` and ovg's core-only curves package as
-`deps:ovg/curves`: clone [oksl](https://github.com/defnotmid/oksl) and
-[ovg](https://github.com/defnotmid/ovg) next to o3d, and builds pass
+o3d imports oksl as `deps:oksl`, ovg's core-only curves package as
+`deps:ovg/curves` and odecs' image package (texture decoding, PNG writing)
+as `deps:odecs/image`: clone [oksl](https://github.com/defnotmid/oksl),
+[ovg](https://github.com/defnotmid/ovg) and
+[odecs](https://github.com/defnotmid/odecs) next to o3d, and builds pass
 `-collection:deps=..` (the directory holding them). `shaders/build.sh`
 includes ovg's `shaders/curves.slang` from there too.
 
