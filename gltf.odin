@@ -103,16 +103,27 @@ Model_Mesh :: struct {
 }
 
 Model_Primitive :: struct {
-	geometry: Geometry_Id,
-	material: Material,
-	skinned:  bool,
+	geometry:    Geometry_Id,
+	material:    Material,
+	// The file's material it came from (0: none).
+	material_id: Model_Material_Id,
+	skinned:     bool,
 }
+
+// A model's node, by its place in `Model.nodes` plus one (0: none). Ids
+// last as long as the model: find them once by name (`model_node`).
+Model_Node_Id :: distinct u32
+
+// One of a model's file materials (a glTF material, an MTL `newmtl`), by
+// its place in `Model.material_names` plus one (0: none).
+Model_Material_Id :: distinct u32
 
 Model_Skin :: struct {
 	first_joint, joint_count: u32,
 }
 
 Model_Node :: struct {
+	name:                       string, // "" if none
 	parent:                     i32, // -1 for root nodes; always < current node index
 	mesh:                       i32, // -1 if none, else index in `Model.meshes`
 	skin:                       i32, // -1 if none, else index in `Model.skins`
@@ -157,6 +168,8 @@ Model :: struct {
 	times:                 [dynamic]f32,
 	values:                [dynamic]Vec4,
 	morph_values:          [dynamic]f32,
+	// By Model_Material_Id - 1: each file material's name ("" if none).
+	material_names:        [dynamic]string,
 	// Set when `gltf_load` or `gltf_parse` returns `.Unsupported_Extension`.
 	unsupported_extension: string,
 	// What was skipped (limits reached, images that did not decode); with
@@ -179,6 +192,102 @@ Model_Pose :: struct {
 	world:         [dynamic]Mat4,
 	joints:        [dynamic]Mat4,
 	morph_weights: [dynamic]f32,
+	// Per node: its `Model_Parts` row with its ancestors' folded in.
+	parts:         [dynamic]Part_State,
+}
+
+// What one drawing of a model changes, part by part: tables by durable id
+// (`model_parts_init` sizes them to the model; a zero row changes nothing).
+// The caller keeps them, like a `Model_Pose`, and sets rows by id.
+Model_Parts :: struct {
+	// By Model_Node_Id - 1: a node's row holds for the nodes under it too
+	// (hidden stays hidden; a nearer row's flags win).
+	nodes:        [dynamic]Part_State,
+	// By Model_Node_Id - 1: replaces parts of the node's own (animated)
+	// transform; the nodes under it follow.
+	transforms:   [dynamic]Part_Transform,
+	// By Model_Material_Id - 1: for every primitive of that material, after
+	// its nodes' rows.
+	materials:    [dynamic]Part_State,
+	// By Model_Material_Id - 1: the material drawn instead where its
+	// state's `replace` is set.
+	replacements: [dynamic]Material,
+}
+
+Part_State :: struct {
+	hidden:      bool,
+	// Drawn with (`replacements`; material rows only).
+	replace:     bool,
+	add, remove: Material_Flags,
+}
+
+Transform_Part :: enum u8 {
+	Translation,
+	Rotation,
+	Scale,
+}
+
+Part_Transform :: struct {
+	set:         bit_set[Transform_Part; u8],
+	translation: Vec3,
+	rotation:    linalg.Quaternionf32,
+	scale:       Vec3,
+}
+
+// Sizes `parts` to `m`'s nodes and materials, every row zero.
+model_parts_init :: proc(parts: ^Model_Parts, m: ^Model) {
+	resize(&parts.nodes, len(m.nodes))
+	resize(&parts.transforms, len(m.nodes))
+	resize(&parts.materials, len(m.material_names))
+	resize(&parts.replacements, len(m.material_names))
+	slice.zero(parts.nodes[:])
+	slice.zero(parts.transforms[:])
+	slice.zero(parts.materials[:])
+	slice.zero(parts.replacements[:])
+}
+
+model_parts_destroy :: proc(parts: ^Model_Parts) {
+	delete(parts.nodes)
+	delete(parts.transforms)
+	delete(parts.materials)
+	delete(parts.replacements)
+	parts^ = {}
+}
+
+// The first node named `name` (0: none).
+model_node :: proc "contextless" (m: ^Model, name: string) -> Model_Node_Id {
+	if len(name) == 0 {
+		return 0
+	}
+	for n, i in m.nodes.name[:len(m.nodes)] {
+		if n == name {
+			return Model_Node_Id(i + 1)
+		}
+	}
+	return 0
+}
+
+// The first file material named `name` (0: none).
+model_material :: proc "contextless" (m: ^Model, name: string) -> Model_Material_Id {
+	if len(name) == 0 {
+		return 0
+	}
+	for n, i in m.material_names {
+		if n == name {
+			return Model_Material_Id(i + 1)
+		}
+	}
+	return 0
+}
+
+// Where `node` was in the world at the last `gltf_draw` with `pose` (nil:
+// the model's own), to attach other draws to it.
+model_node_world :: proc "contextless" (m: ^Model, node: Model_Node_Id, pose: ^Model_Pose = nil) -> Mat4 {
+	p := pose if pose != nil else &m.scratch
+	if node == 0 || int(node) > len(p.world) {
+		return linalg.MATRIX4F32_IDENTITY
+	}
+	return p.world[node - 1]
 }
 
 model_pose_destroy :: proc(p: ^Model_Pose) {
@@ -189,6 +298,7 @@ model_pose_destroy :: proc(p: ^Model_Pose) {
 	delete(p.world)
 	delete(p.joints)
 	delete(p.morph_weights)
+	delete(p.parts)
 	p^ = {}
 }
 
@@ -199,6 +309,13 @@ model_destroy :: proc(m: ^Model) {
 	for s in m.mesh_target_names {
 		delete(s)
 	}
+	for s in m.nodes.name[:len(m.nodes)] {
+		delete(s)
+	}
+	for s in m.material_names {
+		delete(s)
+	}
+	delete(m.material_names)
 	delete(m.meshes)
 	delete(m.primitives)
 	delete(m.lights)
@@ -304,8 +421,10 @@ gltf_morph_count :: proc "contextless" (m: ^Model) -> int {
 // channels; `outline_width` (> 0) and `outline_color` enable inverted-hull
 // cartoon outlines on all primitives. `pose` is where it is posed (nil: the
 // model's own, so one thread at a time); with the caller's, the model is only
-// read. Zero allocations on warm frames.
-gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil, override_material: ^Material = nil, morphs: []Morph_Weight = nil, outline_width: f32 = 0, outline_color: Vec3 = {}) {
+// read. `parts` (`model_parts_init`) changes nodes and materials by id:
+// hidden, flags, transforms, replaced materials (a replacement wins over
+// `override_material`). Zero allocations on warm frames.
+gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil, override_material: ^Material = nil, morphs: []Morph_Weight = nil, outline_width: f32 = 0, outline_color: Vec3 = {}, parts: ^Model_Parts = nil) {
 	n := len(m.nodes)
 	if n == 0 {
 		return
@@ -324,10 +443,22 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 	if len(p.morph_weights) < len(m.node_weights) {
 		resize(&p.morph_weights, len(m.node_weights))
 	}
+	node_parts := parts != nil && len(parts.nodes) >= n
+	material_parts := parts != nil && len(parts.materials) >= len(m.material_names) && len(parts.replacements) >= len(m.material_names)
+	moved := parts != nil && len(parts.transforms) >= n
+	if node_parts && len(p.parts) < n {
+		resize(&p.parts, n)
+	}
 	if len(m.node_weights) > 0 {
 		copy(p.morph_weights[:len(m.node_weights)], m.node_weights[:])
 	}
 	has_anim := anim >= 0 && anim < len(m.animations)
+	if has_anim || moved {
+		copy(p.translation[:n], m.nodes.translation[:n])
+		copy(p.rotation[:n], m.nodes.rotation[:n])
+		copy(p.scale[:n], m.nodes.scale[:n])
+		slice.zero(p.dirty[:n])
+	}
 	if has_anim {
 		a := m.animations[anim]
 		t := time
@@ -343,11 +474,6 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		} else {
 			t = 0
 		}
-		copy(p.translation[:n], m.nodes.translation[:n])
-		copy(p.rotation[:n], m.nodes.rotation[:n])
-		copy(p.scale[:n], m.nodes.scale[:n])
-		slice.zero(p.dirty[:n])
-
 		for ch in m.channels[a.first_channel:][:a.channel_count] {
 			if ch.key_count == 0 || int(ch.node) >= n {
 				continue
@@ -372,6 +498,26 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 			p.dirty[ch.node] = true
 		}
 	}
+	if moved {
+		for xf, i in parts.transforms[:n] {
+			if xf.set == {} {
+				continue
+			}
+			if m.nodes.has_matrix[i] && !p.dirty[i] {
+				p.translation[i], p.rotation[i], p.scale[i] = trs_of(m.nodes.local[i])
+			}
+			if .Translation in xf.set {
+				p.translation[i] = xf.translation
+			}
+			if .Rotation in xf.set {
+				p.rotation[i] = xf.rotation
+			}
+			if .Scale in xf.set {
+				p.scale[i] = xf.scale
+			}
+			p.dirty[i] = true
+		}
+	}
 
 	parents := m.nodes.parent[:n]
 	meshes := m.nodes.mesh[:n]
@@ -381,13 +527,25 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 	world := p.world[:n]
 	for i in 0 ..< n {
 		local := locals[i]
-		if has_anim && p.dirty[i] {
+		if (has_anim || moved) && p.dirty[i] {
 			local = linalg.matrix4_from_trs_f32(p.translation[i], p.rotation[i], p.scale[i])
 		}
 		parent := parents[i]
 		world[i] = (world[parent] * local) if parent >= 0 else (transform * local)
+		if node_parts {
+			row := parts.nodes[i]
+			if parent >= 0 {
+				up := p.parts[parent]
+				row.hidden ||= up.hidden
+				row.add, row.remove = (up.add - row.remove) + row.add, (up.remove - row.add) + row.remove
+			}
+			p.parts[i] = row
+		}
 	}
 	for i in 0 ..< n {
+		if node_parts && p.parts[i].hidden {
+			continue
+		}
 		if li := lights[i]; li >= 0 && int(li) < len(m.lights) {
 			l := m.lights[li]
 			w := world[i]
@@ -442,7 +600,21 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		}
 		for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
 			mat := override_material^ if override_material != nil else prim.material
+			row: Part_State
+			if material_parts && prim.material_id != 0 {
+				row = parts.materials[prim.material_id - 1]
+				if row.hidden {
+					continue
+				}
+				if row.replace {
+					mat = parts.replacements[prim.material_id - 1]
+				}
+			}
 			mat.flags += flags
+			if node_parts {
+				mat.flags = (mat.flags - p.parts[i].remove) + p.parts[i].add
+			}
+			mat.flags = (mat.flags - row.remove) + row.add
 			if outline_width > 0 {
 				mat.outline_width = outline_width
 				mat.outline_color = outline_color
@@ -459,6 +631,25 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 	}
 }
 
+
+// A node matrix's translation, rotation and scale (a mirroring matrix
+// takes a negative x scale).
+@(private = "file")
+trs_of :: proc "contextless" (mt: Mat4) -> (t: Vec3, r: linalg.Quaternionf32, s: Vec3) {
+	t = {mt[0, 3], mt[1, 3], mt[2, 3]}
+	cols := [3]Vec3{{mt[0, 0], mt[1, 0], mt[2, 0]}, {mt[0, 1], mt[1, 1], mt[2, 1]}, {mt[0, 2], mt[1, 2], mt[2, 2]}}
+	s = {linalg.length(cols[0]), linalg.length(cols[1]), linalg.length(cols[2])}
+	if linalg.dot(linalg.cross(cols[0], cols[1]), cols[2]) < 0 {
+		s.x = -s.x
+	}
+	rot: linalg.Matrix3f32
+	for c in 0 ..< 3 {
+		axis := cols[c] / s[c] if s[c] != 0 else Vec3{}
+		rot[0, c], rot[1, c], rot[2, c] = axis.x, axis.y, axis.z
+	}
+	r = linalg.quaternion_from_matrix3_f32(rot)
+	return
+}
 
 // ---- model builder ----------------------------------------------------------------------
 
@@ -499,7 +690,13 @@ build_model :: proc(doc: ^Gltf_Document, geos: ^Geometries, textures: ^Textures,
 		})
 	}
 
-	// 3. Build meshes and primitives into `geos` and `m.primitives`.
+	// 3. Build meshes and primitives into `geos` and `m.primitives`, and
+	// say which extensions the file uses that o3d does not draw.
+	reserve(&m.material_names, len(doc.materials))
+	for gm in doc.materials {
+		append(&m.material_names, strings.clone(gm.name))
+	}
+	warn_unread_extensions(doc, &m.warnings)
 	reserve(&m.meshes, len(doc.meshes))
 	scratch := Build_Scratch{
 		verts   = make([dynamic]Vertex, context.temp_allocator),
@@ -528,7 +725,7 @@ build_model :: proc(doc: ^Gltf_Document, geos: ^Geometries, textures: ^Textures,
 			if !has_normals {
 				material.flags += {.Flat_Shading}
 			}
-			append(&m.primitives, Model_Primitive{geometry = geo_id, material = material, skinned = has_skin})
+			append(&m.primitives, Model_Primitive{geometry = geo_id, material = material, material_id = Model_Material_Id(gp.material + 1), skinned = has_skin})
 		}
 		first_weight := u32(len(m.mesh_weights))
 		for ti in 0 ..< max_targets {
@@ -594,6 +791,47 @@ build_model :: proc(doc: ^Gltf_Document, geos: ^Geometries, textures: ^Textures,
 	// 6. Flatten animations and keyframe samplers.
 	build_animations(doc, &m, node_map, &scratch.floats)
 	return m
+}
+
+// One warning per extension the file uses that o3d does not implement,
+// naming the materials that have it: they are drawn without it.
+@(private = "file")
+warn_unread_extensions :: proc(doc: ^Gltf_Document, warnings: ^[dynamic]string) {
+	unread := make([dynamic]string, context.temp_allocator)
+	for ext in doc.extensions_used {
+		if !slice.contains(GLTF_EXTENSIONS[:], ext) && !slice.contains(unread[:], ext) {
+			append(&unread, ext)
+		}
+	}
+	for gm in doc.materials {
+		for ext in doc.strings[gm.unread_extensions.first:][:gm.unread_extensions.count] {
+			if !slice.contains(unread[:], ext) {
+				append(&unread, ext)
+			}
+		}
+	}
+	slice.sort(unread[:])
+	for ext in unread {
+		b := strings.builder_make(context.temp_allocator)
+		fmt.sbprintf(&b, "%s is not supported: drawn without it", ext)
+		count := 0
+		for gm, mi in doc.materials {
+			if !slice.contains(doc.strings[gm.unread_extensions.first:][:gm.unread_extensions.count], ext) {
+				continue
+			}
+			fmt.sbprint(&b, " (materials " if count == 0 else ", ")
+			if len(gm.name) > 0 {
+				fmt.sbprintf(&b, "%q", gm.name)
+			} else {
+				fmt.sbprintf(&b, "#%d", mi)
+			}
+			count += 1
+		}
+		if count > 0 {
+			strings.write_byte(&b, ')')
+		}
+		append(warnings, strings.clone(strings.to_string(b)))
+	}
 }
 
 // An image's texture (0: none): from its buffer view, a data: URI, or a
@@ -928,6 +1166,7 @@ emit_node :: proc(doc: ^Gltf_Document, ni: i32, parent_idx: i32, m: ^Model, node
 	my_idx := i32(len(m.nodes))
 	node_map[ni] = my_idx
 	append(&m.nodes, Model_Node{
+		name         = strings.clone(gn.name),
 		parent       = parent,
 		mesh         = mesh_idx,
 		skin         = gn.skin,

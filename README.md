@@ -159,6 +159,19 @@ o3d.gltf_draw(&scene, &part, o3d.compose({1.5, 0, 0}))
 // From several threads, each with its own pose (the model is then only read):
 // o3d.gltf_draw(&scene, &duck, anim = 0, time = t, pose = &thread_pose)
 
+// Parts of one model by durable id (names looked up once): rows by node and
+// by material, a node's row holding for the nodes under it
+rover, _ := o3d.gltf_load("rover.glb", &geos, &textures)
+wheel, body := o3d.model_node(&rover, "Wheel_L1"), o3d.model_node(&rover, "Body")
+net := o3d.model_material(&rover, "SteelNet")
+parts: o3d.Model_Parts
+o3d.model_parts_init(&parts, &rover)
+parts.nodes[body - 1].remove = {.Cast_Shadow}                        // the body and everything under it
+parts.materials[net - 1].hidden = true                               // every primitive of that material
+parts.transforms[wheel - 1] = {set = {.Rotation}, rotation = spin}   // the wheel's own rotation; its children follow
+o3d.gltf_draw(&scene, &rover, flags = {.Cast_Shadow}, parts = &parts)
+hub := o3d.model_node_world(&rover, wheel)                           // where the wheel went, to attach other draws
+
 // Text and logos: outlines (flattened to points) grouped into shapes, extruded once, drawn per frame
 shapes := o3d.shapes_from_contours(glyph_contours)          // ShapePath.toShapes; holes found by containment
 opts := o3d.EXTRUDE_DEFAULT
@@ -264,6 +277,10 @@ includes ovg's `shaders/curves.slang` from there too.
   a `Max` limit fails the file (`Gltf_Error.Limit`), a `Total` one skips
   the primitive, channel or image it would pass, each with a line in
   `Model.warnings`. From the document `gltf_load` and `gltf_parse`
+  keep node and material names (`Model_Node.name`, `Model.material_names`,
+  each primitive's `material_id`; OBJ's `o`/`g` and `newmtl` names and
+  3MF's object names likewise), found once by `model_node` /
+  `model_material` as durable ids, and
   unpack meshes (`POSITION`, `NORMAL`, `TEXCOORD_0`, `TEXCOORD_1`,
   `JOINTS_0`, `WEIGHTS_0` with weights normalized, including normalized and
   non-normalized integer attributes from `KHR_mesh_quantization`, plus morph
@@ -288,8 +305,13 @@ includes ovg's `shaders/curves.slang` from there too.
   appended to `scene.lights`), and joint matrices (`inv_mesh * world[joint] *
   ibm`) at time `t` with zero heap allocations on warm frames, posing into
   the caller's `Model_Pose` (one per thread lets threads pose one model at
-  once) or the model's own. Morphs (up to `MAX_MORPH_TARGETS = 8` active
-  non-zero targets per draw) are applied before skinning in the per-chunk
+  once) or the model's own. `Model_Parts` are the caller's tables by node
+  and material id: node rows (hidden, flags added or removed) fold down
+  the hierarchy in the same parent-first sweep as the world matrices,
+  transform rows replace a node's translation, rotation or scale (a
+  matrix node's decomposed first), and material rows hide, re-flag or
+  replace every primitive of their material. Morphs (up to
+  `MAX_MORPH_TARGETS = 8` active non-zero targets per draw) are applied before skinning in the per-chunk
   vertex stage on the software renderer and in `vs_main` / `vs_skinned`
   (`shaders/o3d.slang`, reading the `Morph_Delta` storage buffer via
   `SV_VertexID`) on the GPU, including the shadow pass and before a
@@ -301,8 +323,9 @@ includes ovg's `shaders/curves.slang` from there too.
   `extensionsUsed` (`KHR_materials_ior`, `KHR_materials_transmission`,
   `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
   `KHR_materials_specular`, `KHR_materials_iridescence`,
-  `KHR_materials_anisotropy`, `EXT_texture_webp`, …) are ignored, as the spec
-  allows. Remaining unsupported required extensions (rejected with
+  `KHR_materials_anisotropy`, `EXT_texture_webp`, …) are drawn without, as
+  the spec allows, each with a line in `Model.warnings` naming the
+  materials that have it. Remaining unsupported required extensions (rejected with
   `.Unsupported_Extension`): `KHR_draco_mesh_compression`,
   `EXT_meshopt_compression`, `KHR_texture_basisu`, `EXT_texture_webp`, and
   any other extension outside `KHR_materials_unlit`,

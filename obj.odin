@@ -245,6 +245,9 @@ obj_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, bas
 		return {}, .No_Geometry
 	}
 
+	for mtl in mtls {
+		append(&m.material_names, strings.clone(mtl.name))
+	}
 	ident := linalg.MATRIX4F32_IDENTITY
 	for &g in groups {
 		first_prim := u32(len(m.primitives))
@@ -256,8 +259,9 @@ obj_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, bas
 			base_mat := mtls[s.mtl_idx].mat if s.mtl_idx >= 0 && s.mtl_idx < len(mtls) else MATERIAL_DEFAULT
 			geo_id, out_mat := obj_build_primitive(geos, textures, positions[:], vcolors[:], has_vcolor[:], uvs[:], normals[:], s.corners[:], base_mat)
 			append(&m.primitives, Model_Primitive{
-				geometry = geo_id,
-				material = out_mat,
+				geometry    = geo_id,
+				material    = out_mat,
+				material_id = Model_Material_Id(s.mtl_idx + 1) if s.mtl_idx >= 0 && s.mtl_idx < len(mtls) else 0,
 			})
 			prim_count += 1
 		}
@@ -270,6 +274,7 @@ obj_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, bas
 			primitive_count = prim_count,
 		})
 		append(&m.nodes, Model_Node{
+			name     = strings.clone(g.name),
 			parent   = -1,
 			mesh     = mesh_idx,
 			skin     = -1,

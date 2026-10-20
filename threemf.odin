@@ -349,6 +349,7 @@ Threemf_Component :: struct {
 @(private = "file")
 Threemf_Object :: struct {
 	id:                     u32,
+	name:                   string,
 	mesh:                   i32, // index in `Model.meshes`, or -1
 	first_comp, comp_count: u32,
 }
@@ -916,8 +917,10 @@ threemf_parse_resources :: proc(b: ^Threemf_Builder, part_idx: int, doc: ^xml.Do
 				}
 			}
 		}
+		name, _ := xml_attr(el, "name")
 		append(&built_objs, Threemf_Object {
 			id         = oid,
+			name       = strings.clone(name, context.temp_allocator),
 			mesh       = mesh_idx,
 			first_comp = first_comp,
 			comp_count = comp_count,
@@ -1204,6 +1207,7 @@ threemf_emit_node :: proc(b: ^Threemf_Builder, part_idx: i32, object_id: u32, pa
 	obj := b.objects[obj_idx]
 	node_idx := i32(len(b.model.nodes))
 	append(&b.model.nodes, Model_Node {
+		name       = strings.clone(obj.name),
 		parent     = parent,
 		mesh       = obj.mesh,
 		skin       = -1,

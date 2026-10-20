@@ -2,6 +2,8 @@ package o3d
 
 import "core:encoding/base64"
 import "core:fmt"
+import "core:math"
+import "core:math/linalg"
 import "core:strings"
 import "core:testing"
 
@@ -190,4 +192,78 @@ test_gltf_resolve :: proc(t: ^testing.T) {
 	defer gltf_document_destroy(&doc)
 	testing.expect_value(t, err, Gltf_Error.None)
 	testing.expect_value(t, string(doc.buffers[0]), "hi")
+}
+
+// Parts by durable id: names found once, rows by node and material, a
+// node's row holding for the nodes under it, transforms on a node (one
+// given by a matrix too), world matrices to attach to, and the extensions
+// a material has that o3d does not draw named in a warning.
+@(test)
+test_model_parts :: proc(t: ^testing.T) {
+	tri := [9]f32{0, 0, 0, 1, 0, 0, 0, 1, 0}
+	data := base64.encode(([^]u8)(&tri)[:size_of(tri)], allocator = context.temp_allocator)
+	src := fmt.tprintf(`{{"asset": {{"version": "2.0"}}, "extensionsUsed": ["KHR_materials_transmission"],
+  "buffers": [{{"uri": "data:application/octet-stream;base64,%s", "byteLength": 36}}],
+  "bufferViews": [{{"buffer": 0, "byteLength": 36}}],
+  "accessors": [{{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]}}],
+  "materials": [{{"name": "Hull"}}, {{"name": "Steel", "extensions": {{"KHR_materials_transmission": {{"transmissionFactor": 1}}}}}}],
+  "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}, "material": 0}}, {{"attributes": {{"POSITION": 0}}, "material": 1}}]}}],
+  "nodes": [{{"name": "Ship", "mesh": 0, "children": [1, 2]}}, {{"name": "Net", "mesh": 0}},
+    {{"name": "Wheel", "translation": [2, 0, 0], "children": [3]}}, {{"name": "Hub", "mesh": 0, "matrix": [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 3, 0, 1]}}],
+  "scenes": [{{"nodes": [0]}}]}}`, data)
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	m, err := gltf_parse(transmute([]u8)src, &geos)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Gltf_Error.None)
+	testing.expect(t, len(m.warnings) == 1 && m.warnings[0] == `KHR_materials_transmission is not supported: drawn without it (materials "Steel")`, "the material is named")
+
+	ship, net, wheel, hub := model_node(&m, "Ship"), model_node(&m, "Net"), model_node(&m, "Wheel"), model_node(&m, "Hub")
+	steel := model_material(&m, "Steel")
+	testing.expect(t, ship != 0 && net != 0 && wheel != 0 && hub != 0 && steel != 0 && model_node(&m, "Nope") == 0 && model_node(&m, "") == 0, "ids by name")
+
+	scene: Scene
+	defer scene_destroy(&scene)
+	parts: Model_Parts
+	defer model_parts_destroy(&parts)
+	model_parts_init(&parts, &m)
+	gltf_draw(&scene, &m, flags = {.Cast_Shadow, .Receive_Shadow}, parts = &parts)
+	testing.expect_value(t, len(scene.draws), 6)
+
+	// The ship casts no shadow but its net does; the net is hidden in the
+	// second drawing; steel is drawn as another material.
+	parts.nodes[ship - 1].remove = {.Cast_Shadow}
+	parts.nodes[net - 1].add = {.Cast_Shadow}
+	glass := MATERIAL_DEFAULT
+	glass.opacity, glass.flags = 0.3, {.Transparent}
+	parts.materials[steel - 1].replace = true
+	parts.replacements[steel - 1] = glass
+	scene_clear(&scene)
+	gltf_draw(&scene, &m, flags = {.Cast_Shadow}, parts = &parts)
+	testing.expect_value(t, len(scene.draws), 6)
+	casts := 0
+	for mat in scene.draws.material[:len(scene.draws)] {
+		casts += 1 if .Cast_Shadow in mat.flags else 0
+	}
+	testing.expect_value(t, casts, 2) // Net's two primitives
+	testing.expect_value(t, scene.draws.material[1].opacity, f32(0.3))
+	testing.expect(t, .Transparent in scene.draws.material[1].flags && .Cast_Shadow not_in scene.draws.material[1].flags, "steel replaced, then the ship's row")
+
+	parts.nodes[net - 1].hidden = true
+	parts.materials[model_material(&m, "Hull") - 1].hidden = true
+	scene_clear(&scene)
+	gltf_draw(&scene, &m, parts = &parts)
+	testing.expect_value(t, len(scene.draws), 2) // Ship's and Hub's steel
+
+	// Turning the wheel turns the hub under it; moving the hub keeps its
+	// matrix's scale.
+	parts.transforms[wheel - 1] = {set = {.Rotation}, rotation = linalg.quaternion_angle_axis_f32(math.PI / 2, {0, 0, 1})}
+	parts.transforms[hub - 1] = {set = {.Translation}, translation = {0, 1, 0}}
+	scene_clear(&scene)
+	gltf_draw(&scene, &m, parts = &parts)
+	hub_world := model_node_world(&m, hub)
+	testing.expect(t, linalg.length(Vec3{hub_world[0, 3], hub_world[1, 3], hub_world[2, 3]} - Vec3{1, 0, 0}) < 1e-5, "the hub follows the wheel")
+	testing.expect(t, linalg.length(Vec3{hub_world[0, 1], hub_world[1, 1], hub_world[2, 1]} - Vec3{-2, 0, 0}) < 1e-5, "and keeps its scale")
+	wheel_world := model_node_world(&m, wheel)
+	testing.expect(t, abs(wheel_world[0, 3] - 2) < 1e-6, "the wheel keeps its translation")
 }

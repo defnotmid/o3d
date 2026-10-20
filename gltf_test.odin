@@ -1020,6 +1020,7 @@ test_threemf_parse_and_draw :: proc(t: ^testing.T) {
 	defer model_destroy(&m)
 	testing.expect_value(t, err, Threemf_Error.None)
 	testing.expect_value(t, len(m.meshes), 2)
+	testing.expect(t, model_node(&m, "DualTri") != 0 && model_node(&m, "SubTri") != 0, "3MF object names")
 	// DualTri has 2 triangles with different materials -> split into 2 primitives.
 	testing.expect_value(t, m.meshes[0].primitive_count, u32(2))
 	testing.expect_value(t, m.meshes[1].primitive_count, u32(1))
@@ -1173,6 +1174,7 @@ f -3//1 -2//1 -1//1
 	testing.expect_value(t, err, Obj_Error.None)
 	testing.expect_value(t, len(m.nodes), 2)
 	testing.expect_value(t, len(m.primitives), 2)
+	testing.expect_value(t, model_node(&m, "MascotCap"), Model_Node_Id(2))
 
 	// First primitive: quad fan-triangulated into 2 triangles (6 vertices), with 2-color palette texture.
 	g0, ok0 := geometry_get(&geos, m.primitives[0].geometry)
@@ -1303,4 +1305,6 @@ f 3/3 2/2 1/1
 	testing.expect_value(t, len(textures.list), 1)
 	testing.expect(t, holds_test_pixels(&textures, m.primitives[0].material.color_map), "map_Kd's pixels")
 	testing.expect_value(t, m.primitives[1].material.color_map, Texture_Id(0))
+	testing.expect_value(t, m.primitives[1].material_id, model_material(&m, "missing"))
+	testing.expect_value(t, model_material(&m, "lit"), Model_Material_Id(1))
 }

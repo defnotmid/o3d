@@ -135,6 +135,7 @@ Gltf_Alpha_Mode :: enum u8 {
 }
 
 Gltf_Material :: struct {
+	name:                 string,
 	has_pbr:              bool,
 	base_color:           [4]f32,
 	metallic, roughness:  f32,
@@ -151,6 +152,8 @@ Gltf_Material :: struct {
 	double_sided:         bool,
 	// KHR_materials_unlit.
 	unlit:                bool,
+	// Into `strings`: the material's extensions o3d does not read.
+	unread_extensions:    Gltf_Range,
 }
 
 Gltf_Image :: struct {
@@ -159,6 +162,7 @@ Gltf_Image :: struct {
 }
 
 Gltf_Node :: struct {
+	name:                          string,
 	parent, first_child, next:     i32,
 	mesh, skin, light:             i32,
 	has_matrix:                    bool,
@@ -254,6 +258,7 @@ Gltf_Document :: struct {
 	floats:              [dynamic]f32,
 	strings:             [dynamic]string,
 	extensions_required: []string,
+	extensions_used:     []string,
 	// Set with `.Unsupported_Extension`: the first required extension o3d
 	// does not implement.
 	unsupported_extension: string,
@@ -559,6 +564,28 @@ get_string :: proc(r: ^Gltf_Reader, o: json.Object, key: string) -> (string, boo
 	return s, is_string
 }
 
+// `o[key]` as an array of strings, cloned.
+@(private = "file")
+get_strings :: proc(r: ^Gltf_Reader, o: json.Object, key: string) -> []string {
+	a := get_array(r, o, key)
+	out := make([]string, len(a), r.a)
+	for e, i in a {
+		s, is_string := e.(json.String)
+		if !is_string {
+			fail(r)
+		}
+		out[i] = strings.clone(s, r.a)
+	}
+	return out
+}
+
+// `o.name`, cloned ("" without one).
+@(private = "file")
+get_name :: proc(r: ^Gltf_Reader, o: json.Object) -> string {
+	name, _ := get_string(r, o, "name")
+	return strings.clone(name, r.a)
+}
+
 // `o[key]` as exactly `len(out)` numbers; whether it is there.
 @(private = "file")
 get_floats :: proc(r: ^Gltf_Reader, o: json.Object, key: string, out: []f32) -> bool {
@@ -643,15 +670,8 @@ gltf_parse_root :: proc(r: ^Gltf_Reader, root: json.Object) {
 			}
 		}
 	}
-	required := get_array(r, root, "extensionsRequired")
-	doc.extensions_required = make([]string, len(required))
-	for e, i in required {
-		s, is_string := e.(json.String)
-		if !is_string {
-			fail(r)
-		}
-		doc.extensions_required[i] = strings.clone(s, r.a)
-	}
+	doc.extensions_required = get_strings(r, root, "extensionsRequired")
+	doc.extensions_used = get_strings(r, root, "extensionsUsed")
 
 	// Table lengths first: entries refer to each other in any order.
 	buffers := get_array(r, root, "buffers")
@@ -870,7 +890,7 @@ parse_texture_ref :: proc(r: ^Gltf_Reader, o: json.Object, key: string, ref: ^Gl
 
 @(private = "file")
 parse_material :: proc(r: ^Gltf_Reader, o: json.Object, m: ^Gltf_Material) {
-	m^ = {base_color = 1, metallic = 1, roughness = 1, emissive_strength = 1, alpha_cutoff = 0.5}
+	m^ = {name = get_name(r, o), base_color = 1, metallic = 1, roughness = 1, emissive_strength = 1, alpha_cutoff = 0.5}
 	if pbr, ok := get_object(r, o, "pbrMetallicRoughness"); ok {
 		m.has_pbr = true
 		get_floats(r, pbr, "baseColorFactor", m.base_color[:])
@@ -899,6 +919,13 @@ parse_material :: proc(r: ^Gltf_Reader, o: json.Object, m: ^Gltf_Material) {
 	exts, has_exts := get_object(r, o, "extensions")
 	if !has_exts {
 		return
+	}
+	m.unread_extensions.first = u32(len(r.doc.strings))
+	for name in exts {
+		if name != "KHR_materials_unlit" && name != "KHR_materials_emissive_strength" {
+			append(&r.doc.strings, strings.clone(name, r.a))
+			m.unread_extensions.count += 1
+		}
 	}
 	if _, ok := exts["KHR_materials_unlit"]; ok {
 		m.unlit = true
@@ -1013,6 +1040,7 @@ parse_mesh :: proc(r: ^Gltf_Reader, o: json.Object, mesh: ^Gltf_Mesh) {
 parse_node :: proc(r: ^Gltf_Reader, o: json.Object, i: i32) {
 	doc := r.doc
 	n := &doc.nodes[i]
+	n.name = get_name(r, o)
 	n.mesh = get_index(r, o, "mesh", len(doc.meshes))
 	n.skin = get_index(r, o, "skin", len(doc.skins))
 	n.light = -1
