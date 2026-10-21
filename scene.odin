@@ -106,6 +106,7 @@ Texture_Slot :: enum u8 {
 	Emissive  = 3,
 	Metalness = 4,
 	Ao        = 5,
+	Alpha     = 6,
 }
 
 // UV set (0 or 1) and KHR_texture_transform for a texture slot; zero is the
@@ -145,12 +146,14 @@ Material :: struct {
 	emissive_map:        Texture_Id,
 	metalness_map:       Texture_Id, // its blue channel (metalnessMap; glTF packs both in one)
 	ao_map:              Texture_Id, // its red channel (three.js's aoMap; indirect light only)
+	alpha_map:           Texture_Id, // its green channel times opacity (three.js's alphaMap; with .Transparent or .Alpha_Mask)
 	color_transform:     Texture_Transform,
 	normal_transform:    Texture_Transform,
 	roughness_transform: Texture_Transform,
 	emissive_transform:  Texture_Transform,
 	metalness_transform: Texture_Transform,
 	ao_transform:        Texture_Transform,
+	alpha_transform:     Texture_Transform,
 	shader:              Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
 	uniforms:            Uniform_Range,
@@ -1183,6 +1186,7 @@ Shading_Material :: struct {
 	emissive_map:  Texture_Id,
 	metalness_map: Texture_Id,
 	ao_map:        Texture_Id,
+	alpha_map:     Texture_Id,
 	shader:        Shader_Id, // 0: the standard material
 }
 
@@ -1205,11 +1209,22 @@ Shading_Flag :: enum u8 {
 	// An exact shape (`Draw_Mode.Curves`): coverage from its curves, by
 	// area when blended, by sample otherwise.
 	Curves,
+	Alpha_Map,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
 
-TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map, .Ao_Map}
+// Whether a material's shadow is cut by its alpha (a colour or alpha map
+// with .Alpha_Mask), and the uv set its mask reads: the colour slot's, or
+// the alpha slot's without a colour map (both renderers alike).
+@(private)
+shadow_mask :: #force_inline proc "contextless" (m: ^Shading_Material) -> (masked, uv1: bool) {
+	masked = .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} != {}
+	slot := Texture_Slot.Color if .Color_Map in m.flags else .Alpha
+	return masked, (m.uv_sets >> u32(slot)) & 1 != 0
+}
+
+TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map, .Ao_Map, .Alpha_Map}
 
 // 2x3 affine matrix in o3d's UV space (v = 1 at top) for KHR_texture_transform
 // (defined in glTF's top-left UV space, v_gltf = 1 - v_o3d).
@@ -1274,6 +1289,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		if has_tex(textures, m.ao_map) && .Basic not_in m.flags {
 			f += {.Ao_Map}
 		}
+		if has_tex(textures, m.alpha_map) && (.Transparent in m.flags || .Alpha_Mask in m.flags) {
+			f += {.Alpha_Map}
+		}
 		tforms := [Texture_Slot]Texture_Transform{
 			.Color     = m.color_transform,
 			.Normal    = m.normal_transform,
@@ -1281,6 +1299,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			.Emissive  = m.emissive_transform,
 			.Metalness = m.metalness_transform,
 			.Ao        = m.ao_transform,
+			.Alpha     = m.alpha_transform,
 		}
 		uv_sets: u32
 		uv_xforms: [Texture_Slot][2]Vec3
@@ -1308,6 +1327,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			emissive_map  = m.emissive_map,
 			metalness_map = m.metalness_map,
 			ao_map        = m.ao_map,
+			alpha_map     = m.alpha_map,
 			shader        = m.shader,
 		}
 	}

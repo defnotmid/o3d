@@ -97,7 +97,7 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 			continue
 		}
 		m := &s.materials[t.draw]
-		masked := .Alpha_Mask in m.flags && .Color_Map in m.flags
+		masked, _ := shadow_mask(m)
 		curved := .Curves in m.flags
 		nf := shadow_floats(masked, curved)
 		uv, rc: [3]Vec2 = ---, ---
@@ -135,12 +135,17 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 					}
 					if masked {
 						raw := (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) / iw
-						xf := m.uv_transforms[.Color]
-						uv_col := Vec2{
-							xf[0].x * raw.x + xf[0].y * raw.y + xf[0].z,
-							xf[1].x * raw.x + xf[1].y * raw.y + xf[1].z,
+						at :: #force_inline proc "contextless" (xf: [2]Vec3, raw: Vec2) -> Vec2 {
+							return {xf[0].x * raw.x + xf[0].y * raw.y + xf[0].z, xf[1].x * raw.x + xf[1].y * raw.y + xf[1].z}
 						}
-						if m.opacity * sample_lod(job.textures, m.color_map, uv_col, 0).a < m.alpha_cutoff {
+						a := m.opacity
+						if .Color_Map in m.flags {
+							a *= sample_top(job.textures, m.color_map, at(m.uv_transforms[.Color], raw)).a
+						}
+						if .Alpha_Map in m.flags {
+							a *= sample_top(job.textures, m.alpha_map, at(m.uv_transforms[.Alpha], raw)).g
+						}
+						if a < m.alpha_cutoff {
 							continue
 						}
 					}
@@ -306,6 +311,10 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					if blend || .Alpha_Mask in m.flags {
 						opacity *= tex.a
 					}
+				}
+				if .Alpha_Map in m.flags {
+					a_uv, a_dx, a_dy := slot_uv(m, .Alpha, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					opacity *= sample(job.textures, m.alpha_map, a_uv, a_dx, a_dy).g
 				}
 				if .Alpha_Mask in m.flags {
 					if opacity < m.alpha_cutoff {

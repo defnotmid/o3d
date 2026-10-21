@@ -30,6 +30,7 @@ package o3d
 //   - `map_Bump` / `bump`    normal map (`Material.normal_map`)
 //   - `map_Pr` / `map_Ns`    roughness map (`Material.roughness_map`)
 //   - `map_Pm`               metalness map (`Material.metalness_map`)
+//   - `map_d`                opacity map (`Material.alpha_map`, its green channel; transparent)
 //
 // Normals: when faces omit `vn`, area-weighted crease-angle smooth normals
 // (60° threshold, matching `threemf.odin`) are computed automatically so smooth
@@ -526,6 +527,11 @@ obj_parse_mtl :: proc(src_in: string, mtls: ^[dynamic]Obj_Mtl, textures: ^Textur
 		case "map_Pr", "map_Ns":
 			if tid := obj_load_tex(textures, base_dir, rest); tid != 0 {
 				m.roughness_map = tid
+			}
+		case "map_d":
+			if tid := obj_load_tex(textures, base_dir, rest); tid != 0 {
+				m.alpha_map = tid
+				m.flags += {.Transparent}
 			}
 		case "map_Pm":
 			if tid := obj_load_tex(textures, base_dir, rest); tid != 0 {

@@ -41,6 +41,7 @@ static const uint FLAG_AO_MAP = 1024;
 static const uint FLAG_ALPHA_MASK = 2048;
 static const uint FLAG_TOON = 4096;
 static const uint FLAG_CURVES = 8192;
+static const uint FLAG_ALPHA_MAP = 16384;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -48,6 +49,7 @@ static const uint SLOT_ROUGHNESS = 2;
 static const uint SLOT_EMISSIVE = 3;
 static const uint SLOT_METALNESS = 4;
 static const uint SLOT_AO = 5;
+static const uint SLOT_ALPHA = 6;
 
 struct Morph_Delta {
     float4 position;
@@ -78,7 +80,7 @@ struct Material {
     uint uv_sets;
     uint curve_table;
     uint pad;
-    float4 uv_transforms[12];
+    float4 uv_transforms[14];
 };
 
 // Shading_Light: color, ground linear times intensity (or spot axis + cos_inner/outer);
@@ -131,12 +133,15 @@ struct Joints_VS {
 [[vk::binding(9, 2)]] Sampler2D<float> shadowMap1 : register(t9, space2);
 [[vk::binding(10, 2)]] Sampler2D<float> shadowMap2 : register(t10, space2);
 [[vk::binding(11, 2)]] Sampler2D<float> shadowMap3 : register(t11, space2);
+[[vk::binding(12, 2)]] Sampler2D<float4> alphaMap : register(t12, space2);
+// The shadow pass's alpha map, after its colour map.
+[[vk::binding(1, 2)]] Sampler2D<float4> shadowAlphaMap : register(t1, space2) : register(s1, space2);
 // Exact shapes' curves (Geometries.curve_words): after the samplers in
 // SPIR-V's set 2, after the uniform buffers on Metal (slang numbers the
 // buffer from the register; no DXIL for these entries): fs_curves' at
 // [[buffer(2)]], fs_shadow_curves' at [[buffer(1)]].
-[[vk::binding(12, 2)]] StructuredBuffer<uint> curveWords : register(t2, space2);
-[[vk::binding(1, 2)]] StructuredBuffer<uint> shadowCurveWords : register(t1, space2);
+[[vk::binding(13, 2)]] StructuredBuffer<uint> curveWords : register(t2, space2);
+[[vk::binding(2, 2)]] StructuredBuffer<uint> shadowCurveWords : register(t1, space2);
 
 struct VS_In {
     float3 position : TEXCOORD0;
@@ -428,6 +433,11 @@ float4 surface(VS_Out i, bool front) {
             a *= tex.a;
         }
     }
+    if ((flags & FLAG_ALPHA_MAP) != 0) {
+        float2 uv, dx, dy;
+        slot_uv(SLOT_ALPHA, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
+        a *= sample_map(alphaMap, uv, dx, dy).g;
+    }
     if ((flags & FLAG_ALPHA_MASK) != 0) {
         if (a < material.alpha_cutoff) {
             discard;
@@ -590,13 +600,22 @@ Curves_Out fs_curves(VS_Curves_Out i, bool front : SV_IsFrontFace) {
 // The shadow pass: the depth of the nearest caster per texel.
 float shadow_depth(VS_Out i) {
     if ((material.flags & FLAG_ALPHA_MASK) != 0) {
+        // Both maps from one uv set: the colour slot's, or the alpha slot's
+        // without a colour map (as the software renderer's shadow pass).
+        uint mask_slot = (material.flags & FLAG_COLOR_MAP) != 0 ? SLOT_COLOR : SLOT_ALPHA;
+        float2 raw = ((material.uv_sets >> mask_slot) & 1) != 0 ? i.uv1 : i.uv;
         float a = material.color.a;
         if ((material.flags & FLAG_COLOR_MAP) != 0) {
-            float2 raw = ((material.uv_sets >> SLOT_COLOR) & 1) != 0 ? i.uv1 : i.uv;
             float3 r0 = material.uv_transforms[SLOT_COLOR * 2 + 0].xyz;
             float3 r1 = material.uv_transforms[SLOT_COLOR * 2 + 1].xyz;
             float2 uv = float2(dot(r0, float3(raw, 1)), 1 - dot(r1, float3(raw, 1)));
             a *= colorMap.SampleLevel(uv, 0).a;
+        }
+        if ((material.flags & FLAG_ALPHA_MAP) != 0) {
+            float3 r0 = material.uv_transforms[SLOT_ALPHA * 2 + 0].xyz;
+            float3 r1 = material.uv_transforms[SLOT_ALPHA * 2 + 1].xyz;
+            float2 uv = float2(dot(r0, float3(raw, 1)), 1 - dot(r1, float3(raw, 1)));
+            a *= shadowAlphaMap.SampleLevel(uv, 0).g;
         }
         if (a < material.alpha_cutoff) {
             discard;

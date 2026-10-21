@@ -295,8 +295,8 @@ draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
 		if curved {
 			sdl.BindGPUFragmentStorageBuffers(pass, 0, &g.curve_words.buffer, 1)
 		}
-		color_sampler := tex_binding(g, m.color_map)
-		sdl.BindGPUFragmentSamplers(pass, 0, &color_sampler, 1)
+		mask_samplers := [2]sdl.GPUTextureSamplerBinding{tex_binding(g, m.color_map), tex_binding(g, m.alpha_map)}
+		sdl.BindGPUFragmentSamplers(pass, 0, &mask_samplers[0], len(mask_samplers))
 		du := make_draw_uniforms(shadow.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m, geo)
@@ -632,7 +632,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		if curved {
 			sdl.BindGPUFragmentStorageBuffers(pass, 0, &g.curve_words.buffer, 1)
 		}
-		samplers := [12]sdl.GPUTextureSamplerBinding {
+		samplers := [13]sdl.GPUTextureSamplerBinding {
 			tex_binding(g, m.color_map),
 			{texture = shadow_maps[0], sampler = g.shadow_sampler},
 			tex_binding(g, m.normal_map),
@@ -645,6 +645,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 			{texture = shadow_maps[1], sampler = g.shadow_sampler},
 			{texture = shadow_maps[2], sampler = g.shadow_sampler},
 			{texture = shadow_maps[3], sampler = g.shadow_sampler},
+			tex_binding(g, m.alpha_map),
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], len(samplers))
 		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))

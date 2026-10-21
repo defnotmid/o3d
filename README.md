@@ -38,7 +38,9 @@ What is known about three.js carries over:
   `alpha_cutoff`, `size`, `mode`, `side`, texture maps `color_map`,
   `normal_map`, `roughness_map` (green), `metalness_map` (blue; glTF packs
   both in one texture), `emissive_map`, `ao_map` (red, applied to indirect
-  light only as three.js's `aoMap` does), per-slot UV transforms `*_transform`
+  light only as three.js's `aoMap` does), `alpha_map` (green, times opacity,
+  as three.js's `alphaMap`; with `.Transparent` or `.Alpha_Mask`, shadows
+  cut too), per-slot UV transforms `*_transform`
   (`offset`, `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`),
   and the booleans as a bit set: `flags = {.Transparent, .Alpha_Mask,
   .Flat_Shading, .No_Size_Attenuation}`), MeshBasicMaterial (`.Basic`),
@@ -352,9 +354,10 @@ includes ovg's `shaders/curves.slang` from there too.
   (`v` with optional vertex colours, `vt`, `vn`, `f` with N-gons fanned and
   negative indices, `o` / `g` as nodes, `usemtl` splitting primitives) and its
   `mtllib` `.mtl` (`Kd`, `Ke`, `Ks`/`Ns` or `Pr`/`Pm`, `d`/`Tr`, and the
-  `map_Kd`, `map_Ke`, `map_Bump`, `map_Pr`/`map_Ns`, `map_Pm` textures)
-  relative to the file, into the same tables. Faces without `vn` get the 60°
-  crease-angle normals. `model_load` picks glTF, 3MF or OBJ by extension.
+  `map_Kd`, `map_Ke`, `map_Bump`, `map_Pr`/`map_Ns`, `map_Pm`, `map_d`
+  textures) relative to the file, into the same tables. Faces without `vn`
+  get the 60° crease-angle normals. `model_load` picks glTF, 3MF or OBJ by
+  extension.
 - **Shapes (`shape.odin`):** three.js's code ported: earcut (mapbox/earcut
   as three.js carries it, nodes in a pool linked by index),
   ShapePath.toShapes' containment (largest first, an interior point tested

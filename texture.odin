@@ -194,6 +194,16 @@ sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: 
 	return linalg.lerp(c0, c1, frac)
 }
 
+// Bilinearly samples `id`'s top level at `uv`, repeating (as the GPU's
+// shadow pass reads alpha masks).
+sample_top :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2) -> Vec4 {
+	tex, ok := texture_get(t, id)
+	if !ok || tex.external {
+		return {1, 1, 1, 1}
+	}
+	return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv)
+}
+
 // Trilinearly samples `id` at explicit `lod` with horizontal repeat and
 // vertical pole clamp (for equirectangular environment and background maps).
 sample_lod :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec4 {

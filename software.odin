@@ -351,11 +351,12 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS if textured else UNTEX_FLOATS)
 	masked, curved: bool
 	if job.depth_only {
-		if .Alpha_Mask in m.flags && .Color_Map not_in m.flags && m.opacity < m.alpha_cutoff {
+		if .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} == {} && m.opacity < m.alpha_cutoff {
 			slice.zero(s.chunk_bands[ci * job.bands:][:job.bands])
 			return
 		}
-		masked, curved = .Alpha_Mask in m.flags && .Color_Map in m.flags, .Curves in m.flags
+		masked, _ = shadow_mask(m)
+		curved = .Curves in m.flags
 		nf = shadow_floats(masked, curved)
 	}
 	flat := shader_flat(sh) if sh != nil else nil
@@ -363,7 +364,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	table_grow_non_zero(&w.values, count * nf)
 	if job.depth_only {
 		mvp := job.view_proj * d.model
-		use_uv1 := (m.uv_sets & (1 << u32(Texture_Slot.Color))) != 0
+		_, use_uv1 := shadow_mask(m)
 		for vtx, i in vertices[lo:][:count] {
 			vi := lo + u32(i)
 			v := vtx

@@ -50,6 +50,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"curves", 240, 180, build_curves},
 	{"curve_shadow", 200, 150, build_curve_shadow},
 	{"text", 240, 180, build_text},
+	{"alpha_map", 200, 150, build_alpha_map},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -125,6 +126,50 @@ test_scene :: proc(scene: ^o3d.Scene, geos: ^o3d.Geometries) {
 @(private = "file")
 build_standard :: proc(a: ^Parity_Assets) -> string {
 	test_scene(&a.scene, &a.geos)
+	return ""
+}
+
+// The alpha map case (three.js's alphaMap, its green channel): a tiled
+// mask cutting a net (Alpha_Mask, a transformed alpha slot without a
+// colour map) that casts its holes' shadow on the floor, and a blended
+// panel fading by a smooth alpha map over its colour map.
+@(private = "file")
+build_alpha_map :: proc(a: ^Parity_Assets) -> string {
+	TW, TH :: 32, 32
+	mask_px: [TW * TH * 4]u8
+	fade_px: [TW * TH * 4]u8
+	for y in 0 ..< TH {
+		for x in 0 ..< TW {
+			i := (y * TW + x) * 4
+			u, v := f32(x) / f32(TW - 1), f32(y) / f32(TH - 1)
+			// Green carries the alpha; red and blue say otherwise, so a
+			// renderer reading the wrong channel shows.
+			hole := u8(255 if (x / 8 + y / 8) % 2 == 0 else 0)
+			mask_px[i], mask_px[i + 1], mask_px[i + 2], mask_px[i + 3] = 255 - hole, hole, 255 - hole, 255
+			fade := u8(clamp((0.15 + 0.8 * (0.5 + 0.5 * math.cos(u * math.TAU)) * v) * 255, 0, 255))
+			fade_px[i], fade_px[i + 1], fade_px[i + 2], fade_px[i + 3] = 0, fade, 0, 255
+		}
+	}
+	mask_id := o3d.texture_add(&a.textures, mask_px[:], TW, TH)
+	fade_id := o3d.texture_add(&a.textures, fade_px[:], TW, TH)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {2.2, 2.4, 4.2}, target = {0, 0.4, 0}, fov = 45, near = 0.1, far = 30}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1.5, 5, 2}, cast_shadow = true, shadow = {map_size = 512, bias = -0.0005}})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness, floor.flags = {0.7, 0.72, 0.75}, 0.9, {.Receive_Shadow}
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	net := o3d.MATERIAL_DEFAULT
+	net.color, net.metalness, net.roughness = {0.55, 0.57, 0.6}, 1, 0.35
+	net.flags, net.side, net.alpha_cutoff = {.Alpha_Mask, .Cast_Shadow, .Receive_Shadow}, .Double, 0.5
+	net.alpha_map = mask_id
+	net.alpha_transform = {scale = {2, 2}}
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 1.6, 1.2), o3d.compose({-0.35, 0.9, 0}, {-0.35, 0.4, 0}), net})
+	panel := o3d.MATERIAL_DEFAULT
+	panel.color, panel.flags, panel.side = {1, 0.6, 0.3}, {.Transparent}, .Double
+	panel.alpha_map = fade_id
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 1, 1), o3d.compose({0.9, 0.7, 0.6}, {0, -0.5, 0}), panel})
 	return ""
 }
 
