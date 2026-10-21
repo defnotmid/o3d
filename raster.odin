@@ -298,8 +298,12 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 	}
 	// A particle: its row's colour and opacity; soft against the frame's depth.
 	sprite := .Sprite in m.flags
-	row := s.expanded.sprite_rows[t.curve] if sprite && int(t.curve) < len(s.expanded.sprite_rows) else 1
+	row := s.expanded.sprite_rows[t.curve] if sprite && int(t.curve) < len(s.expanded.sprite_rows) else {color = 1}
 	soft := sprite && m.softness > 0 && len(s.depth_map) == s.width * s.height
+	// Probed: faded by the share of its disc unhidden (the same for the quad).
+	if sprite && row.probe.w > 0 && len(s.depth_map) == s.width * s.height {
+		row.color.a *= sprite_visibility(row.probe, s.depth_map[:], s.width, s.height)
+	}
 	inv_area := 1 / area
 	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width) &~ 1
 	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
@@ -350,8 +354,8 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					opacity *= sample_map(job, m.alpha_map, a_uv, a_dx, a_dy).g
 				}
 				if sprite {
-					pm.base *= linear(row.rgb)
-					opacity *= clamp(row.a, 0, 1)
+					pm.base *= linear(row.color.rgb)
+					opacity *= clamp(row.color.a, 0, 1)
 					if soft {
 						// Faded by how far in front of the frame's depth it is.
 						clip := job.view_proj * Vec4{worlds[l].x, worlds[l].y, worlds[l].z, 1}

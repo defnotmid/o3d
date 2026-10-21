@@ -150,6 +150,13 @@ Material :: struct {
 	// (world units; negative, away), as they look the same size in the
 	// same place: a label pinned to a surface is drawn in front of it.
 	depth_offset:        f32,
+	// Particles: each faded by the share of a disc this many pixels in
+	// radius about its position that the frame's depth leaves unhidden
+	// (three.js's Lensflare: a sun's flare fades as a hull passes in front
+	// of it; off the frame counts as hidden); 0: not faded. With a
+	// `depth_offset` past the camera's distance the quads are drawn over
+	// everything, as a flare's are, still probed at their positions.
+	occlusion_radius:    f32,
 	ao_map_intensity:    f32,
 	// Line width (`.Lines`) or point size (`.Points`); 0 takes defaults
 	// (0.03 world / 2 px for lines, 0.08 world / 4 px for points).
@@ -676,11 +683,19 @@ Expanded_Draws :: struct {
 	vertices:    [dynamic]Vertex,
 	indices:     [dynamic]u32,
 	posed_verts: [dynamic]Vertex,
-	// The drawn particle quads' rows, one a quad: colour (sRGB, times the
-	// material's) and opacity.
-	sprite_rows: [dynamic][4]f32,
+	// The drawn particle quads' rows, one a quad.
+	sprite_rows: [dynamic]Sprite_Row,
 	// Scratch: particles by distance, to draw the farthest first.
 	sprite_keys: [dynamic]Sprite_Key,
+}
+
+// A drawn particle quad's colour (sRGB, times the material's) and opacity,
+// and where its visibility is probed (`Material.occlusion_radius`): the
+// particle's position on the frame (pixels from the top left), its depth,
+// and the disc's radius (0: not probed).
+Sprite_Row :: struct {
+	color: Vec4,
+	probe: Vec4,
 }
 
 @(private)
@@ -743,12 +758,13 @@ scene_geometry_mesh :: proc "contextless" (scene: ^Scene, g: ^Geometries, id: Ge
 // A particle draw's quads (per instance), the farthest first unless they
 // add, each with its row in `exp.sprite_rows`.
 @(private = "file")
-expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geometry, insts: []Instance, view_proj: Mat4, cam_right, cam_up, cam_back: Vec3, scale_px: f32, draws: ^#soa[dynamic]Draw) {
+expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geometry, insts: []Instance, view_proj: Mat4, cam_right, cam_up, cam_back: Vec3, scale_px: f32, frame: Vec2, draws: ^#soa[dynamic]Draw) {
 	rows := scene.particles[geo.sprite_table:][:geo.vertex_count]
 	px_space := .No_Size_Attenuation in d.material.flags
 	offset := d.material.depth_offset
 	eye := scene.camera.position
 	near := scene.camera.near if scene.camera.near > 0 else 0.1
+	probe_radius := max(d.material.occlusion_radius, 0)
 	default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
 	run_insts := insts if len(insts) > 0 else default_inst[:]
 	for inst in run_insts {
@@ -801,7 +817,16 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 			base := u32(len(exp.vertices)) - first_v
 			append(&exp.vertices, Vertex{corners[0], cam_back, {0, 0}, {}}, Vertex{corners[1], cam_back, {1, 0}, {}}, Vertex{corners[2], cam_back, {1, 1}, {}}, Vertex{corners[3], cam_back, {0, 1}, {}})
 			append(&exp.indices, base, base + 1, base + 2, base, base + 2, base + 3)
-			append(&exp.sprite_rows, p.color)
+			row := Sprite_Row{color = p.color}
+			if probe_radius > 0 {
+				// Behind the camera: off the frame.
+				row.probe = {-1e6, -1e6, 2, probe_radius}
+				clip := view_proj * Vec4{w.x, w.y, w.z, 1}
+				if clip.w > 0 {
+					row.probe.xyz = {(clip.x / clip.w * 0.5 + 0.5) * frame.x, (0.5 - clip.y / clip.w * 0.5) * frame.y, clip.z / clip.w}
+				}
+			}
+			append(&exp.sprite_rows, row)
 			for v in corners {
 				r_max = max(r_max, linalg.length(v))
 			}
@@ -921,7 +946,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 		}
 		if mode == .Sprites {
 			if geo.mode == .Sprites && d.geometry >= SCENE_GEO_BIT {
-				expand_particles(exp, scene, d, geo, insts, view_proj, cam_right, cam_up, cam_back, scale_px, &out.draws)
+				expand_particles(exp, scene, d, geo, insts, view_proj, cam_right, cam_up, cam_back, scale_px, {f32(width), f32(height)}, &out.draws)
 			}
 			continue
 		}
@@ -1198,17 +1223,48 @@ sprite_materials :: proc "contextless" (scene: ^Scene, geos: ^Geometries, exp: ^
 	}
 }
 
-// Whether a frame needs its depth drawn: asked for, or soft particles.
+// Whether a frame needs its depth drawn: asked for, soft particles or
+// probed ones.
 needs_depth :: proc "contextless" (scene: ^Scene) -> bool {
 	if scene.depth {
 		return true
 	}
 	for m in scene.draws.material[:len(scene.draws)] {
-		if m.softness > 0 {
+		if m.softness > 0 || m.occlusion_radius > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// Points on a disc of radius 1, spread evenly (a Vogel spiral), where a
+// particle's visibility is probed (shaders/o3d.slang's alike).
+@(rodata)
+OCCLUSION_TAPS := [16]Vec2{
+	{0.176777, 0}, {-0.225772, 0.206826}, {0.034558, -0.393771}, {0.284571, 0.371173},
+	{-0.522223, -0.092374}, {0.494695, -0.314685}, {-0.165466, 0.615525}, {-0.315561, -0.607594},
+	{0.684642, 0.250030}, {-0.712256, 0.294009}, {0.343355, -0.733729}, {0.253730, 0.808932},
+	{-0.764746, -0.443186}, {0.897134, -0.197232}, {-0.547507, 0.778772}, {-0.126487, -0.976090},
+}
+
+// The share of a particle row's probe disc (`Sprite_Row.probe`) that the
+// frame's depth (`depths`, `width x height`) leaves unhidden: a point is
+// where nothing is drawn or what is drawn is farther, and hidden off the
+// frame. Both renderers alike (shaders/o3d.slang's `sprite_visibility`).
+@(private)
+sprite_visibility :: proc "contextless" (probe: Vec4, depths: []f32, width, height: int) -> f32 {
+	seen := 0
+	for o in OCCLUSION_TAPS {
+		p := probe.xy + o * probe.w
+		if p.x < 0 || p.y < 0 || p.x >= f32(width) || p.y >= f32(height) {
+			continue
+		}
+		d := depths[int(p.y) * width + int(p.x)]
+		if d >= 1 || probe.z < d {
+			seen += 1
+		}
+	}
+	return f32(seen) / len(OCCLUSION_TAPS)
 }
 
 // A depth value (the frame's depth, `camera_project`'s) as distance along

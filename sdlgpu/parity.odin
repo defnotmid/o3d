@@ -57,6 +57,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"particles", 240, 180, build_particles},
 	{"labels", 240, 180, build_labels},
 	{"additive", 240, 180, build_additive},
+	{"flare", 240, 180, build_flare},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -771,6 +772,68 @@ build_additive :: proc(a: ^Parity_Assets) -> string {
 	line := o3d.MATERIAL_DEFAULT
 	line.color, line.size, line.flags = {0.4, 1, 0.5}, 3, {.Basic, .Additive, .No_Size_Attenuation}
 	append(&s.draws, o3d.Draw{o3d.scene_polyline(s, loop[:], closed = true), o3d.compose({0, 0, 0}), line})
+	return ""
+}
+
+// Lens flares (three.js's Lensflare) as additive particles drawn over
+// everything (`depth_offset` past the camera) and faded by their probe
+// (`occlusion_radius`): a sun partly behind a hull's edge (its glow and
+// ghosts along the line through the frame's centre, dimmed alike), one
+// wholly behind it (not drawn) and one in the open.
+@(private = "file")
+build_flare :: proc(a: ^Parity_Assets) -> string {
+	T :: 32
+	glow_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			q := o3d.Vec2{f32(x) + 0.5, f32(y) + 0.5} / T - 0.5
+			r := math.sqrt(q.x * q.x + q.y * q.y) * 2
+			i := (y * T + x) * 4
+			fall := clamp(1 - r, 0, 1)
+			glow_px[i], glow_px[i + 1], glow_px[i + 2], glow_px[i + 3] = 255, 255, 255, u8(fall * fall * 255)
+		}
+	}
+	glow := o3d.texture_add(&a.textures, glow_px[:], T, T)
+	SW, SH :: 16, 8
+	sky_px: [SW * SH * 4]u8
+	for y in 0 ..< SH {
+		for x in 0 ..< SW {
+			i := (y * SW + x) * 4
+			sky_px[i], sky_px[i + 1], sky_px[i + 2], sky_px[i + 3] = u8(4 + y * 2), u8(6 + y * 3), u8(20 + y * 5), 255
+		}
+	}
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.background = o3d.texture_add(&a.textures, sky_px[:], SW, SH)
+	W, H :: 240, 180
+	s.camera = {position = {0, 0.4, 5}, target = {0, 0.4, 0}, fov = 50, near = 0.1, far = 60}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.85}, intensity = 2.5, position = {2, 1, 3}})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {0.5, 0.6, 1}, intensity = 0.3})
+	hull := o3d.MATERIAL_DEFAULT
+	hull.color, hull.metalness, hull.roughness = {0.7, 0.72, 0.75}, 0.6, 0.4
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 1.2, 3, 0.6), o3d.compose({-0.9, 0.2, 0}), hull})
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 1, 0.8, 0.5), o3d.compose({1.5, -0.6, 0.5}, {0, 0.4, 0}), hull})
+	// Suns far behind: half over the tall hull's right edge, wholly behind
+	// the low one, and in the open (one past the far plane).
+	eye := s.camera.position
+	suns := [3]o3d.Vec3{eye + (o3d.Vec3{-0.3, 1.2, 0.3} - eye) * 8, eye + (o3d.Vec3{1.5, -0.6, 0.5} - eye) * 9, {2.3, 1.7, -1}}
+	centre := o3d.Vec2{W / 2, H / 2}
+	flare: [dynamic]o3d.Particle
+	defer delete(flare)
+	for sun, k in suns {
+		px, _, _ := o3d.camera_project(s.camera, W, H, sun)
+		append(&flare, o3d.Particle{position = sun, size = 70 - f32(k) * 20, color = {1, 0.9, 0.7, 1}})
+		// Ghosts along the line from the sun through the centre.
+		for t, j in ([3]f32{0.6, 1.3, 1.8}) {
+			size := o3d.Vec2{18, 18} + f32(j) * 10
+			d := (centre - px) * t
+			append(&flare, o3d.Particle{position = sun, size = size, color = {0.5, 0.7, 1, 0.6}, offset = {d.x / size.x, -d.y / size.y}})
+		}
+	}
+	m := o3d.MATERIAL_DEFAULT
+	m.color_map, m.flags = glow, {.Additive, .No_Size_Attenuation}
+	m.depth_offset, m.occlusion_radius = 1e6, 10
+	append(&s.draws, o3d.Draw{o3d.scene_particles(s, flare[:]), o3d.compose({0, 0, 0}), m})
 	return ""
 }
 

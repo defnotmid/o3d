@@ -1570,6 +1570,50 @@ test_additive_mesh :: proc(t: ^testing.T) {
 	testing.expectf(t, at(px, 1, 1) == {100, 50, 25, 255}, "the sky: %v", at(px, 1, 1))
 }
 
+// A probed particle (`occlusion_radius`), drawn over everything: whole in
+// the open, faded by the share of its disc a wall's edge hides, gone
+// behind the wall, and gone with its point off the frame though its quad
+// is on it.
+@(test)
+test_particle_occlusion :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 32
+	s: Software
+	defer software_destroy(&s)
+	frame :: proc(scene: ^Scene, g: ^Geometries, s: ^Software, wall_x: f32, p: Particle, radius: f32 = 4) -> f32 {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+		if wall_x < 10 {
+			// A wall whose right edge is at x = wall_x.
+			black := MATERIAL_DEFAULT
+			black.color, black.flags = {0, 0, 0}, {.Basic}
+			append(&scene.draws, Draw{plane(g, 4, 4), compose({wall_x - 2, 0, 1}), black})
+		}
+		m := MATERIAL_DEFAULT
+		m.color, m.flags = {200.0 / 255, 200.0 / 255, 200.0 / 255}, {.Basic, .Additive, .No_Size_Attenuation}
+		m.depth_offset, m.occlusion_radius = 1e6, radius
+		rows := [1]Particle{p}
+		append(&scene.draws, Draw{scene_particles(scene, rows[:]), compose({0, 0, 0}), m})
+		px := software_render(s, scene, g, nil, W, W)
+		return f32(px[(W / 2 * W + W / 2) * 4]) / 200
+	}
+	open := Particle{position = {0, 0, 0}, size = 6, color = 1}
+	testing.expectf(t, abs(frame(&scene, &g, &s, 100, open) - 1) < 0.01, "in the open: whole")
+	half := frame(&scene, &g, &s, 0, open)
+	testing.expectf(t, half > 0.3 && half < 0.7, "half behind the wall's edge: %v", half)
+	testing.expectf(t, frame(&scene, &g, &s, 2, open) == 0, "behind the wall: gone")
+	testing.expectf(t, frame(&scene, &g, &s, 2, open, radius = 0) > 0.95, "behind the wall, not probed: drawn over it")
+	// Its point past the frame's right edge, its quad moved back onto it.
+	off := Particle{position = {2.5, 0, 0}, size = 6, color = 1, offset = {-3.66, 0}}
+	testing.expectf(t, frame(&scene, &g, &s, 100, off) == 0, "its point off the frame: gone")
+	testing.expectf(t, frame(&scene, &g, &s, 100, off, radius = 0) > 0.95, "its quad on the frame (not probed: drawn)")
+	off.position.x, off.offset.x = 0.1, -0.4
+	testing.expectf(t, frame(&scene, &g, &s, 100, off) > 0.95, "its point on the frame: whole")
+}
+
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's
 // bottom edge on its point (a wide one too), and `depth_offset` brings one inside a wall in
 // front of it, covering the same pixels.

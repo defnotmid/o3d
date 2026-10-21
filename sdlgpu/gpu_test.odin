@@ -111,6 +111,10 @@ test_labels_match_software :: proc(t: ^testing.T) {expect_parity(t, "labels")}
 @(test)
 test_additive_match_software :: proc(t: ^testing.T) {expect_parity(t, "additive")}
 
+// Lens flares faded by their probes, drawn over everything.
+@(test)
+test_flare_match_software :: proc(t: ^testing.T) {expect_parity(t, "flare")}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)

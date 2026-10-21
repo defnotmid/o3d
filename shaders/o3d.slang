@@ -149,7 +149,13 @@ struct Joints_VS {
 // samplers, and the rows after it (SPIR-V; on Metal after the uniform
 // buffers, as curveWords).
 [[vk::binding(13, 2)]] Sampler2D<float> sceneDepth : register(t13, space2) : register(s13, space2);
-[[vk::binding(14, 2)]] StructuredBuffer<float4> spriteRows : register(t2, space2);
+// A particle quad's row (o3d.Sprite_Row): its colour and opacity, and its
+// probe (pixel x, y, depth; the disc's radius, 0 when not probed).
+struct SpriteRow {
+    float4 color;
+    float4 probe;
+};
+[[vk::binding(14, 2)]] StructuredBuffer<SpriteRow> spriteRows : register(t2, space2);
 // Exact shapes' curves (Geometries.curve_words): after the samplers in
 // SPIR-V's set 2, after the uniform buffers on Metal (slang numbers the
 // buffer from the register; no DXIL for these entries): fs_curves' at
@@ -561,11 +567,42 @@ float view_depth(float depth) {
     return near * far / (far - depth * (far - near));
 }
 
-// A particle quad: its row's colour and opacity, faded by how far in front
-// of the frame's depth it is (soft particles).
+// Points on a disc of radius 1 (o3d.OCCLUSION_TAPS).
+static const float2 OCCLUSION_TAPS[16] = {
+    float2(0.176777, 0), float2(-0.225772, 0.206826), float2(0.034558, -0.393771), float2(0.284571, 0.371173),
+    float2(-0.522223, -0.092374), float2(0.494695, -0.314685), float2(-0.165466, 0.615525), float2(-0.315561, -0.607594),
+    float2(0.684642, 0.250030), float2(-0.712256, 0.294009), float2(0.343355, -0.733729), float2(0.253730, 0.808932),
+    float2(-0.764746, -0.443186), float2(0.897134, -0.197232), float2(-0.547507, 0.778772), float2(-0.126487, -0.976090),
+};
+
+// The share of a probe's disc the frame's depth leaves unhidden
+// (o3d.sprite_visibility).
+float sprite_visibility(float4 probe) {
+    float2 size = lighting.frameParams.xy;
+    uint seen = 0;
+    for (uint k = 0; k < 16; k++) {
+        float2 p = probe.xy + OCCLUSION_TAPS[k] * probe.w;
+        if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) {
+            continue;
+        }
+        float d = sceneDepth.SampleLevel((floor(p) + 0.5) / size, 0);
+        if (d >= 1 || probe.z < d) {
+            seen++;
+        }
+    }
+    return float(seen) / 16;
+}
+
+// A particle quad: its row's colour and opacity, faded by the share of its
+// probe's disc unhidden and by how far in front of the frame's depth it is
+// (soft particles).
 [shader("fragment")]
 float4 fs_sprite(VS_Curves_Out i, bool front : SV_IsFrontFace) : SV_Target {
-    float4 row = spriteRows[material.curve_table + i.quad];
+    SpriteRow r = spriteRows[material.curve_table + i.quad];
+    float4 row = r.color;
+    if (r.probe.w > 0) {
+        row.a *= sprite_visibility(r.probe);
+    }
     if (material.softness > 0) {
         float2 uv = i.position.xy / lighting.frameParams.xy;
         float behind = view_depth(sceneDepth.SampleLevel(uv, 0));
