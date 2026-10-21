@@ -448,16 +448,17 @@ scene_tube :: proc(s: ^Scene, points: []Vec3, radius: f32 = 0.08, radial_segment
 	return id
 }
 
-// A particle: a camera-facing quad `size` across (world units, or pixels
-// with `.No_Size_Attenuation`) turned `rotation` radians in the view plane,
-// its colour (sRGB) and opacity (clamped to 0..1) times its material's (and
-// its `color_map`'s, the sprite). `offset` is the quad's centre from
-// `position` in sizes, x right and y up in the quad's turned frame: {0, 0}
-// centred on it, {0, 0.5} its bottom edge's middle on it (a label's
-// anchor), turning about it.
+// A particle: a camera-facing quad `size` (width, height: world units, or
+// pixels with `.No_Size_Attenuation`; three.js's Sprite.scale) turned
+// `rotation` radians in the view plane, its colour (sRGB) and opacity
+// (clamped to 0..1) times its material's (and its `color_map`'s, the
+// sprite). `offset` is the quad's centre from `position` in its width and
+// height, x right and y up in the quad's turned frame: {0, 0} centred on
+// it, {0, 0.5} its bottom edge's middle on it (a label's anchor), turning
+// about it.
 Particle :: struct {
 	position: Vec3,
-	size:     f32,
+	size:     Vec2,
 	color:    Vec4,
 	rotation: f32,
 	offset:   Vec2,
@@ -474,7 +475,7 @@ scene_particles :: proc(s: ^Scene, particles: []Particle) -> Geometry_Id {
 	append(&s.particles, ..particles)
 	r: f32
 	for p in particles {
-		r = max(r, linalg.length(p.position) + p.size)
+		r = max(r, linalg.length(p.position) + linalg.length(p.size) * (0.5 + linalg.length(p.offset)))
 	}
 	id := SCENE_GEO_BIT + Geometry_Id(len(s.path_geos))
 	append(&s.path_geos, Geometry{vertex_count = u32(len(particles)), sprite_table = first, mode = .Sprites, radius = r})
@@ -768,7 +769,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 		for key in exp.sprite_keys {
 			p := rows[key.row]
 			w := (M * Vec4{p.position.x, p.position.y, p.position.z, 1}).xyz
-			half: f32
+			half: Vec2
 			if px_space {
 				w_clip := (view_proj * Vec4{w.x, w.y, w.z, 1}).w if !scene.camera.orthographic else 1
 				half = 0.5 * p.size * max(w_clip, 1e-4) * scale_px
@@ -776,8 +777,8 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 				half = 0.5 * p.size * m_scale
 			}
 			c, sn := math.cos(p.rotation), math.sin(p.rotation)
-			rx := (cam_right * c + cam_up * sn) * half
-			uy := (cam_up * c - cam_right * sn) * half
+			rx := (cam_right * c + cam_up * sn) * half.x
+			uy := (cam_up * c - cam_right * sn) * half.y
 			centre := w + (rx * p.offset.x + uy * p.offset.y) * 2
 			corners := [4]Vec3{centre - rx - uy, centre + rx - uy, centre + rx + uy, centre - rx + uy}
 			if offset != 0 {

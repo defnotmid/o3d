@@ -656,23 +656,23 @@ build_particles :: proc(a: ^Parity_Assets) -> string {
 	return ""
 }
 
-// Labels as particles (pixel-sized, a premultiplied panel): one behind a
-// cut-out net (seen through its gaps), one pinned a little inside a wall
-// (`depth_offset` brings it in front), one anchored by its bottom edge on
-// the wall.
+// Labels as particles (pixel-sized quads the shape of their premultiplied
+// panel): one behind a cut-out net (seen through its gaps), one pinned a
+// little inside a wall (`depth_offset` brings it in front), one anchored
+// by its bottom edge on the wall and turned.
 @(private = "file")
 build_labels :: proc(a: ^Parity_Assets) -> string {
-	T :: 64
-	label_px: [T * T * 4]u8
-	for y in 0 ..< T {
-		for x in 0 ..< T {
-			i := (y * T + x) * 4
-			// A rounded panel in the middle rows, its edge a pixel and a
+	LW, LH :: 64, 24
+	label_px: [LW * LH * 4]u8
+	for y in 0 ..< LH {
+		for x in 0 ..< LW {
+			i := (y * LW + x) * 4
+			// A rounded panel filling the canvas, its edge a pixel and a
 			// half soft, with lighter bars of text on it.
-			q := [2]f32{abs(f32(x) + 0.5 - T / 2) - 26, abs(f32(y) + 0.5 - T / 2) - 10}
-			d := math.sqrt(max(q.x, 0) * max(q.x, 0) + max(q.y, 0) * max(q.y, 0)) + min(max(q.x, q.y), 0) - 4
+			q := [2]f32{abs(f32(x) + 0.5 - LW / 2) - 25, abs(f32(y) + 0.5 - LH / 2) - 5}
+			d := math.sqrt(max(q.x, 0) * max(q.x, 0) + max(q.y, 0) * max(q.y, 0)) + min(max(q.x, q.y), 0) - 5
 			cover := clamp(0.5 - d / 1.5, 0, 1) * 0.92
-			text := (y == 26 || y == 27 || y == 36 || y == 37) && x > 14 && x < 50 && (x / 5) % 3 != 2
+			text := (y == 7 || y == 8 || y == 15 || y == 16) && x > 12 && x < 52 && (x / 5) % 3 != 2
 			c := [3]f32{0.95, 0.95, 0.9} if text else {0.12, 0.2, 0.35}
 			for ch in 0 ..< 3 {
 				label_px[i + ch] = u8(math.round(c[ch] * cover * 255))
@@ -680,7 +680,7 @@ build_labels :: proc(a: ^Parity_Assets) -> string {
 			label_px[i + 3] = u8(math.round(cover * 255))
 		}
 	}
-	label := o3d.texture_add(&a.textures, label_px[:], T, T)
+	label := o3d.texture_add(&a.textures, label_px[:], LW, LH)
 	N :: 32
 	net_px: [N * N * 4]u8
 	for y in 0 ..< N {
@@ -705,9 +705,9 @@ build_labels :: proc(a: ^Parity_Assets) -> string {
 	net.color_transform = {scale = {3, 2}}
 	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 1.6, 1.1), o3d.compose({-0.8, 1.1, 0.7}), net})
 	labels := [3]o3d.Particle{
-		{position = {-0.8, 1.15, 0.2}, size = 56, color = {1, 1, 1, 1}},
-		{position = {0.9, 1.5, -0.53}, size = 56, color = {1, 0.9, 0.8, 1}},
-		{position = {0.9, 0.45, -0.5}, size = 56, color = {0.8, 1, 0.9, 0.9}, offset = {0, 0.5}, rotation = 0.15},
+		{position = {-0.8, 1.15, 0.2}, size = {64, 24}, color = {1, 1, 1, 1}},
+		{position = {0.9, 1.5, -0.53}, size = {64, 24}, color = {1, 0.9, 0.8, 1}},
+		{position = {0.9, 0.7, -0.5}, size = {64, 24}, color = {0.8, 1, 0.9, 0.9}, offset = {0, 0.5}, rotation = 0.15},
 	}
 	m := o3d.MATERIAL_DEFAULT
 	m.color_map, m.depth_offset = label, 0.1

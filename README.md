@@ -187,13 +187,13 @@ lo, hi, _ := o3d.model_bounds(&rover, &geos)                         // its rest
 
 // Where a world point lands on the frame (a lens flare, a label): pixel, depth, in front
 px, depth, in_front := o3d.camera_project(scene.camera, 1920, 1080, sun_position)
-// Particles, per frame: rows of position, size, rotation, colour and opacity (the emitter is the host's)
+// Particles, per frame: rows of position, size (width, height), rotation, colour and opacity (the emitter is the host's)
 puffs := o3d.scene_particles(&scene, smoke_rows)                    // []o3d.Particle
 smoke := o3d.MATERIAL_DEFAULT
 smoke.color_map, smoke.softness = puff_sprite, 0.3                   // the sprite; fade 0.3 before what they meet
 append(&scene.draws, o3d.Draw{puffs, o3d.compose(), smoke})          // drawn unlit, farthest first
 // sparks: the same with flags = {.Additive}
-// Labels: pixel-sized rows with offset = {0, 0.5} (the bottom edge's middle on the point), the
+// Labels: pixel-sized rows the panel's width x height with offset = {0, 0.5} (the bottom edge's middle on the point), the
 // material's depth_offset bringing them in front of what they are pinned to; a canvas's
 // premultiplied image as color_map with flags += {.Premultiplied_Color_Map}
 
@@ -476,7 +476,8 @@ includes ovg's `shaders/curves.slang` from there too.
   Changing one means changing the other; the tests compare the two
   renderers.
 - **Particles:** `scene_particles` keeps a frame's particles as rows
-  (position, size in world units or pixels, rotation in the view plane,
+  (position, size as width and height (three.js's Sprite.scale) in world
+  units or pixels, rotation in the view plane,
   sRGB colour and opacity); expansion turns each into a camera-facing quad
   (farthest first unless `.Additive`) with a row in the frame's sprite
   table, which both renderers read per quad as exact shapes read their
@@ -485,8 +486,8 @@ includes ovg's `shaders/curves.slang` from there too.
   opacity multiply the row's; drawn unlit, blended or added
   (`.Additive`), fogged and tone mapped; `softness` fades a particle over
   that distance before the frame's depth (soft particles), which is then
-  drawn for them. A row's `offset` moves its quad from its point in sizes,
-  in its turned frame (`{0, 0.5}`: the bottom edge's middle on it, a
+  drawn for them. A row's `offset` moves its quad from its point in its
+  width and height, in its turned frame (`{0, 0.5}`: the bottom edge's middle on it, a
   label's anchor); the material's `depth_offset` moves the quads that far
   toward the camera along the ray to each (scaled about the eye, so the
   same on screen; not past the near plane), so a label pinned to a surface

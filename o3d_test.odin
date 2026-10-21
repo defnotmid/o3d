@@ -1538,7 +1538,7 @@ test_additive_over_background :: proc(t: ^testing.T) {
 }
 
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's
-// bottom edge on its point, and `depth_offset` brings one inside a wall in
+// bottom edge on its point (a wide one too), and `depth_offset` brings one inside a wall in
 // front of it, covering the same pixels.
 @(test)
 test_particle_anchor_depth_offset :: proc(t: ^testing.T) {
@@ -1553,7 +1553,7 @@ test_particle_anchor_depth_offset :: proc(t: ^testing.T) {
 		i := (y * W + x) * 4
 		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
 	}
-	frame :: proc(scene: ^Scene, offset: Vec2, depth_offset: f32, z: f32, g: ^Geometries, wall: bool) {
+	frame :: proc(scene: ^Scene, offset: Vec2, depth_offset: f32, z: f32, g: ^Geometries, wall: bool, size := Vec2{8, 8}) {
 		scene_clear(scene)
 		scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
 		if wall {
@@ -1563,7 +1563,7 @@ test_particle_anchor_depth_offset :: proc(t: ^testing.T) {
 		}
 		m := MATERIAL_DEFAULT
 		m.color, m.flags, m.depth_offset = {1, 0, 0}, {.No_Size_Attenuation}, depth_offset
-		one := [1]Particle{{position = {0, 0, z}, size = 8, color = {1, 1, 1, 1}, offset = offset}}
+		one := [1]Particle{{position = {0, 0, z}, size = size, color = {1, 1, 1, 1}, offset = offset}}
 		append(&scene.draws, Draw{scene_particles(scene, one[:]), compose({0, 0, 0}), m})
 	}
 	red :: proc(px: []u8) -> (n: int) {
@@ -1581,6 +1581,10 @@ test_particle_anchor_depth_offset :: proc(t: ^testing.T) {
 	testing.expectf(t, at(px, 16, 9).r > 250 && at(px, 16, 14).r > 250 && at(px, 16, 17).r == 0, "its bottom edge on its point: %v %v", at(px, 16, 9), at(px, 16, 17))
 	free_px := red(px)
 	testing.expect_value(t, free_px, 64)
+	// 12 by 4 pixels, anchored: columns 10 to 21, rows 12 to 15.
+	frame(&scene, {0, 0.5}, 0, 0, &g, false, {12, 4})
+	px = software_render(&s, &scene, &g, nil, W, W)
+	testing.expect(t, red(px) == 48 && at(px, 10, 12).r > 250 && at(px, 21, 15).r > 250 && at(px, 9, 13).r == 0 && at(px, 16, 16).r == 0 && at(px, 16, 11).r == 0, "a wide quad, anchored")
 
 	// A little inside the wall: hidden, and in front of it moved.
 	frame(&scene, {0, 0.5}, 0, -0.05, &g, true)
