@@ -60,20 +60,19 @@ GPU :: struct {
 	bg_vert, bg_frag:         ^sdl.GPUShader,
 	samples:                  sdl.GPUSampleCount,
 	depth_format:             sdl.GPUTextureFormat,
-	// By the material's side, then blended or not.
-	pipelines:                [o3d.Side][2]^sdl.GPUGraphicsPipeline,
-	skinned_pipelines:        [o3d.Side][2]^sdl.GPUGraphicsPipeline,
+	// By the material's side, then its blend (`o3d.blend_of`).
+	pipelines:                [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
+	skinned_pipelines:        [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	// Exact shapes and glyph runs (`.Curves`): their vertex shader (each
 	// vertex's quad), fragment shader (coverage from the quad's curve set
 	// in `curve_words`: by area blended, by sample opaque) and pipelines,
 	// as `pipelines`.
 	curves_vert:              ^sdl.GPUShader,
 	curves_frag:              ^sdl.GPUShader,
-	curve_pipelines:          [o3d.Side][2]^sdl.GPUGraphicsPipeline,
-	// Particle quads: the curves' vertex shader (its quad index), blended
-	// over or added.
+	curve_pipelines:          [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
+	// Particle quads: the curves' vertex shader (its quad index).
 	sprite_frag:              ^sdl.GPUShader,
-	sprite_pipelines:         [o3d.Side][2]^sdl.GPUGraphicsPipeline,
+	sprite_pipelines:         [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	bg_pipeline:              ^sdl.GPUGraphicsPipeline,
 	// The frame's depth as distance into the host's image.
 	depth_vert, depth_frag:   ^sdl.GPUShader,
@@ -132,7 +131,7 @@ External_Texture :: struct {
 // they could not be made.
 Custom :: struct {
 	vert, frag: ^sdl.GPUShader,
-	pipelines:  [o3d.Side][2]^sdl.GPUGraphicsPipeline,
+	pipelines:  [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	made:       bool,
 	failed:     bool,
 }
@@ -257,12 +256,11 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 		g.samples = ._1
 	}
 	for side in o3d.Side {
-		for blend in 0 ..< 2 {
-			g.pipelines[side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend == 1, false, false)
-			g.skinned_pipelines[side][blend] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend == 1, false, true)
-			g.curve_pipelines[side][blend] = make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, blend == 1, false, false)
-			// [0] blended over, [1] added.
-			g.sprite_pipelines[side][blend] = make_pipeline(g, g.curves_vert, g.sprite_frag, STANDARD_ATTRIBUTES[:], side, true, false, false, additive = blend == 1)
+		for blend in o3d.Blend {
+			g.pipelines[side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend, false, false)
+			g.skinned_pipelines[side][blend] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend, false, true)
+			g.curve_pipelines[side][blend] = make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false)
+			g.sprite_pipelines[side][blend] = make_pipeline(g, g.curves_vert, g.sprite_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false)
 			if g.pipelines[side][blend] == nil || g.skinned_pipelines[side][blend] == nil || g.curve_pipelines[side][blend] == nil || g.sprite_pipelines[side][blend] == nil {
 				return .Shader
 			}
@@ -465,11 +463,11 @@ SKINNED_ATTRIBUTES := [6]sdl.GPUVertexAttribute {
 }
 
 // A pipeline drawing `Vertex`es (slot 0, plus `Skin_Vertex`es in slot 1 when
-// `skinned`) for a material side, blended or not. The standard material's
-// output is premultiplied; a ShaderMaterial's (`raw`) is as written,
-// premultiplied by the blend.
+// `skinned`) for a material side and blend. The standard material's output
+// is premultiplied; a ShaderMaterial's (`raw`) is as written, premultiplied
+// by the blend.
 @(private = "file")
-make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend, raw, skinned: bool, additive := false) -> ^sdl.GPUGraphicsPipeline {
+make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend: o3d.Blend, raw, skinned: bool) -> ^sdl.GPUGraphicsPipeline {
 	buffers := [2]sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX},
 		{slot = 1, pitch = size_of(o3d.Skin_Vertex), input_rate = .VERTEX},
@@ -477,9 +475,9 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 	color := sdl.GPUColorTargetDescription {
 		format = COLOR_FORMAT,
 		blend_state = {
-			enable_blend = blend,
+			enable_blend = blend != .Opaque,
 			src_color_blendfactor = .SRC_ALPHA if raw else .ONE,
-			dst_color_blendfactor = .ONE if additive else .ONE_MINUS_SRC_ALPHA,
+			dst_color_blendfactor = .ONE if blend == .Add else .ONE_MINUS_SRC_ALPHA,
 			color_blend_op = .ADD,
 			src_alpha_blendfactor = .ONE,
 			dst_alpha_blendfactor = .ONE_MINUS_SRC_ALPHA,
@@ -502,7 +500,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = g.samples},
-		depth_stencil_state = {compare_op = .LESS, enable_depth_test = true, enable_depth_write = !blend},
+		depth_stencil_state = {compare_op = .LESS, enable_depth_test = true, enable_depth_write = blend == .Opaque},
 		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
@@ -544,14 +542,14 @@ make_depth_image_pipeline :: proc(g: ^GPU) -> ^sdl.GPUGraphicsPipeline {
 // A ShaderMaterial's pipeline, its shaders made from oksl's output the first
 // time (nil: they could not be). `record` only looks it up (`make` false).
 @(private)
-custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: bool, make := true) -> ^sdl.GPUGraphicsPipeline {
+custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: o3d.Blend, make := true) -> ^sdl.GPUGraphicsPipeline {
 	sh := o3d.shader_get(shaders, id)
 	if sh == nil {
 		return nil
 	}
 	if !make {
 		c := &g.custom[id - 1] if int(id) <= len(g.custom) else nil
-		return c.pipelines[side][1 if blend else 0] if c != nil && !c.failed else nil
+		return c.pipelines[side][blend] if c != nil && !c.failed else nil
 	}
 	if len(g.custom) < int(id) {
 		resize(&g.custom, int(id))
@@ -586,7 +584,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 	if c.failed {
 		return nil
 	}
-	p := &c.pipelines[side][1 if blend else 0]
+	p := &c.pipelines[side][blend]
 	if p^ == nil {
 		attrs: [len(o3d.Vertex_Attribute)]sdl.GPUVertexAttribute
 		n := 0

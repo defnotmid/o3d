@@ -56,6 +56,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"shadow_only", 200, 150, build_shadow_only},
 	{"particles", 240, 180, build_particles},
 	{"labels", 240, 180, build_labels},
+	{"additive", 240, 180, build_additive},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -713,6 +714,63 @@ build_labels :: proc(a: ^Parity_Assets) -> string {
 	m.color_map, m.depth_offset = label, 0.1
 	m.flags = {.No_Size_Attenuation, .Premultiplied_Color_Map}
 	append(&s.draws, o3d.Draw{o3d.scene_particles(s, labels[:]), o3d.compose({0, 0, 0}), m})
+	return ""
+}
+
+// A halo's colour at an alpha rising to its rim (added: colour times alpha).
+@(private = "file")
+HALO_FRAG :: `varying vec3 vWorld;
+varying vec3 vNormalW;
+void main() {
+  vec3 v = normalize(cameraPosition - vWorld);
+  float rim = pow(1.0 - abs(dot(normalize(vNormalW), v)), 1.5);
+  gl_FragColor = vec4(1.0, 0.7, 0.3, rim);
+}`
+
+// Additive materials (three.js's AdditiveBlending) on meshes, a
+// ShaderMaterial and lines over a lit planet and a dark sky: a back-face
+// atmosphere shell, an opaque-coloured lit ring added, a halo shader and a
+// line loop crossing them, overlapping where their sums clamp.
+@(private = "file")
+build_additive :: proc(a: ^Parity_Assets) -> string {
+	SW, SH :: 16, 8
+	sky_px: [SW * SH * 4]u8
+	for y in 0 ..< SH {
+		for x in 0 ..< SW {
+			i := (y * SW + x) * 4
+			sky_px[i], sky_px[i + 1], sky_px[i + 2], sky_px[i + 3] = u8(4 + y * 2), u8(6 + y * 3), u8(20 + y * 5), 255
+		}
+	}
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.background = o3d.texture_add(&a.textures, sky_px[:], SW, SH)
+	s.camera = {position = {0.4, 0.6, 4.2}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 30}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.97, 0.9}, intensity = 3, position = {-3, 1, 2}})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {0.6, 0.7, 1}, intensity = 0.1})
+	planet := o3d.MATERIAL_DEFAULT
+	planet.color, planet.roughness = {0.2, 0.4, 0.8}, 0.7
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 1, 48, 24), o3d.compose({0, 0, 0}), planet})
+	air := o3d.MATERIAL_DEFAULT
+	air.color, air.opacity, air.side, air.flags = {0.3, 0.6, 1}, 0.7, .Back, {.Basic, .Additive}
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 1.15, 48, 24), o3d.compose({0, 0, 0}), air})
+	ring := o3d.MATERIAL_DEFAULT
+	ring.color, ring.roughness, ring.flags = {0.8, 0.5, 0.3}, 0.5, {.Additive}
+	append(&s.draws, o3d.Draw{o3d.torus(&a.geos, 1.4, 0.06, 12, 64), o3d.compose({0, 0, 0}, {1.2, 0.3, 0}), ring})
+	halo, errors := o3d.shader(&a.shaders, RIM_VERT, HALO_FRAG)
+	if errors != "" {
+		return errors
+	}
+	glow := o3d.MATERIAL_DEFAULT
+	glow.shader, glow.flags, glow.side = halo, {.Additive}, .Double
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.35, 32, 16), o3d.compose({1.1, 0.7, 0.8}), glow})
+	loop: [48]o3d.Vec3
+	for &p, i in loop {
+		t := f32(i) / len(loop) * math.TAU
+		p = {1.25 * math.cos(t), 0.5 * math.sin(2 * t), 1.25 * math.sin(t)}
+	}
+	line := o3d.MATERIAL_DEFAULT
+	line.color, line.size, line.flags = {0.4, 1, 0.5}, 3, {.Basic, .Additive, .No_Size_Attenuation}
+	append(&s.draws, o3d.Draw{o3d.scene_polyline(s, loop[:], closed = true), o3d.compose({0, 0, 0}), line})
 	return ""
 }
 

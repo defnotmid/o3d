@@ -1537,6 +1537,39 @@ test_additive_over_background :: proc(t: ^testing.T) {
 	}
 }
 
+// An additive mesh (any material, not only particles): drawn with the
+// transparent ones, so an opaque plane behind it listed after it is under
+// it, and its colour added to that plane's and to the sky's, clamped.
+@(test)
+test_additive_mesh :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	sky_px := [4]u8{100, 50, 25, 255}
+	scene.background = texture_add(&textures, sky_px[:], 1, 1)
+	scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+	add := MATERIAL_DEFAULT
+	add.color, add.flags = {200.0 / 255, 200.0 / 255, 200.0 / 255}, {.Basic, .Additive}
+	append(&scene.draws, Draw{plane(&g, 2, 2), compose({0, 0, 0}), add})
+	red := MATERIAL_DEFAULT
+	red.color, red.flags = {1, 0, 0}, {.Basic}
+	append(&scene.draws, Draw{plane(&g, 0.5, 0.5), compose({0, 0, -1}), red})
+	W :: 32
+	s: Software
+	defer software_destroy(&s)
+	px := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	testing.expectf(t, at(px, W / 2, W / 2) == {255, 200, 200, 255}, "added to the plane behind: %v", at(px, W / 2, W / 2))
+	testing.expectf(t, at(px, W / 2, 9) == {255, 250, 225, 255}, "added to the sky: %v", at(px, W / 2, 9))
+	testing.expectf(t, at(px, 1, 1) == {100, 50, 25, 255}, "the sky: %v", at(px, 1, 1))
+}
+
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's
 // bottom edge on its point (a wide one too), and `depth_offset` brings one inside a wall in
 // front of it, covering the same pixels.

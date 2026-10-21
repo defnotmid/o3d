@@ -100,8 +100,10 @@ Material_Flag :: enum u8 {
 	// `opacity` times the light its shadows take, blended over what is
 	// behind; it receives shadows, is lit by nothing and reads no maps.
 	Shadow_Only,
-	// Particles: added to what is behind (three.js's AdditiveBlending:
-	// sparks, flames, glows), not blended over it.
+	// Added to what is behind (three.js's AdditiveBlending: sparks,
+	// flames, glows, atmospheres), not blended over it: any material,
+	// drawn with the transparent ones (depth tested, not written), its
+	// colour times its opacity added.
 	Additive,
 	// The `color_map`'s colour is premultiplied by its alpha (a canvas's,
 	// a GPU-rendered image's): divided by it after filtering, both
@@ -1325,6 +1327,24 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 // coverage), as three.js blends any transparent material.
 blended :: proc "contextless" (m: Material) -> bool {
 	return .Shadow_Only in m.flags || .Additive in m.flags || .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || m.shader != 0 || m.mode == .Curves || m.mode == .Sprites)
+}
+
+// How a draw's colour meets what is drawn before it: replacing it (its
+// depth written), blended over it, or added to it (three.js's
+// AdditiveBlending, `.Additive`); blended and added draws test the depth
+// without writing it, in the transparent pass. Both renderers alike.
+Blend :: enum u8 {
+	Opaque,
+	Over,
+	Add,
+}
+
+// A shading material's (`shading_materials`').
+blend_of :: #force_inline proc "contextless" (m: ^Shading_Material) -> Blend {
+	if .Additive in m.flags {
+		return .Add
+	}
+	return .Over if .Blended in m.flags else .Opaque
 }
 
 // ---- shading ----------------------------------------------------------------------------

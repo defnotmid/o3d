@@ -231,7 +231,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			}
 			lit := shade(m, p, n, job.eye, job.lights, 1, job.env, 1, shadows) + m.emissive
 			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, t, x, y, area, covered, pack(lit, out_alpha), blend)
+			write_samples(s, t, x, y, area, covered, pack(lit, out_alpha), blend_of(m))
 		}
 	}
 }
@@ -267,7 +267,7 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 			}
 			lit := finish_color(m.base, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, t, x, y, area, covered, pack(lit, m.opacity * (1 - mask)), true)
+			write_samples(s, t, x, y, area, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m))
 		}
 	}
 }
@@ -418,11 +418,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				}
 				lit := shade(&pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
 				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				if .Additive in m.flags {
-					add_samples(s, t, x, y, area, covered, pack(lit, opacity))
-				} else {
-					write_samples(s, t, x, y, area, covered, pack(lit, opacity), blend)
-				}
+				write_samples(s, t, x, y, area, covered, pack(lit, opacity), blend_of(m))
 			}
 		}
 	}
@@ -570,14 +566,14 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		}
 	}
 	oksl.run_fragment(&sh.pipeline.fragment.program, block(&s.blocks, draw, .Fragment), quads, q.colours[:], q.shaded[:], &w.vm, {sampler = sample_shader_map, user = &maps, channel_sizes = sizes[:]})
-	blend := .Blended in s.materials[draw].flags
+	blend := blend_of(&s.materials[draw])
 	for qi in 0 ..< nq {
 		ref := q.tri[qi]
 		t := s.chunks[ref.chunk].tris[ref.tri]
 		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
 		for l in q.shaded[qi] {
 			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
-			write_samples(s, t, x, y, area, q.covered[qi][l], pack_raw(q.colours[qi * 4 + l], blend), blend)
+			write_samples(s, t, x, y, area, q.covered[qi][l], pack_raw(q.colours[qi * 4 + l], blend != .Opaque), blend)
 		}
 	}
 	return taken
@@ -622,9 +618,10 @@ coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (
 }
 
 // A pixel's colour into its covered samples that pass the depth test:
-// blended over them (depth kept), or replacing them (depth written).
+// replacing them (depth written), blended over them or added to them
+// (premultiplied colour added, alpha over; depth kept).
 @(private = "file")
-write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: int, area: f32, covered: Sample_Mask, col: u32, blend: bool) {
+write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: int, area: f32, covered: Sample_Mask, col: u32, blend: Blend) {
 	for k in covered {
 		p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
 		s0 := edge(t.p[1].xy, t.p[2].xy, p) / area
@@ -634,34 +631,20 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: i
 		if z < 0 || z > 1 || z >= s.depth[i] {
 			continue
 		}
-		if blend {
-			s.color[i] = over(col, s.color[i])
-		} else {
+		switch blend {
+		case .Opaque:
 			s.color[i] = col
 			s.depth[i] = z
+		case .Over:
+			s.color[i] = over(col, s.color[i])
+		case .Add:
+			dst := s.color[i]
+			out := over(col, dst) & 0xff000000
+			for sh in ([3]u32{0, 8, 16}) {
+				out |= min(((col >> sh) & 0xff) + ((dst >> sh) & 0xff), 255) << sh
+			}
+			s.color[i] = out
 		}
-	}
-}
-
-// `write_samples` adding (premultiplied colour added, alpha over): an
-// additive draw's.
-@(private = "file")
-add_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: int, area: f32, covered: Sample_Mask, col: u32) {
-	for k in covered {
-		p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
-		s0 := edge(t.p[1].xy, t.p[2].xy, p) / area
-		s1 := edge(t.p[2].xy, t.p[0].xy, p) / area
-		z := s0 * t.p[0].z + s1 * t.p[1].z + (1 - s0 - s1) * t.p[2].z
-		i := (y * s.width + x) * SAMPLES + k
-		if z < 0 || z > 1 || z >= s.depth[i] {
-			continue
-		}
-		dst := s.color[i]
-		out := over(col, dst) & 0xff000000
-		for sh in ([3]u32{0, 8, 16}) {
-			out |= min(((col >> sh) & 0xff) + ((dst >> sh) & 0xff), 255) << sh
-		}
-		s.color[i] = out
 	}
 }
 

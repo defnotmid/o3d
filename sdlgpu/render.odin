@@ -528,7 +528,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	for di in job.order {
 		m := &job.materials[di]
 		if m.shader != 0 {
-			custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, .Blended in m.flags)
+			custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, o3d.blend_of(m))
 		}
 	}
 
@@ -635,7 +635,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 			bound_ib = ibuf
 		}
 		m := &job.materials[di]
-		blend := .Blended in m.flags
+		blend := o3d.blend_of(m)
 		if m.shader != 0 {
 			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend, make = false)
 			if p == nil {
@@ -683,12 +683,12 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
 		curved := .Curves in m.flags
 		sprite := .Sprite in m.flags && job.sprite_rows.buffer != nil
-		p := g.skinned_pipelines[d.material.side][1 if blend else 0] if skinned else g.pipelines[d.material.side][1 if blend else 0]
+		p := g.skinned_pipelines[d.material.side][blend] if skinned else g.pipelines[d.material.side][blend]
 		if curved {
-			p = g.curve_pipelines[d.material.side][1 if blend else 0]
+			p = g.curve_pipelines[d.material.side][blend]
 		}
 		if sprite {
-			p = g.sprite_pipelines[d.material.side][1 if .Additive in m.flags else 0]
+			p = g.sprite_pipelines[d.material.side][blend]
 		}
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)

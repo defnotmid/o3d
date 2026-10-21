@@ -107,6 +107,10 @@ test_text_matches_software :: proc(t: ^testing.T) {expect_parity(t, "text")}
 @(test)
 test_labels_match_software :: proc(t: ^testing.T) {expect_parity(t, "labels")}
 
+// Additive meshes, a ShaderMaterial and lines over a planet.
+@(test)
+test_additive_match_software :: proc(t: ^testing.T) {expect_parity(t, "additive")}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)
