@@ -45,6 +45,7 @@ static const uint FLAG_ALPHA_MAP = 16384;
 static const uint FLAG_SHADOW_ONLY = 32768;
 static const uint FLAG_SPRITE = 65536;
 static const uint FLAG_ADDITIVE = 131072;
+static const uint FLAG_PREMULTIPLIED = 262144;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -446,6 +447,9 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
         float2 uv, dx, dy;
         slot_uv(SLOT_COLOR, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
         float4 tex = sample_map(colorMap, uv, dx, dy);
+        if ((flags & FLAG_PREMULTIPLIED) != 0) {
+            tex.rgb = tex.a > 0 ? saturate(tex.rgb / tex.a) : float3(0);
+        }
         base *= linear_rgb(tex.rgb);
         if ((flags & (FLAG_BLENDED | FLAG_ALPHA_MASK)) != 0) {
             a *= tex.a;

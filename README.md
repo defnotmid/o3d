@@ -193,10 +193,14 @@ smoke := o3d.MATERIAL_DEFAULT
 smoke.color_map, smoke.softness = puff_sprite, 0.3                   // the sprite; fade 0.3 before what they meet
 append(&scene.draws, o3d.Draw{puffs, o3d.compose(), smoke})          // drawn unlit, farthest first
 // sparks: the same with flags = {.Additive}
+// Labels: pixel-sized rows with offset = {0, 0.5} (the bottom edge's middle on the point), the
+// material's depth_offset bringing them in front of what they are pinned to; a canvas's
+// premultiplied image as color_map with flags += {.Premultiplied_Color_Map}
 
 // The frame's depth, to hide it behind what is nearer and for post effects
 scene.depth = true                                                   // then render as usual
 hidden := o3d.point_hidden(scene.camera, o3d.software_depth(&sw), 1920, 1080, sun_position)   // GPU: read_depth(&g, o3d_sdlgpu.depth(&g), ...)
+o3d.depth_image(scene.camera, o3d.software_depth(&sw), 1920, 1080, far, rgba16f)   // distance (a 1 where drawn); GPU: record_depth_into
 
 // Text and logos: outlines (flattened to points) grouped into shapes, extruded once, drawn per frame
 shapes := o3d.shapes_from_contours(glyph_contours)          // ShapePath.toShapes; holes found by containment
@@ -240,6 +244,10 @@ o3d_sdlgpu.render(&g, &scene, &geos, &shaders, out, 1920, 1080, cmd, &textures) 
 // A texture whose pixels change every frame (a video) and are already on the GPU:
 clip := o3d.texture_add_external(&textures, 1280, 720)   // once; a map like any other
 o3d_sdlgpu.texture_set_external(&g, &textures, clip, frame_texture)   // before each render that draws it
+o3d.software_set_external(&sw, clip, frame_pixels, 1280, 720)         // the software renderer's: RGBA8 in memory
+// The frame's depth as distance into the host's RGBA16F image, after record in the same command buffer
+depth_img := o3d_sdlgpu.depth_image_target(&g, 1920, 1080)
+o3d_sdlgpu.record_depth_into(&g, &g.job, depth_img, far, cmd)       // a scene with Scene.depth
 
 // Recorded at a point of the host's own command stream, where nothing may be made:
 job: o3d_sdlgpu.Job                         // kept per view, reused every frame
@@ -264,8 +272,8 @@ includes ovg's `shaders/curves.slang` from there too.
   device unless `O3D_NO_GPU=1` (CI without a GPU; macOS, below).
 - `odin run tools/gpu_check -collection:deps=.. [-- out_dir]`: every
   GPU-vs-software parity case (`PARITY_CASES`) on the main thread, by PSNR,
-  optionally saving both frames, then the external texture and prepared
-  jobs checks. On macOS this is the GPU check: SDL's
+  optionally saving both frames, then the external texture, prepared
+  jobs, depth and depth image checks. On macOS this is the GPU check: SDL's
   Metal driver needs the main thread, which `odin test` does not give.
 - `odin run bench -collection:deps=.. -o:speed`: the zero-allocation
   software benchmark; `odin run demo -collection:deps=.. -- out_dir`: a
@@ -477,8 +485,20 @@ includes ovg's `shaders/curves.slang` from there too.
   opacity multiply the row's; drawn unlit, blended or added
   (`.Additive`), fogged and tone mapped; `softness` fades a particle over
   that distance before the frame's depth (soft particles), which is then
-  drawn for them. The emitter (where particles are, frame by frame) is the
-  host's.
+  drawn for them. A row's `offset` moves its quad from its point in sizes,
+  in its turned frame (`{0, 0.5}`: the bottom edge's middle on it, a
+  label's anchor); the material's `depth_offset` moves the quads that far
+  toward the camera along the ray to each (scaled about the eye, so the
+  same on screen; not past the near plane), so a label pinned to a surface
+  draws in front of it and still behind what is nearer. Particles test
+  the frame's depth as everything blended does: an alpha-masked net hides
+  them behind its wires, not its gaps. The emitter (where particles are,
+  frame by frame) is the host's.
+- **Premultiplied colour maps:** `.Premultiplied_Color_Map` says the
+  `color_map`'s colour is already multiplied by its alpha (a canvas's, an
+  image rendered on the GPU): both renderers divide it out after
+  filtering (the right order for premultiplied texels), so its
+  anti-aliased edges keep their colour.
 - **Frame depth:** with `Scene.depth` both renderers also draw the
   frame's depth through their shadow pass, from the camera at the frame's
   size: per pixel, the depth they test (0 near, 1 far, 1 where nothing is,
@@ -491,6 +511,13 @@ includes ovg's `shaders/curves.slang` from there too.
   around it, the farthest kept, so a point on a drawn surface is not hidden
   by it; `bias` for points a little inside one). gpu_check
   compares the two (all but 0 to 2 texels in some 30000 within 3e-6).
+  `o3d_sdlgpu.record_depth_into` draws it as distance into the host's
+  RGBA16F image (`depth_image_target`, in the same command buffer after
+  `record`, with no readback): rgb the distance along the camera's axis
+  (`view_depth`, world units) and a 1 where something was drawn; rgb the
+  given `far` and a 0 where nothing was. `depth_image` makes the same from
+  `software_depth` and `read_depth_image` reads the GPU's back; gpu_check
+  compares them (within 1e-3 relatively).
 - **External textures:** `texture_add_external` adds a `Textures` entry
   with no texels, for pixels the host already has on the GPU and changes
   every frame (a video's frames). `o3d_sdlgpu.texture_set_external` binds
@@ -499,8 +526,11 @@ includes ovg's `shaders/curves.slang` from there too.
   image's), sampled at its own mip levels (none unless the host makes
   them). The binding is for that table only (a remade table's reused ids
   sample white), the host's texture is never released by o3d, and the host
-  unbinds (nil) before releasing it. The software renderer has no such
-  pixels: it samples an external texture white (the material's own colour).
+  unbinds (nil) before releasing it. The software renderer's counterpart
+  is `software_set_external`: the host's RGBA8 pixels in memory (the same
+  bytes, rows from the top), read as the GPU reads an unmipped texture
+  (bilinear at its level 0), kept by the host while bound; unbound, an
+  external texture samples white (the material's own colour).
 - **Prepared jobs:** `render` is `prepare` then `record` with the GPU's
   own `Job`. A host that records 3D at a point of its own command stream
   (a 2D canvas's ordered pass, where creating a GPU resource may submit)

@@ -126,10 +126,10 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 						}
 						a := m.opacity
 						if .Color_Map in m.flags {
-							a *= sample_top(job.textures, m.color_map, at(m.uv_transforms[.Color], raw)).a
+							a *= sample_map_top(job, m.color_map, at(m.uv_transforms[.Color], raw)).a
 						}
 						if .Alpha_Map in m.flags {
-							a *= sample_top(job.textures, m.alpha_map, at(m.uv_transforms[.Alpha], raw)).g
+							a *= sample_map_top(job, m.alpha_map, at(m.uv_transforms[.Alpha], raw)).g
 						}
 						if a < m.alpha_cutoff {
 							continue
@@ -336,7 +336,10 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				opacity := m.opacity
 				if .Color_Map in m.flags {
 					c_uv, c_dx, c_dy := slot_uv(m, .Color, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					tex := sample(job.textures, m.color_map, c_uv, c_dx, c_dy)
+					tex := sample_map(job, m.color_map, c_uv, c_dx, c_dy)
+					if .Premultiplied in m.flags {
+						tex.rgb = linalg.clamp(tex.rgb / tex.a, 0, 1) if tex.a > 0 else 0
+					}
 					pm.base *= linear(tex.rgb)
 					if blend || .Alpha_Mask in m.flags {
 						opacity *= tex.a
@@ -344,7 +347,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				}
 				if .Alpha_Map in m.flags {
 					a_uv, a_dx, a_dy := slot_uv(m, .Alpha, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					opacity *= sample(job.textures, m.alpha_map, a_uv, a_dx, a_dy).g
+					opacity *= sample_map(job, m.alpha_map, a_uv, a_dx, a_dy).g
 				}
 				if sprite {
 					pm.base *= linear(row.rgb)
@@ -381,20 +384,20 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				}
 				if .Roughness_Map in m.flags {
 					r_uv, r_dx, r_dy := slot_uv(m, .Roughness, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					pm.roughness *= sample(job.textures, m.roughness_map, r_uv, r_dx, r_dy).g
+					pm.roughness *= sample_map(job, m.roughness_map, r_uv, r_dx, r_dy).g
 				}
 				if .Metalness_Map in m.flags {
 					m_uv, m_dx, m_dy := slot_uv(m, .Metalness, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					pm.metalness *= sample(job.textures, m.metalness_map, m_uv, m_dx, m_dy).b
+					pm.metalness *= sample_map(job, m.metalness_map, m_uv, m_dx, m_dy).b
 				}
 				if .Emissive_Map in m.flags {
 					e_uv, e_dx, e_dy := slot_uv(m, .Emissive, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					emissive *= linear(sample(job.textures, m.emissive_map, e_uv, e_dx, e_dy).rgb)
+					emissive *= linear(sample_map(job, m.emissive_map, e_uv, e_dx, e_dy).rgb)
 				}
 				ao: f32 = 1
 				if .Ao_Map in m.flags {
 					a_uv, a_dx, a_dy := slot_uv(m, .Ao, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					ao = (sample(job.textures, m.ao_map, a_uv, a_dx, a_dy).r - 1) * m.ao_intensity + 1
+					ao = (sample_map(job, m.ao_map, a_uv, a_dx, a_dy).r - 1) * m.ao_intensity + 1
 				}
 				n := flat_n if .Flat_Shading in m.flags else norms[l]
 				shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
@@ -410,7 +413,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					pm.flags -= {.Two_Sided}
 					dp_dx, dp_dy := quad_deriv(worlds, l)
 					n_uv, n_dx, n_dy := slot_uv(m, .Normal, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					map_n := sample(job.textures, m.normal_map, n_uv, n_dx, n_dy).rgb * 2 - 1
+					map_n := sample_map(job, m.normal_map, n_uv, n_dx, n_dy).rgb * 2 - 1
 					n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
 				}
 				lit := shade(&pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
@@ -557,10 +560,12 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		helpers      = q.helpers[:],
 		varyings     = q.values[:],
 	}
-	maps := Shader_Maps{textures = job.textures, ids = s.materials[draw].shader_maps}
+	maps := Shader_Maps{s = s, textures = job.textures, ids = s.materials[draw].shader_maps}
 	sizes: [SHADER_MAPS][2]i32
 	for id, c in maps.ids {
-		if tex, ok := texture_get(job.textures, id); ok && !tex.external {
+		if ext, bound := bound_external(s, job.textures, id); bound {
+			sizes[c] = {i32(ext.width), i32(ext.height)}
+		} else if tex, ok := texture_get(job.textures, id); ok && !tex.external {
 			sizes[c] = {i32(tex.width), i32(tex.height)}
 		}
 	}
@@ -581,6 +586,7 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 // A ShaderMaterial draw's textures, for its sampler.
 @(private = "file")
 Shader_Maps :: struct {
+	s:        ^Software,
 	textures: ^Textures,
 	ids:      [SHADER_MAPS]Texture_Id,
 }
@@ -596,6 +602,9 @@ sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32) -> [
 	}
 	if _, ok := texture_get(maps.textures, maps.ids[channel]); !ok {
 		return 1
+	}
+	if ext, ok := bound_external(maps.s, maps.textures, maps.ids[channel]); ok {
+		return sample_mip(ext.pixels, ext.width, ext.height, {uv.x, 1 - uv.y})
 	}
 	return sample_lod(maps.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = false)
 }
@@ -720,4 +729,35 @@ over :: proc "contextless" (src, dst: u32) -> u32 {
 		out |= min(s + (d * inv + 127) / 255, 255) << sh
 	}
 	return out
+}
+
+// The pixels the host bound to external texture `id` for the software
+// renders (`software_set_external`).
+@(private = "file")
+bound_external :: #force_inline proc "contextless" (s: ^Software, textures: ^Textures, id: Texture_Id) -> (Software_External, bool) {
+	if id == 0 || int(id) > len(s.externals) || s.externals[id - 1].pixels == nil {
+		return {}, false
+	}
+	tex, ok := texture_get(textures, id)
+	return s.externals[id - 1], ok && tex.external
+}
+
+// A map at `uv` as `sample` reads it; an external texture from the pixels
+// bound to it, at their level 0, bilinear (as the GPU reads an unmipped
+// one).
+@(private = "file")
+sample_map :: #force_inline proc "contextless" (job: ^Frame_Job, id: Texture_Id, uv, duv_dx, duv_dy: Vec2) -> Vec4 {
+	if ext, ok := bound_external(job.s, job.textures, id); ok {
+		return sample_mip(ext.pixels, ext.width, ext.height, uv)
+	}
+	return sample(job.textures, id, uv, duv_dx, duv_dy)
+}
+
+// `sample_top`'s, as `sample_map` reads externals.
+@(private = "file")
+sample_map_top :: #force_inline proc "contextless" (job: ^Frame_Job, id: Texture_Id, uv: Vec2) -> Vec4 {
+	if ext, ok := bound_external(job.s, job.textures, id); ok {
+		return sample_mip(ext.pixels, ext.width, ext.height, uv)
+	}
+	return sample_top(job.textures, id, uv)
 }

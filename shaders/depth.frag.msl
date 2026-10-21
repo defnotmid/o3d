@@ -1,0 +1,79 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 2598 "core.meta.slang"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 4 "depth.slang"
+struct Depth_FS_0
+{
+    float4 params_0;
+    float4 size_0;
+};
+
+
+#line 9
+struct KernelContext_0
+{
+    Depth_FS_0 constant* depth_fs_0;
+    texture2d<float, access::sample> depthMap_texture_0;
+    sampler depthMap_sampler_0;
+};
+
+
+#line 20
+[[fragment]] pixelOutput_0 fs_main(float4 position_0 [[position]], Depth_FS_0 constant* depth_fs_1 [[buffer(0)]], texture2d<float, access::sample> depthMap_texture_1 [[texture(0)]], sampler depthMap_sampler_1 [[sampler(0)]])
+{
+
+#line 20
+    thread KernelContext_0 kernelContext_0;
+
+#line 20
+    (&kernelContext_0)->depth_fs_0 = depth_fs_1;
+
+#line 20
+    (&kernelContext_0)->depthMap_texture_0 = depthMap_texture_1;
+
+#line 20
+    (&kernelContext_0)->depthMap_sampler_0 = depthMap_sampler_1;
+    float _S1 = ((depthMap_texture_1).sample((depthMap_sampler_1), (position_0.xy / depth_fs_1->size_0.xy), level((0.0f))).x);
+    if(_S1 >= 1.0f)
+    {
+
+#line 22
+        pixelOutput_0 _S2 = { float4((&kernelContext_0)->depth_fs_0->params_0.zzz, 0.0f) };
+        return _S2;
+    }
+    float near_0 = (&kernelContext_0)->depth_fs_0->params_0.x;
+    float far_0 = (&kernelContext_0)->depth_fs_0->params_0.y;
+
+#line 26
+    float v_0;
+    if(((&kernelContext_0)->depth_fs_0->params_0.w) != 0.0f)
+    {
+
+#line 27
+        v_0 = near_0 + _S1 * (far_0 - near_0);
+
+#line 27
+    }
+    else
+    {
+
+#line 27
+        v_0 = near_0 * far_0 / (far_0 - _S1 * (far_0 - near_0));
+
+#line 27
+    }
+
+#line 27
+    pixelOutput_0 _S3 = { float4(v_0, v_0, v_0, 1.0f) };
+    return _S3;
+}
+

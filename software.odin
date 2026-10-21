@@ -79,6 +79,16 @@ Software :: struct {
 	// The frame's depth per pixel (`Scene.depth`), drawn after them.
 	depth_map:     [dynamic]f32,
 	expanded:      Expanded_Draws,
+	// The host's pixels for external textures (by id - 1), as the GPU's
+	// `texture_set_external` binds its textures: `software_set_external`.
+	externals:     [dynamic]Software_External,
+}
+
+// An external texture's pixels for the software renderer: RGBA8 (sRGB
+// bytes, as an image's), rows from the top, the host's.
+Software_External :: struct {
+	pixels:        [][4]u8,
+	width, height: int,
 }
 
 software_destroy :: proc(s: ^Software) {
@@ -105,7 +115,25 @@ software_destroy :: proc(s: ^Software) {
 	}
 	delete(s.depth_map)
 	expanded_draws_destroy(&s.expanded)
+	delete(s.externals)
 	s^ = {}
+}
+
+// Binds the host's pixels (`width x height` RGBA8, rows from the top, as
+// `texture_add` takes them) to an external texture (`texture_add_external`)
+// for the software renders that follow, until bound again: what
+// `o3d_sdlgpu.texture_set_external` binds on the GPU, read as it reads an
+// unmipped one (bilinear at its level 0). The host keeps them alive while
+// bound; nil (or too few bytes) unbinds it, then sampled white.
+software_set_external :: proc(s: ^Software, id: Texture_Id, pixels: []u8, width, height: int) {
+	if id == 0 {
+		return
+	}
+	if int(id) > len(s.externals) {
+		resize(&s.externals, int(id))
+	}
+	ok := width > 0 && height > 0 && len(pixels) >= width * height * 4
+	s.externals[id - 1] = {slice.reinterpret([][4]u8, pixels[:width * height * 4]), width, height} if ok else {}
 }
 
 // A triangle ready to draw: screen positions (x, y, depth) with 1/w,

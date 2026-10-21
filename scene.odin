@@ -103,6 +103,10 @@ Material_Flag :: enum u8 {
 	// Particles: added to what is behind (three.js's AdditiveBlending:
 	// sparks, flames, glows), not blended over it.
 	Additive,
+	// The `color_map`'s colour is premultiplied by its alpha (a canvas's,
+	// a GPU-rendered image's): divided by it after filtering, both
+	// renderers alike.
+	Premultiplied_Color_Map,
 }
 
 Material_Flags :: bit_set[Material_Flag; u16]
@@ -140,6 +144,10 @@ Material :: struct {
 	// Particles: how far before an opaque surface they fade out (world
 	// units; soft particles, by the frame's depth; 0: a hard edge).
 	softness:            f32,
+	// Particles: moved this far toward the camera along the ray to each
+	// (world units; negative, away), as they look the same size in the
+	// same place: a label pinned to a surface is drawn in front of it.
+	depth_offset:        f32,
 	ao_map_intensity:    f32,
 	// Line width (`.Lines`) or point size (`.Points`); 0 takes defaults
 	// (0.03 world / 2 px for lines, 0.08 world / 4 px for points).
@@ -443,12 +451,16 @@ scene_tube :: proc(s: ^Scene, points: []Vec3, radius: f32 = 0.08, radial_segment
 // A particle: a camera-facing quad `size` across (world units, or pixels
 // with `.No_Size_Attenuation`) turned `rotation` radians in the view plane,
 // its colour (sRGB) and opacity (clamped to 0..1) times its material's (and
-// its `color_map`'s, the sprite).
+// its `color_map`'s, the sprite). `offset` is the quad's centre from
+// `position` in sizes, x right and y up in the quad's turned frame: {0, 0}
+// centred on it, {0, 0.5} its bottom edge's middle on it (a label's
+// anchor), turning about it.
 Particle :: struct {
 	position: Vec3,
 	size:     f32,
 	color:    Vec4,
 	rotation: f32,
+	offset:   Vec2,
 }
 
 // Per-frame particles in `s`: draw the geometry with a transparent (or
@@ -731,6 +743,9 @@ scene_geometry_mesh :: proc "contextless" (scene: ^Scene, g: ^Geometries, id: Ge
 expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geometry, insts: []Instance, view_proj: Mat4, cam_right, cam_up, cam_back: Vec3, scale_px: f32, draws: ^#soa[dynamic]Draw) {
 	rows := scene.particles[geo.sprite_table:][:geo.vertex_count]
 	px_space := .No_Size_Attenuation in d.material.flags
+	offset := d.material.depth_offset
+	eye := scene.camera.position
+	near := scene.camera.near if scene.camera.near > 0 else 0.1
 	default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
 	run_insts := insts if len(insts) > 0 else default_inst[:]
 	for inst in run_insts {
@@ -763,11 +778,30 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 			c, sn := math.cos(p.rotation), math.sin(p.rotation)
 			rx := (cam_right * c + cam_up * sn) * half
 			uy := (cam_up * c - cam_right * sn) * half
+			centre := w + (rx * p.offset.x + uy * p.offset.y) * 2
+			corners := [4]Vec3{centre - rx - uy, centre + rx - uy, centre + rx + uy, centre - rx + uy}
+			if offset != 0 {
+				if scene.camera.orthographic {
+					for &v in corners {
+						v += cam_back * offset
+					}
+				} else {
+					// Scaled about the eye, so the same on screen; not past
+					// the near plane.
+					along := linalg.dot(eye - w, cam_back)
+					k := max(1 - offset / max(linalg.length(w - eye), 1e-6), near * 1.001 / max(along, 1e-6))
+					for &v in corners {
+						v = eye + (v - eye) * k
+					}
+				}
+			}
 			base := u32(len(exp.vertices)) - first_v
-			append(&exp.vertices, Vertex{w - rx - uy, cam_back, {0, 0}, {}}, Vertex{w + rx - uy, cam_back, {1, 0}, {}}, Vertex{w + rx + uy, cam_back, {1, 1}, {}}, Vertex{w - rx + uy, cam_back, {0, 1}, {}})
+			append(&exp.vertices, Vertex{corners[0], cam_back, {0, 0}, {}}, Vertex{corners[1], cam_back, {1, 0}, {}}, Vertex{corners[2], cam_back, {1, 1}, {}}, Vertex{corners[3], cam_back, {0, 1}, {}})
 			append(&exp.indices, base, base + 1, base + 2, base, base + 2, base + 3)
 			append(&exp.sprite_rows, p.color)
-			r_max = max(r_max, linalg.length(w) + half * 1.5)
+			for v in corners {
+				r_max = max(r_max, linalg.length(v))
+			}
 		}
 		append(&exp.geos, Geometry{first_vertex = first_v, vertex_count = u32(len(exp.vertices)) - first_v, first_index = first_i, index_count = u32(len(exp.indices)) - first_i, mode = .Sprites, sprite_table = first_row, radius = r_max})
 		// Unlit, always blended (each particle's own opacity) or added.
@@ -1222,6 +1256,20 @@ point_hidden :: proc "contextless" (c: Camera, depths: []f32, width, height: int
 	return view_depth(c, farthest) + bias < point * (1 - 1e-5)
 }
 
+// The frame's depth (`depths`: software_depth's, `width x height`) as the
+// host's RGBA16F image (`out`, 4 halves per pixel, rows from the top), as
+// `o3d_sdlgpu.record_depth_into` draws it: rgb the distance along camera
+// `c`'s axis (`view_depth`, world units) and a 1 where something was drawn;
+// rgb `far` and a 0 where nothing was.
+depth_image :: proc "contextless" (c: Camera, depths: []f32, width, height: int, far: f32, out: []f16) {
+	n := min(width * height, len(depths), len(out) / 4)
+	for i in 0 ..< n {
+		d := depths[i]
+		v := f16(view_depth(c, d)) if d < 1 else f16(far)
+		out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = v, v, v, 1 if d < 1 else 0
+	}
+}
+
 // The order to draw in: the draws that can be seen (with geometry, and a
 // compiled shader if they ask for one, the bounding sphere at least partly
 // in the view), the opaque ones as listed, then the blended ones farthest
@@ -1419,6 +1467,8 @@ Shading_Flag :: enum u8 {
 	// faded by `softness` against the frame's depth.
 	Sprite,
 	Additive,
+	// The colour map's colour is premultiplied by its alpha.
+	Premultiplied,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1482,6 +1532,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		}
 		if has_tex(textures, m.color_map) {
 			f += {.Color_Map}
+			if .Premultiplied_Color_Map in m.flags {
+				f += {.Premultiplied}
+			}
 		}
 		if has_tex(textures, m.normal_map) && .Basic not_in m.flags {
 			f += {.Normal_Map}

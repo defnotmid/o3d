@@ -35,10 +35,16 @@ BG_VERT_SPV :: #load("../shaders/background.vert.spv")
 BG_FRAG_SPV :: #load("../shaders/background.frag.spv")
 BG_VERT_MSL :: #load("../shaders/background.vert.msl")
 BG_FRAG_MSL :: #load("../shaders/background.frag.msl")
+DEPTH_VERT_SPV :: #load("../shaders/depth.vert.spv")
+DEPTH_FRAG_SPV :: #load("../shaders/depth.frag.spv")
+DEPTH_VERT_MSL :: #load("../shaders/depth.vert.msl")
+DEPTH_FRAG_MSL :: #load("../shaders/depth.frag.msl")
 
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
 // The shadow map holds depth as a colour, so every backend can sample it.
 SHADOW_FORMAT :: sdl.GPUTextureFormat.R32_FLOAT
+// The host's image of the frame's depth as distance (`record_depth_into`).
+DEPTH_IMAGE_FORMAT :: sdl.GPUTextureFormat.R16G16B16A16_FLOAT
 
 // A GPU copy of one of `Geometries`' shared arrays: the first `uploaded`
 // bytes are on the GPU; growing past `capacity` makes a new buffer.
@@ -69,6 +75,9 @@ GPU :: struct {
 	sprite_frag:              ^sdl.GPUShader,
 	sprite_pipelines:         [o3d.Side][2]^sdl.GPUGraphicsPipeline,
 	bg_pipeline:              ^sdl.GPUGraphicsPipeline,
+	// The frame's depth as distance into the host's image.
+	depth_vert, depth_frag:   ^sdl.GPUShader,
+	depth_pipeline:           ^sdl.GPUGraphicsPipeline,
 	// The multisampled colour and depth targets, at `size`.
 	// The frame's targets, at `capacity`: a frame draws into their top-left
 	// width x height and is copied out, so frames of other sizes (several
@@ -201,13 +210,14 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	}
 	// slangc names the SPIR-V entry points "main" and keeps the names for Metal.
 	formats := sdl.GetGPUShaderFormats(g.device)
-	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code, curves_vert_code, curves_code, shadow_curves_code, sprite_code: []u8
+	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code, curves_vert_code, curves_code, shadow_curves_code, sprite_code, depth_vert_code, depth_frag_code: []u8
 	format: sdl.GPUShaderFormat
 	vs_entry, skinned_vs_entry, fs_entry, shadow_entry, curves_vs_entry, curves_entry, shadow_curves_entry, sprite_entry: cstring
 	switch {
 	case .SPIRV in formats:
 		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_SPV, SKINNED_VERT_SPV, FRAG_SPV, SHADOW_SPV
 		bg_vert_code, bg_frag_code = BG_VERT_SPV, BG_FRAG_SPV
+		depth_vert_code, depth_frag_code = DEPTH_VERT_SPV, DEPTH_FRAG_SPV
 		curves_vert_code, curves_code, shadow_curves_code, sprite_code = CURVES_VERT_SPV, CURVES_FRAG_SPV, SHADOW_CURVES_SPV, SPRITE_FRAG_SPV
 		format = {.SPIRV}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "main", "main", "main", "main"
@@ -215,6 +225,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	case .MSL in formats:
 		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_MSL, SKINNED_VERT_MSL, FRAG_MSL, SHADOW_MSL
 		bg_vert_code, bg_frag_code = BG_VERT_MSL, BG_FRAG_MSL
+		depth_vert_code, depth_frag_code = DEPTH_VERT_MSL, DEPTH_FRAG_MSL
 		curves_vert_code, curves_code, shadow_curves_code, sprite_code = CURVES_VERT_MSL, CURVES_FRAG_MSL, SHADOW_CURVES_MSL, SPRITE_FRAG_MSL
 		format = {.MSL}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "vs_main", "vs_skinned", "fs_main", "fs_shadow"
@@ -232,7 +243,9 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 	g.shadow_curves_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_curves_code), code = raw_data(shadow_curves_code), entrypoint = shadow_curves_entry, format = format, stage = .FRAGMENT, num_samplers = 2, num_storage_buffers = 1, num_uniform_buffers = 1})
 	g.bg_vert = sdl.CreateGPUShader(g.device, {code_size = len(bg_vert_code), code = raw_data(bg_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
 	g.bg_frag = sdl.CreateGPUShader(g.device, {code_size = len(bg_frag_code), code = raw_data(bg_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
-	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.curves_vert == nil || g.curves_frag == nil || g.sprite_frag == nil || g.shadow_curves_frag == nil || g.bg_vert == nil || g.bg_frag == nil {
+	g.depth_vert = sdl.CreateGPUShader(g.device, {code_size = len(depth_vert_code), code = raw_data(depth_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX})
+	g.depth_frag = sdl.CreateGPUShader(g.device, {code_size = len(depth_frag_code), code = raw_data(depth_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
+	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.curves_vert == nil || g.curves_frag == nil || g.sprite_frag == nil || g.shadow_curves_frag == nil || g.bg_vert == nil || g.bg_frag == nil || g.depth_vert == nil || g.depth_frag == nil {
 		return .Shader
 	}
 	g.depth_format = .D32_FLOAT
@@ -262,7 +275,8 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 		}
 	}
 	g.bg_pipeline = make_background_pipeline(g)
-	if g.bg_pipeline == nil {
+	g.depth_pipeline = make_depth_image_pipeline(g)
+	if g.bg_pipeline == nil || g.depth_pipeline == nil {
 		return .Shader
 	}
 	g.shadow_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .NEAREST, mag_filter = .NEAREST, mipmap_mode = .NEAREST, address_mode_u = .CLAMP_TO_EDGE, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE})
@@ -351,6 +365,9 @@ destroy :: proc(g: ^GPU) {
 	if g.bg_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(g.device, g.bg_pipeline)
 	}
+	if g.depth_pipeline != nil {
+		sdl.ReleaseGPUGraphicsPipeline(g.device, g.depth_pipeline)
+	}
 	release_targets(g)
 	for p in g.shadow_pipelines {
 		if p != nil {
@@ -373,7 +390,7 @@ destroy :: proc(g: ^GPU) {
 	if g.dummy_shadow != nil {
 		sdl.ReleaseGPUTexture(g.device, g.dummy_shadow)
 	}
-	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.sprite_frag, g.shadow_curves_frag}) {
+	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.sprite_frag, g.shadow_curves_frag, g.depth_vert, g.depth_frag}) {
 		if sh != nil {
 			sdl.ReleaseGPUShader(g.device, sh)
 		}
@@ -421,6 +438,11 @@ texture_set_external :: proc(g: ^GPU, textures: ^o3d.Textures, id: o3d.Texture_I
 // A texture to render into (and sample or read back).
 target :: proc(g: ^GPU, width, height: u32) -> ^sdl.GPUTexture {
 	return sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
+}
+
+// A texture for `record_depth_into` (RGBA16F; to sample or read back).
+depth_image_target :: proc(g: ^GPU, width, height: u32) -> ^sdl.GPUTexture {
+	return sdl.CreateGPUTexture(g.device, {type = .D2, format = DEPTH_IMAGE_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 }
 
 // The standard material's vertex shader reads every attribute.
@@ -499,6 +521,22 @@ make_background_pipeline :: proc(g: ^GPU) -> ^sdl.GPUGraphicsPipeline {
 		multisample_state = {sample_count = g.samples},
 		depth_stencil_state = {compare_op = .ALWAYS, enable_depth_test = false, enable_depth_write = false},
 		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
+	}
+	return sdl.CreateGPUGraphicsPipeline(g.device, info)
+}
+
+// The frame's depth as distance into the host's RGBA16F image: 3 vertices
+// via SV_VertexID, single-sampled, no depth target.
+@(private = "file")
+make_depth_image_pipeline :: proc(g: ^GPU) -> ^sdl.GPUGraphicsPipeline {
+	color := sdl.GPUColorTargetDescription{format = DEPTH_IMAGE_FORMAT}
+	info := sdl.GPUGraphicsPipelineCreateInfo {
+		vertex_shader = g.depth_vert,
+		fragment_shader = g.depth_frag,
+		primitive_type = .TRIANGLELIST,
+		rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
+		multisample_state = {sample_count = ._1},
+		target_info = {color_target_descriptions = &color, num_color_targets = 1},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
 }

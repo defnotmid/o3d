@@ -759,6 +759,37 @@ job_depth :: proc "contextless" (job: ^Job) -> ^sdl.GPUTexture {
 	return job.depth_map if job.depth else nil
 }
 
+// Records into `cmd` (after `record` of the same job, in the same command
+// buffer) the frame's depth as distance into the host's `target`: an
+// RGBA16F texture (`DEPTH_IMAGE_FORMAT`, `.COLOR_TARGET` usage, the
+// render's `width x height` at its top left), its rgb the distance along
+// the camera's axis (`o3d.view_depth`, world units) and a 1 where something
+// was drawn; rgb `far` and a 0 where nothing was. `o3d.depth_image` makes
+// the software renderer's. `.Not_Prepared` for a render without
+// `Scene.depth`.
+record_depth_into :: proc(g: ^GPU, job: ^Job, target: ^sdl.GPUTexture, far: f32, cmd: ^sdl.GPUCommandBuffer) -> o3d.Error {
+	if !job.depth || job.depth_map == nil || target == nil {
+		return .Not_Prepared
+	}
+	color := sdl.GPUColorTargetInfo{texture = target, load_op = .DONT_CARE, store_op = .STORE}
+	pass := sdl.BeginGPURenderPass(cmd, &color, 1, nil)
+	defer sdl.EndGPURenderPass(pass)
+	w, h := job.depth_size.x, job.depth_size.y
+	sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(w), h = f32(h), min_depth = 0, max_depth = 1})
+	sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(w), h = i32(h)})
+	sdl.BindGPUGraphicsPipeline(pass, g.depth_pipeline)
+	binding := sdl.GPUTextureSamplerBinding{texture = job.depth_map, sampler = g.shadow_sampler}
+	sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
+	fp := job.lighting.frame_params
+	params := struct {
+		params: [4]f32,
+		size:   [4]f32,
+	}{{fp.z, fp.w, far, f32(job.lighting.env_flags.y)}, {f32(w), f32(h), 0, 0}}
+	sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	return nil
+}
+
 // `job_depth` of the GPU's own job (`render`).
 depth :: proc "contextless" (g: ^GPU) -> ^sdl.GPUTexture {
 	return job_depth(&g.job)
@@ -776,7 +807,23 @@ read_depth :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height: u32, allocator 
 
 // The texture's pixels (RGBA8 premultiplied), for tests and saving.
 read :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height: u32, allocator := context.allocator) -> (pixels: []u8, err: o3d.Error) {
-	size := width * height * 4
+	return download(g, tex, width, height, 4, allocator)
+}
+
+// A `record_depth_into` image's values (`width x height` RGBA halves), as
+// `o3d.depth_image` gives the software renderer's.
+read_depth_image :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height: u32, allocator := context.allocator) -> (values: []f16, err: o3d.Error) {
+	if tex == nil {
+		return nil, .Not_Prepared
+	}
+	bytes := download(g, tex, width, height, size_of([4]f16), allocator) or_return
+	return slice.reinterpret([]f16, bytes), nil
+}
+
+// A texture's `width x height` texels of `texel_size` bytes.
+@(private = "file")
+download :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height, texel_size: u32, allocator := context.allocator) -> (pixels: []u8, err: o3d.Error) {
+	size := width * height * texel_size
 	transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .DOWNLOAD, size = size})
 	if transfer == nil {
 		return nil, .Out_Of_Memory

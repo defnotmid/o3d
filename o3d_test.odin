@@ -3,6 +3,7 @@ package o3d
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "core:thread"
@@ -1534,4 +1535,181 @@ test_additive_over_background :: proc(t: ^testing.T) {
 		want := [4]u8{255, 250, 225, 255} if n == 1 else {255, 255, 255, 255}
 		testing.expectf(t, c == want, "%d added over the sky: %v, want %v", n, c, want)
 	}
+}
+
+// Labels as particles: an anchor (`Particle.offset`) puts the quad's
+// bottom edge on its point, and `depth_offset` brings one inside a wall in
+// front of it, covering the same pixels.
+@(test)
+test_particle_anchor_depth_offset :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 32
+	s: Software
+	defer software_destroy(&s)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	frame :: proc(scene: ^Scene, offset: Vec2, depth_offset: f32, z: f32, g: ^Geometries, wall: bool) {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+		if wall {
+			blue := MATERIAL_DEFAULT
+			blue.flags, blue.color = {.Basic}, {0, 0, 1}
+			append(&scene.draws, Draw{plane(g, 10, 10), compose({0, 0, 0}), blue})
+		}
+		m := MATERIAL_DEFAULT
+		m.color, m.flags, m.depth_offset = {1, 0, 0}, {.No_Size_Attenuation}, depth_offset
+		one := [1]Particle{{position = {0, 0, z}, size = 8, color = {1, 1, 1, 1}, offset = offset}}
+		append(&scene.draws, Draw{scene_particles(scene, one[:]), compose({0, 0, 0}), m})
+	}
+	red :: proc(px: []u8) -> (n: int) {
+		for i := 0; i < len(px); i += 4 {
+			n += 1 if px[i] > 250 && px[i + 2] < 4 else 0
+		}
+		return
+	}
+	// Centred: rows 12 to 19; anchored at its bottom: rows 8 to 15.
+	frame(&scene, {}, 0, 0, &g, false)
+	px := software_render(&s, &scene, &g, nil, W, W)
+	testing.expect(t, at(px, 16, 13).r > 250 && at(px, 16, 18).r > 250 && at(px, 16, 9).r == 0, "centred on its point")
+	frame(&scene, {0, 0.5}, 0, 0, &g, false)
+	px = software_render(&s, &scene, &g, nil, W, W)
+	testing.expectf(t, at(px, 16, 9).r > 250 && at(px, 16, 14).r > 250 && at(px, 16, 17).r == 0, "its bottom edge on its point: %v %v", at(px, 16, 9), at(px, 16, 17))
+	free_px := red(px)
+	testing.expect_value(t, free_px, 64)
+
+	// A little inside the wall: hidden, and in front of it moved.
+	frame(&scene, {0, 0.5}, 0, -0.05, &g, true)
+	px = software_render(&s, &scene, &g, nil, W, W)
+	testing.expect_value(t, red(px), 0)
+	frame(&scene, {0, 0.5}, 0.2, -0.05, &g, true)
+	px = software_render(&s, &scene, &g, nil, W, W)
+	testing.expect_value(t, red(px), free_px)
+}
+
+// A premultiplied colour map with .Premultiplied_Color_Map draws as its
+// straight one does (one colour, its alpha varying: where colours vary,
+// filtering premultiplied texels is what differs).
+@(test)
+test_premultiplied_color_map :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	straight, premul: [4 * 4 * 4]u8
+	for i in 0 ..< 16 {
+		a := u8(40 + i * 13)
+		c := [3]u8{230, 140, 60}
+		for ch in 0 ..< 3 {
+			straight[i * 4 + ch] = c[ch]
+			premul[i * 4 + ch] = u8((u32(c[ch]) * u32(a) + 127) / 255)
+		}
+		straight[i * 4 + 3], premul[i * 4 + 3] = a, a
+	}
+	ids := [2]Texture_Id{texture_add(&textures, straight[:], 4, 4), texture_add(&textures, premul[:], 4, 4)}
+	W :: 32
+	frames: [2][]u8
+	for id, k in ids {
+		scene: Scene
+		defer scene_destroy(&scene)
+		scene_clear(&scene)
+		scene.camera = {position = {0, 0, 2}, fov = 40, near = 0.1, far = 20}
+		back := MATERIAL_DEFAULT
+		back.flags, back.color = {.Basic}, {0.2, 0.6, 0.3}
+		append(&scene.draws, Draw{plane(&g, 4, 4), compose({0, 0, -0.5}), back})
+		m := MATERIAL_DEFAULT
+		m.flags, m.color_map = {.Basic, .Transparent}, id
+		if k == 1 {
+			m.flags += {.Premultiplied_Color_Map}
+		}
+		append(&scene.draws, Draw{plane(&g, 1.2, 1.2), compose({0, 0, 0}), m})
+		s: Software
+		defer software_destroy(&s)
+		px := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+		frames[k] = make([]u8, len(px), context.temp_allocator)
+		copy(frames[k], px)
+	}
+	worst := 0
+	for b, i in frames[0] {
+		worst = max(worst, abs(int(b) - int(frames[1][i])))
+	}
+	// Rounding: 8-bit premultiplied texels lose up to half a level / alpha.
+	testing.expectf(t, worst <= 3, "differs by %d", worst)
+	testing.expect(t, frames[0][(16 * W + 16) * 4] > 100, "the map is drawn")
+}
+
+// The host's pixels bound to an external texture (software_set_external)
+// draw as the same image uploaded; unbound, as no map.
+@(test)
+test_software_external :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	TW :: 8
+	px: [TW * TW * 4]u8
+	for y in 0 ..< TW {
+		for x in 0 ..< TW {
+			i := (y * TW + x) * 4
+			px[i], px[i + 1], px[i + 2], px[i + 3] = u8(x * 32), u8(y * 32), u8(255 - (x ~ y) * 32), u8(255 - x * 20)
+		}
+	}
+	images, externals: Textures
+	defer textures_destroy(&images)
+	defer textures_destroy(&externals)
+	image_id := texture_add(&images, px[:], TW, TW)
+	external_id := texture_add_external(&externals, TW, TW)
+	W :: 48
+	s: Software
+	defer software_destroy(&s)
+	frame :: proc(s: ^Software, g: ^Geometries, textures: ^Textures, id: Texture_Id) -> []u8 {
+		scene: Scene
+		defer scene_destroy(&scene)
+		scene_clear(&scene)
+		scene.camera = {position = {0, 0, 2}, fov = 40, near = 0.1, far = 20}
+		m := MATERIAL_DEFAULT
+		m.flags, m.color_map = {.Basic, .Transparent}, id
+		append(&scene.draws, Draw{plane(g, 1.2, 1.2), compose({0, 0, 0}, {0, 0.3, 0}), m})
+		out := software_render(s, &scene, g, nil, W, W, nil, textures)
+		frame := make([]u8, len(out), context.temp_allocator)
+		copy(frame, out)
+		return frame
+	}
+	plain := frame(&s, &g, nil, 0)
+	image := frame(&s, &g, &images, image_id)
+	unbound := frame(&s, &g, &externals, external_id)
+	software_set_external(&s, external_id, px[:], TW, TW)
+	bound := frame(&s, &g, &externals, external_id)
+	software_set_external(&s, external_id, nil, 0, 0)
+	unbound_again := frame(&s, &g, &externals, external_id)
+	testing.expect(t, !slice.equal(image, plain), "the image draws")
+	testing.expect(t, slice.equal(bound, image), "bound: as the image")
+	testing.expect(t, slice.equal(unbound, plain) && slice.equal(unbound_again, plain), "unbound: as no map")
+}
+
+// depth_image: distance along the camera's axis where drawn (a 1), the
+// given far where not (a 0).
+@(test)
+test_depth_image :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 40, near = 0.1, far = 50}
+	scene.depth = true
+	m := MATERIAL_DEFAULT
+	m.flags = {.Basic}
+	append(&scene.draws, Draw{plane(&g, 1, 1), compose({0, 0, 1.5}), m})
+	W :: 32
+	s: Software
+	defer software_destroy(&s)
+	software_render(&s, &scene, &g, nil, W, W)
+	out := make([]f16, W * W * 4, context.temp_allocator)
+	depth_image(scene.camera, software_depth(&s), W, W, 99, out)
+	c := (16 * W + 16) * 4
+	testing.expectf(t, abs(f32(out[c]) - 2.5) < 2e-3 && out[c + 3] == 1, "the plane 2.5 away: %v", out[c:][:4])
+	testing.expectf(t, out[0] == 99 && out[1] == 99 && out[3] == 0, "nothing: far, a 0: %v", out[:4])
 }

@@ -102,6 +102,24 @@ test_curve_shadow_matches_software :: proc(t: ^testing.T) {expect_parity(t, "cur
 @(test)
 test_text_matches_software :: proc(t: ^testing.T) {expect_parity(t, "text")}
 
+// Labels as particles: behind a cut-out net, pinned before a wall by
+// depth_offset, anchored by their bottom edge; a premultiplied panel.
+@(test)
+test_labels_match_software :: proc(t: ^testing.T) {expect_parity(t, "labels")}
+
+// The frame's depth as distance into the host's image, as o3d.depth_image
+// makes the software renderer's.
+@(test)
+test_depth_image :: proc(t: ^testing.T) {
+	g: GPU
+	if !test_gpu(t, &g) {
+		return
+	}
+	defer destroy(&g)
+	err := depth_image_check(&g)
+	testing.expectf(t, err == "", "%s", err)
+}
+
 // A host's GPU texture bound to an external texture draws as the same
 // pixels uploaded; unbound, or bound for another table, as no map.
 @(test)

@@ -1,0 +1,63 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 13 "depth.slang"
+struct vertexOutput_0
+{
+    float4 output_0 [[position]];
+};
+
+
+#line 13
+[[vertex]] vertexOutput_0 vs_main(uint vid_0 [[vertex_id]])
+{
+
+#line 13
+    float _S1;
+    if(vid_0 == 1U)
+    {
+
+#line 14
+        _S1 = 3.0f;
+
+#line 14
+    }
+    else
+    {
+
+#line 14
+        _S1 = -1.0f;
+
+#line 14
+    }
+
+#line 14
+    float _S2;
+
+#line 14
+    if(vid_0 == 2U)
+    {
+
+#line 14
+        _S2 = 3.0f;
+
+#line 14
+    }
+    else
+    {
+
+#line 14
+        _S2 = -1.0f;
+
+#line 14
+    }
+
+#line 14
+    vertexOutput_0 _S3 = { float4(_S1, _S2, 0.0f, 1.0f) };
+
+#line 14
+    return _S3;
+}
+

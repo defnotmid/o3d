@@ -55,6 +55,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"hdr_environment", 200, 150, build_hdr_environment},
 	{"shadow_only", 200, 150, build_shadow_only},
 	{"particles", 240, 180, build_particles},
+	{"labels", 240, 180, build_labels},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -655,6 +656,66 @@ build_particles :: proc(a: ^Parity_Assets) -> string {
 	return ""
 }
 
+// Labels as particles (pixel-sized, a premultiplied panel): one behind a
+// cut-out net (seen through its gaps), one pinned a little inside a wall
+// (`depth_offset` brings it in front), one anchored by its bottom edge on
+// the wall.
+@(private = "file")
+build_labels :: proc(a: ^Parity_Assets) -> string {
+	T :: 64
+	label_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			// A rounded panel in the middle rows, its edge a pixel and a
+			// half soft, with lighter bars of text on it.
+			q := [2]f32{abs(f32(x) + 0.5 - T / 2) - 26, abs(f32(y) + 0.5 - T / 2) - 10}
+			d := math.sqrt(max(q.x, 0) * max(q.x, 0) + max(q.y, 0) * max(q.y, 0)) + min(max(q.x, q.y), 0) - 4
+			cover := clamp(0.5 - d / 1.5, 0, 1) * 0.92
+			text := (y == 26 || y == 27 || y == 36 || y == 37) && x > 14 && x < 50 && (x / 5) % 3 != 2
+			c := [3]f32{0.95, 0.95, 0.9} if text else {0.12, 0.2, 0.35}
+			for ch in 0 ..< 3 {
+				label_px[i + ch] = u8(math.round(c[ch] * cover * 255))
+			}
+			label_px[i + 3] = u8(math.round(cover * 255))
+		}
+	}
+	label := o3d.texture_add(&a.textures, label_px[:], T, T)
+	N :: 32
+	net_px: [N * N * 4]u8
+	for y in 0 ..< N {
+		for x in 0 ..< N {
+			i := (y * N + x) * 4
+			wire := u8(255 if x % 8 < 2 || y % 8 < 2 else 0)
+			net_px[i], net_px[i + 1], net_px[i + 2], net_px[i + 3] = 200, 200, 210, wire
+		}
+	}
+	net_tex := o3d.texture_add(&a.textures, net_px[:], N, N)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0.3, 1.1, 4}, target = {0, 0.9, 0}, fov = 45, near = 0.1, far = 30}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.2, position = {1, 3, 4}})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
+	wall := o3d.MATERIAL_DEFAULT
+	wall.color, wall.roughness = {0.6, 0.55, 0.5}, 0.8
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 4, 2.4, 0.2), o3d.compose({0, 1, -0.6}), wall})
+	net := o3d.MATERIAL_DEFAULT
+	net.metalness, net.roughness = 0.8, 0.4
+	net.flags, net.side, net.alpha_cutoff, net.color_map = {.Alpha_Mask}, .Double, 0.5, net_tex
+	net.color_transform = {scale = {3, 2}}
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 1.6, 1.1), o3d.compose({-0.8, 1.1, 0.7}), net})
+	labels := [3]o3d.Particle{
+		{position = {-0.8, 1.15, 0.2}, size = 56, color = {1, 1, 1, 1}},
+		{position = {0.9, 1.5, -0.53}, size = 56, color = {1, 0.9, 0.8, 1}},
+		{position = {0.9, 0.45, -0.5}, size = 56, color = {0.8, 1, 0.9, 0.9}, offset = {0, 0.5}, rotation = 0.15},
+	}
+	m := o3d.MATERIAL_DEFAULT
+	m.color_map, m.depth_offset = label, 0.1
+	m.flags = {.No_Size_Attenuation, .Premultiplied_Color_Map}
+	append(&s.draws, o3d.Draw{o3d.scene_particles(s, labels[:]), o3d.compose({0, 0, 0}), m})
+	return ""
+}
+
 // An animated glTF 2.0 model at t = 0.35.
 @(private = "file")
 build_gltf :: proc(a: ^Parity_Assets) -> string {
@@ -1168,6 +1229,88 @@ build_text :: proc(a: ^Parity_Assets) -> string {
 	mapped := o3d.MATERIAL_DEFAULT
 	mapped.color_map, mapped.flags = o3d.texture_add(&a.textures, px[:], T, T), {.Transparent}
 	append(&a.scene.draws, o3d.Draw{font_run, o3d.compose({-0.3, 0.95, 0.3}, {}, {0.6, 0.6, 0.6}), mapped})
+	return ""
+}
+
+// The frame's depth as distance (`record_depth_into`, recorded after the
+// render in its command buffer) against `o3d.depth_image` of the software
+// renderer's, over the depth check's cases and the labels: drawn where the
+// software renderer drew and within 1e-3 of its distance (relatively), and
+// the given far where nothing was; at most 1 in 2000 texels may differ (as
+// in `depth_check`).
+depth_image_check :: proc(g: ^GPU) -> (err: string) {
+	NAMES :: [?]string{"shadow", "alpha_map", "curves", "labels"}
+	FAR :: 1000
+	for name in NAMES {
+		c: Parity_Case
+		for pc in PARITY_CASES {
+			if pc.name == name {
+				c = pc
+			}
+		}
+		a: Parity_Assets
+		defer parity_assets_destroy(&a)
+		if e := c.build(&a); e != "" {
+			return fmt.tprintf("depth image: %s: %s", name, e)
+		}
+		a.scene.depth = true
+		w, h := u32(c.width), u32(c.height)
+		out := target(g, w, h)
+		defer sdl.ReleaseGPUTexture(g.device, out)
+		img := depth_image_target(g, w, h)
+		defer sdl.ReleaseGPUTexture(g.device, img)
+		cmd := sdl.AcquireGPUCommandBuffer(g.device)
+		if e := render(g, &a.scene, &a.geos, &a.shaders, out, w, h, cmd, &a.textures); e != nil {
+			_ = sdl.CancelGPUCommandBuffer(cmd)
+			return fmt.tprintf("depth image: %s: render: %v", name, e)
+		}
+		if e := record_depth_into(g, &g.job, img, FAR, cmd); e != nil {
+			_ = sdl.CancelGPUCommandBuffer(cmd)
+			return fmt.tprintf("depth image: %s: %v", name, e)
+		}
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+		if fence == nil {
+			return "depth image: submit failed"
+		}
+		_ = sdl.WaitForGPUFences(g.device, true, &fence, 1)
+		sdl.ReleaseGPUFence(g.device, fence)
+		got, rerr := read_depth_image(g, img, w, h)
+		defer delete(got)
+		if rerr != nil || len(got) != int(w * h * 4) {
+			return fmt.tprintf("depth image: %s: no GPU image", name)
+		}
+		sw: o3d.Software
+		defer o3d.software_destroy(&sw)
+		o3d.software_render(&sw, &a.scene, &a.geos, &a.shaders, int(w), int(h), nil, &a.textures)
+		want := make([]f16, w * h * 4, context.temp_allocator)
+		o3d.depth_image(a.scene.camera, o3d.software_depth(&sw), int(w), int(h), FAR, want)
+		differ, drawn := 0, 0
+		for i in 0 ..< int(w * h) {
+			gv, wv := got[i * 4:][:4], want[i * 4:][:4]
+			drawn += 1 if wv[3] == 1 else 0
+			same := gv[3] == wv[3] && abs(f32(gv[0]) - f32(wv[0])) <= 1e-3 * f32(wv[0]) && gv[0] == gv[1] && gv[0] == gv[2]
+			differ += 0 if same else 1
+		}
+		if drawn == 0 {
+			return fmt.tprintf("depth image: %s: nothing drawn", name)
+		}
+		if f64(differ) / f64(w * h) > 1.0 / 2000 {
+			return fmt.tprintf("depth image: %s: %d of %d texels differ", name, differ, w * h)
+		}
+	}
+	a: Parity_Assets
+	defer parity_assets_destroy(&a)
+	build_standard(&a)
+	img := depth_image_target(g, 16, 16)
+	defer sdl.ReleaseGPUTexture(g.device, img)
+	out := target(g, 16, 16)
+	defer sdl.ReleaseGPUTexture(g.device, out)
+	if render(g, &a.scene, &a.geos, &a.shaders, out, 16, 16) != nil {
+		return "depth image: render without depth"
+	}
+	if e := record_depth_into(g, &g.job, img, FAR, nil); e != .Not_Prepared {
+		return fmt.tprintf("depth image: without Scene.depth (%v)", e)
+	}
 	return ""
 }
 
