@@ -1435,8 +1435,8 @@ shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, light
 	}
 	if env.radiance != 0 {
 		r := 2 * linalg.dot(n, v) * n - v
-		irr := linear(sample_lod(env.textures, env.irradiance, equirect_uv(n), 0).rgb)
-		rad := linear(sample_lod(env.textures, env.radiance, equirect_uv(r), roughness * env.max_lod).rgb)
+		irr := sample_lod_linear(env.textures, env.irradiance, equirect_uv(n), 0)
+		rad := sample_lod_linear(env.textures, env.radiance, equirect_uv(r), roughness * env.max_lod)
 		c0 :: Vec4{-1, -0.0275, -0.572, 0.022}
 		c1 :: Vec4{1, 0.0425, 1.04, -0.04}
 		rv := roughness * c0 + c1

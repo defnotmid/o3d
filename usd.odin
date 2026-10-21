@@ -1236,6 +1236,9 @@ channel_texture :: proc(b: ^Usd_Builder, id: Texture_Id, channel: string, reads:
 		return derived
 	}
 	tex, _ := texture_get(b.textures, id)
+	if tex.hdr {
+		return id
+	}
 	n := int(tex.width * tex.height)
 	grey := make([]u8, n * 4, context.temp_allocator)
 	for texel, i in b.textures.texels[tex.mips[0]:][:n] {

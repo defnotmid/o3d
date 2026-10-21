@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 20 "background.slang"
+#line 3343 "core.meta.slang"
 struct vs_main_Result_0
 {
     float4 position_0 [[position]];
@@ -11,28 +11,28 @@ struct vs_main_Result_0
 };
 
 
-#line 20
+#line 3343
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 20
+#line 3343
 struct Background_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_vp_0;
 };
 
 
-#line 16
+#line 17 "background.slang"
 struct KernelContext_0
 {
     Background_VS_natural_0 constant* bg_vs_0;
 };
 
 
-#line 20
+#line 21
 struct VS_Out_0
 {
     float4 position_1;
@@ -40,80 +40,80 @@ struct VS_Out_0
 };
 
 
-#line 20
+#line 21
 [[vertex]] vs_main_Result_0 vs_main(uint vid_0 [[vertex_id]], Background_VS_natural_0 constant* bg_vs_1 [[buffer(0)]])
 {
 
-#line 20
+#line 21
     thread KernelContext_0 kernelContext_0;
 
-#line 20
+#line 21
     (&kernelContext_0)->bg_vs_0 = bg_vs_1;
 
-#line 20
+#line 21
     float _S1;
 
-#line 27
+#line 28
     if(vid_0 == 1U)
     {
 
-#line 27
+#line 28
         _S1 = 3.0f;
 
-#line 27
+#line 28
     }
     else
     {
 
-#line 27
+#line 28
         _S1 = -1.0f;
 
-#line 27
+#line 28
     }
 
-#line 27
+#line 28
     float _S2;
 
-#line 27
+#line 28
     if(vid_0 == 2U)
     {
 
-#line 27
+#line 28
         _S2 = 3.0f;
 
-#line 27
+#line 28
     }
     else
     {
 
-#line 27
+#line 28
         _S2 = -1.0f;
 
-#line 27
+#line 28
     }
 
-#line 27
+#line 28
     float2 ndc_0 = float2(_S1, _S2);
     float4 p0_0 = (((float4(ndc_0, 0.0f, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(3)]))));
     float4 _S3 = float4(ndc_0, 1.0f, 1.0f);
 
-#line 29
+#line 30
     float4 p1_0 = (((_S3) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(3)]))));
     thread VS_Out_0 o_0;
     (&o_0)->position_1 = _S3;
     (&o_0)->ray_1 = p1_0.xyz / float3(p1_0.w)  - p0_0.xyz / float3(p0_0.w) ;
     VS_Out_0 _S4 = o_0;
 
-#line 33
+#line 34
     thread vs_main_Result_0 _S5;
 
-#line 33
+#line 34
     (&_S5)->position_0 = _S4.position_1;
 
-#line 33
+#line 34
     (&_S5)->ray_0 = _S4.ray_1;
 
-#line 33
+#line 34
     return _S5;
 }
 

@@ -282,6 +282,7 @@ struct pixelInput_0
 struct Background_FS_0
 {
     float4 params_0;
+    uint4 flags_0;
 };
 
 struct KernelContext_0
@@ -292,27 +293,49 @@ struct KernelContext_0
 };
 
 
-#line 37
+#line 38
 [[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S29 [[stage_in]], float4 position_0 [[position]], Background_FS_0 constant* bg_fs_1 [[buffer(0)]], texture2d<float, access::sample> bgMap_texture_1 [[texture(0)]], sampler bgMap_sampler_1 [[sampler(0)]])
 {
 
-#line 37
+#line 38
     thread KernelContext_0 kernelContext_0;
 
-#line 37
+#line 38
     (&kernelContext_0)->bg_fs_0 = bg_fs_1;
 
-#line 37
+#line 38
     (&kernelContext_0)->bgMap_texture_0 = bgMap_texture_1;
 
-#line 37
+#line 38
     (&kernelContext_0)->bgMap_sampler_0 = bgMap_sampler_1;
 
-
-    float3 bg_0 = tone_map_0(linear_rgb_0(((bgMap_texture_1).sample((bgMap_sampler_1), (equirect_uv_0(normalize(_S29.ray_0))), level((bg_fs_1->params_0.y)))).xyz) * float3(bg_fs_1->params_0.x) , uint(bg_fs_1->params_0.z), bg_fs_1->params_0.w);
+    float3 bg_0 = ((bgMap_texture_1).sample((bgMap_sampler_1), (equirect_uv_0(normalize(_S29.ray_0))), level((bg_fs_1->params_0.y)))).xyz;
 
 #line 40
-    pixelOutput_0 _S30 = { float4(linear_to_srgb_0(bg_0.x), linear_to_srgb_0(bg_0.y), linear_to_srgb_0(bg_0.z), 1.0f) };
+    float3 bg_1;
+    if((bg_fs_1->flags_0.x) == 0U)
+    {
+
+#line 41
+        bg_1 = linear_rgb_0(bg_0);
+
+#line 41
+    }
+    else
+    {
+
+#line 41
+        bg_1 = bg_0;
+
+#line 41
+    }
+
+
+
+    float3 bg_2 = tone_map_0(bg_1 * float3(bg_fs_1->params_0.x) , uint(bg_fs_1->params_0.z), bg_fs_1->params_0.w);
+
+#line 45
+    pixelOutput_0 _S30 = { float4(linear_to_srgb_0(bg_2.x), linear_to_srgb_0(bg_2.y), linear_to_srgb_0(bg_2.z), 1.0f) };
     return _S30;
 }
 

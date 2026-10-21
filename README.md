@@ -142,6 +142,7 @@ composite over anything.
 geos: o3d.Geometries                       // kept: geometry is made once
 textures: o3d.Textures                     // kept: textures and mipmaps are made once
 albedo, _ := o3d.texture_load(&textures, "brick.png")
+sky, _ := o3d.texture_load(&textures, "sky.hdr")          // Radiance HDR: linear half floats, past 1
 scene: o3d.Scene                           // filled every frame
 o3d.scene_clear(&scene)
 scene.camera = {position = {0, 2, 6}, target = {0, 0.5, 0}, fov = 40, near = 0.1, far = 100}
@@ -439,6 +440,14 @@ includes ovg's `shaders/curves.slang` from there too.
   both renderers. `environment_prefilter(textures, id)` makes them; it is
   heavy, so a host calls it at load (a render that meets a texture without
   them makes them then, in frame time); `texture_environment` looks them up.
+  An HDR environment or background (a Radiance `.hdr` through
+  `texture_decode` / `texture_load`, by odecs, or `texture_add_hdr` from
+  linear floats) keeps its range: its texels are linear half floats
+  (`Textures.hdr_texels`, `Texture.hdr`), its mipmaps and derived maps are
+  made in float, both renderers read it linear (RGBA16F on the GPU), so a
+  sun far past 1 lights as one and tone mapping takes it down. Standard
+  material maps read an HDR texture's values as they would encoded colour;
+  HDR is for environments, backgrounds and ShaderMaterials.
   Changing one means changing the other; the tests compare the two
   renderers.
 - **External textures:** `texture_add_external` adds a `Textures` entry

@@ -160,6 +160,8 @@ Lighting_Uniforms :: struct {
 	shadow_params: [o3d.MAX_SHADOWS][4]f32,
 	// Environment intensity (0: no environment), max radiance mip level, tone exposure, fog density.
 	env_params:    [4]f32,
+	// x: the environment's maps are linear (HDR), not sRGB-encoded.
+	env_flags:     [4]u32,
 	fog_color:     [4]f32,
 	fog_params:    [4]f32,
 	lights:        [o3d.MAX_LIGHTS]Light_Uniforms,

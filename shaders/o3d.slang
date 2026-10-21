@@ -105,6 +105,8 @@ struct Lighting {
     float4x4 shadowMatrix[MAX_SHADOWS];
     float4 shadowParams[MAX_SHADOWS];
     float4 envParams;
+    // x: the environment's maps are linear (HDR), not sRGB-encoded.
+    uint4 envFlags;
     float4 fogColor;
     float4 fogParams;
     Light lights[MAX_LIGHTS];
@@ -399,8 +401,12 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
     }
     if (lighting.envParams.x > 0) {
         float3 r = 2 * dot(n, v) * n - v;
-        float3 irr = linear_rgb(envIrradianceMap.SampleLevel(equirect_uv(n), 0).rgb);
-        float3 rad = linear_rgb(envRadianceMap.SampleLevel(equirect_uv(r), roughness * lighting.envParams.y).rgb);
+        float3 irr = envIrradianceMap.SampleLevel(equirect_uv(n), 0).rgb;
+        float3 rad = envRadianceMap.SampleLevel(equirect_uv(r), roughness * lighting.envParams.y).rgb;
+        if (lighting.envFlags.x == 0u) {
+            irr = linear_rgb(irr);
+            rad = linear_rgb(rad);
+        }
         float4 c0 = float4(-1, -0.0275, -0.572, 0.022);
         float4 c1 = float4(1, 0.0425, 1.04, -0.04);
         float4 rv = roughness * c0 + c1;

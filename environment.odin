@@ -113,7 +113,46 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 	if src_tex.env_radiance != 0 && src_tex.env_irradiance != 0 {
 		return src_tex.env_radiance, src_tex.env_irradiance, true
 	}
+	// An HDR source keeps its range: linear half floats throughout.
+	rad_tex, irr_tex: Texture
+	if src_tex.hdr {
+		rad_tex, irr_tex = prefilter(&t.hdr_texels, src_tex)
+	} else {
+		rad_tex, irr_tex = prefilter(&t.texels, src_tex)
+	}
+	append(&t.list, rad_tex)
+	radiance = Texture_Id(len(t.list))
+	append(&t.list, irr_tex)
+	irradiance = Texture_Id(len(t.list))
+	t.list[id - 1].env_radiance = radiance
+	t.list[id - 1].env_irradiance = irradiance
+	return radiance, irradiance, true
+}
 
+// A texel's linear colour, and one stored: sRGB-encoded bytes, or linear
+// half floats.
+@(private = "file")
+env_fetch :: #force_inline proc "contextless" (mip: []$T, w, h: int, uv: Vec2) -> Vec3 {
+	when T == [4]f16 {
+		return sample_mip_hdr(mip, w, h, uv, true).rgb
+	} else {
+		return linear(sample_mip(mip, w, h, uv, true).rgb)
+	}
+}
+
+@(private = "file")
+env_store :: #force_inline proc "contextless" (dst: ^$T, c: Vec3) {
+	when T == [4]f16 {
+		dst^ = {f16(min(c.r, 65504)), f16(min(c.g, 65504)), f16(min(c.b, 65504)), 1}
+	} else {
+		dst^ = {srgb8(c.r), srgb8(c.g), srgb8(c.b), 255}
+	}
+}
+
+// The radiance pyramid and irradiance texture of `src_tex`, laid out and
+// filled at the end of its texel table.
+@(private = "file")
+prefilter :: proc(table: ^[dynamic]$T, src_tex: Texture) -> (rad_tex, irr_tex: Texture) {
 	// Start from the mip of `id` whose width is at most ENV_MAX_WIDTH.
 	base_mip: u32
 	rad_w, rad_h := src_tex.width, src_tex.height
@@ -122,10 +161,11 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 		rad_w, rad_h = max(rad_w >> 1, 1), max(rad_h >> 1, 1)
 	}
 
-	rad_tex := Texture {
+	rad_tex = Texture {
 		width       = rad_w,
 		height      = rad_h,
-		first_texel = u32(len(t.texels)),
+		first_texel = u32(len(table)),
+		hdr         = src_tex.hdr,
 	}
 	mw, mh := rad_w, rad_h
 	rad_total: u32
@@ -142,22 +182,23 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 
 	irr_w, irr_h := min(rad_w, 32), min(rad_h, 16)
 	irr_total := irr_w * irr_h
-	irr_tex := Texture {
+	irr_tex = Texture {
 		width       = irr_w,
 		height      = irr_h,
 		levels      = 1,
+		hdr         = src_tex.hdr,
 		first_texel = rad_tex.first_texel + rad_total,
 		texel_count = irr_total,
 	}
 	irr_tex.mips[0] = irr_tex.first_texel
 
-	table_grow_non_zero(&t.texels, int(irr_tex.first_texel + irr_total))
+	table_grow_non_zero(table, int(irr_tex.first_texel + irr_total))
 
 	// Level 0 of radiance (roughness = 0) is the sharp base equirectangular mip.
 	mem.copy(
-		raw_data(t.texels[rad_tex.mips[0]:]),
-		raw_data(t.texels[src_tex.mips[base_mip]:]),
-		int(rad_w * rad_h) * size_of([4]u8),
+		raw_data(table[rad_tex.mips[0]:]),
+		raw_data(table[src_tex.mips[base_mip]:]),
+		int(rad_w * rad_h) * size_of(T),
 	)
 
 	// Levels 1..levels-1: GGX importance-sampled prefiltering by roughness.
@@ -186,8 +227,8 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 			}
 		}
 
-		prev_mip := t.texels[rad_tex.mips[l - 1]:][:pw * ph]
-		dst_mip := t.texels[rad_tex.mips[l]:][:dw * dh]
+		prev_mip := table[rad_tex.mips[l - 1]:][:pw * ph]
+		dst_mip := table[rad_tex.mips[l]:][:dw * dh]
 		for y in 0 ..< dh {
 			v := 1 - (f32(y) + 0.5) / f32(dh)
 			for x in 0 ..< dw {
@@ -199,12 +240,11 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 				for s_idx in 0 ..< valid_samples {
 					ld := local_dirs[s_idx]
 					dir := tang * ld.x + bitang * ld.y + r * ld.z
-					s := sample_mip(prev_mip, pw, ph, equirect_uv(dir), true)
-					acc += linear(s.rgb) * ld.w
+					acc += env_fetch(prev_mip, pw, ph, equirect_uv(dir)) * ld.w
 					w_sum += ld.w
 				}
 				c := acc / max(w_sum, 1e-6)
-				dst_mip[y * dw + x] = {srgb8(c.r), srgb8(c.g), srgb8(c.b), 255}
+				env_store(&dst_mip[y * dw + x], c)
 			}
 		}
 		pw, ph = dw, dh
@@ -221,8 +261,8 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 	irr_src_level := min(2, int(rad_tex.levels) - 1)
 	irr_sw := int(max(rad_tex.width >> u32(irr_src_level), 1))
 	irr_sh := int(max(rad_tex.height >> u32(irr_src_level), 1))
-	irr_src := t.texels[rad_tex.mips[irr_src_level]:][:irr_sw * irr_sh]
-	irr_dst := t.texels[irr_tex.mips[0]:][:irr_total]
+	irr_src := table[rad_tex.mips[irr_src_level]:][:irr_sw * irr_sh]
+	irr_dst := table[irr_tex.mips[0]:][:irr_total]
 	for y in 0 ..< int(irr_h) {
 		v := 1 - (f32(y) + 0.5) / f32(irr_h)
 		for x in 0 ..< int(irr_w) {
@@ -232,19 +272,12 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 			acc: Vec3
 			for ld in irr_dirs {
 				dir := tang * ld.x + bitang * ld.y + n * ld.z
-				s := sample_mip(irr_src, irr_sw, irr_sh, equirect_uv(dir), true)
-				acc += linear(s.rgb)
+				acc += env_fetch(irr_src, irr_sw, irr_sh, equirect_uv(dir))
 			}
 			c := acc * (1.0 / f32(ENV_IRR_SAMPLES))
-			irr_dst[y * int(irr_w) + x] = {srgb8(c.r), srgb8(c.g), srgb8(c.b), 255}
+			env_store(&irr_dst[y * int(irr_w) + x], c)
 		}
 	}
 
-	append(&t.list, rad_tex)
-	radiance = Texture_Id(len(t.list))
-	append(&t.list, irr_tex)
-	irradiance = Texture_Id(len(t.list))
-	t.list[id - 1].env_radiance = radiance
-	t.list[id - 1].env_irradiance = irradiance
-	return radiance, irradiance, true
+	return
 }

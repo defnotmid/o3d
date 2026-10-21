@@ -11,6 +11,7 @@ struct Background_VS {
 
 struct Background_FS {
     float4 params; // x = intensity, y = lod, z = tone_mapping, w = tone_exposure
+    uint4 flags; // x: the map is linear (HDR), not sRGB-encoded
 };
 
 [[vk::binding(0, 1)]] ConstantBuffer<Background_VS> bg_vs : register(b0, space1);
@@ -36,7 +37,11 @@ VS_Out vs_main(uint vid : SV_VertexID) {
 [shader("fragment")]
 float4 fs_main(VS_Out i) : SV_Target {
     float3 dir = normalize(i.ray);
-    float3 bg = linear_rgb(bgMap.SampleLevel(equirect_uv(dir), bg_fs.params.y).rgb) * bg_fs.params.x;
+    float3 bg = bgMap.SampleLevel(equirect_uv(dir), bg_fs.params.y).rgb;
+    if (bg_fs.flags.x == 0u) {
+        bg = linear_rgb(bg);
+    }
+    bg *= bg_fs.params.x;
     bg = tone_map(bg, uint(bg_fs.params.z), bg_fs.params.w);
     return float4(linear_to_srgb(bg.r), linear_to_srgb(bg.g), linear_to_srgb(bg.b), 1);
 }

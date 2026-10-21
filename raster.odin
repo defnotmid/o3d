@@ -53,7 +53,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 				rem := u32(SAMPLES * 255) - acc[3]
 				if rem > 0 {
 					dir := linalg.normalize(ray0 + f32(x) * ray_step)
-					c := linear(sample_lod(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod).rgb) * job.bg_intensity
+					c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
 					c = tone_map(c, job.tone_mapping, job.tone_exposure)
 					bg := pack(c, 1)
 					bg_rgb := [3]u32{bg & 0xff, (bg >> 8) & 0xff, (bg >> 16) & 0xff}

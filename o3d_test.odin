@@ -1239,3 +1239,46 @@ test_alpha_map_blends :: proc(t: ^testing.T) {
 	c := px[(4 * 8 + 4) * 4:][:4]
 	testing.expectf(t, c[0] > 240 && c[1] < 16 && c[2] < 16, "the red plane behind shows through: %v", c)
 }
+
+// HDR textures: a Radiance file decodes (by odecs) to linear half floats
+// past 1, their mipmaps average in float, an environment's radiance and
+// irradiance keep values past 1, and sampling reads them linear.
+@(test)
+test_hdr_textures :: proc(t: ^testing.T) {
+	textures: Textures
+	defer textures_destroy(&textures)
+	// 2x2 flat RGBE: (1, 0.5, 0.25), then 128, 128, 128 three times.
+	hdr := "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 2\n"
+	data := make([dynamic]u8, context.temp_allocator)
+	append(&data, hdr)
+	append(&data, 128, 64, 32, 129)
+	for _ in 0 ..< 3 {
+		append(&data, 128, 128, 128, 136)
+	}
+	id, ok := texture_decode(&textures, data[:])
+	testing.expect(t, ok, "the .hdr decodes")
+	tex, _ := texture_get(&textures, id)
+	testing.expect(t, tex.hdr && tex.width == 2 && tex.levels == 2, "an HDR texture with its mip")
+	top := textures.hdr_texels[tex.mips[0]]
+	testing.expect_value(t, [3]f32{f32(top.r), f32(top.g), f32(top.b)}, [3]f32{1, 0.5, 0.25})
+	mip := textures.hdr_texels[tex.mips[1]]
+	testing.expect(t, abs(f32(mip.r) - (1 + 3 * 128) / 4.0) < 0.5, "the mip averages in float")
+	// Linear on reading: no sRGB decode.
+	c := sample_lod_linear(&textures, id, {0.25, 0.75}, 0)
+	testing.expect(t, abs(c.r - 1) < 1e-3 && abs(c.b - 0.25) < 1e-3, "the top-left texel, linear")
+
+	// An environment at 100 everywhere: its maps stay at 100.
+	EW, EH :: 16, 8
+	env: [EW * EH * 4]f32
+	for &v in env {
+		v = 100
+	}
+	env_id := texture_add_hdr(&textures, env[:], EW, EH)
+	rad, irr, eok := environment_prefilter(&textures, env_id)
+	testing.expect(t, eok, "prefiltered")
+	rt, _ := texture_get(&textures, rad)
+	it, _ := texture_get(&textures, irr)
+	testing.expect(t, rt.hdr && it.hdr, "HDR maps")
+	testing.expect(t, abs(sample_lod_linear(&textures, irr, {0.5, 0.5}, 0).g - 100) < 0.5, "irradiance 100")
+	testing.expect(t, abs(sample_lod_linear(&textures, rad, {0.3, 0.6}, 3).r - 100) < 0.5, "a rough radiance level 100")
+}

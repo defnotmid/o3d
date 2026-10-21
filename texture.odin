@@ -6,10 +6,11 @@ import "core:mem"
 import "core:os"
 import image "deps:odecs/image"
 
-// Textures: RGBA8 images with their mipmap chains, made once and referred to
-// by id. Every texture's texels across all mip levels live in one shared flat
-// array (`Textures.texels`); a texture is its dimensions, level count and
-// per-level offsets in `texels`. The GPU mirrors the list, uploading new
+// Textures: RGBA8 images (sRGB-encoded colour) or HDR ones (linear,
+// half floats) with their mipmap chains, made once and referred to by id.
+// Every texture's texels across all mip levels live in one shared flat
+// array (`Textures.texels`, or `hdr_texels`); a texture is its dimensions,
+// level count and per-level offsets in it. The GPU mirrors the list, uploading new
 // textures with their mip levels at the start of a frame. An external
 // texture (`texture_add_external`) has no texels: its pixels are a GPU
 // texture the host binds per frame (a video's frames).
@@ -27,16 +28,21 @@ Texture :: struct {
 	env_radiance:             Texture_Id,
 	env_irradiance:           Texture_Id,
 	external:                 bool, // levels 0: bound per frame on the GPU
+	// Texels in `Textures.hdr_texels`: linear, not sRGB-encoded (an
+	// environment or background past 1).
+	hdr:                      bool,
 }
 
 Textures :: struct {
 	generation: Generation, // of these contents, for the GPU's mirror
-	texels: [dynamic][4]u8,
-	list:   [dynamic]Texture,
+	texels:     [dynamic][4]u8,
+	hdr_texels: [dynamic][4]f16,
+	list:       [dynamic]Texture,
 }
 
 textures_destroy :: proc(t: ^Textures) {
 	delete(t.texels)
+	delete(t.hdr_texels)
 	delete(t.list)
 	t^ = {}
 }
@@ -54,19 +60,40 @@ texture_add :: proc(t: ^Textures, pixels: []u8, width, height: int) -> Texture_I
 	if width <= 0 || height <= 0 || len(pixels) < width * height * 4 {
 		return 0
 	}
-	tex := texture_grow(t, width, height)
+	tex := texture_grow(&t.texels, width, height)
 	mem.copy(raw_data(t.texels[tex.first_texel:]), raw_data(pixels), width * height * 4)
 	return texture_finish(t, &tex)
 }
 
-// A texture's levels laid out at the end of `t.texels`, grown once to hold
-// them all; level 0 is for the caller to fill.
+// Adds an HDR image: linear RGBA floats (`width x height`, rows from the
+// top), kept as half floats (past 65504 kept at 65504) with their mipmaps.
+texture_add_hdr :: proc(t: ^Textures, pixels: []f32, width, height: int) -> Texture_Id {
+	if width <= 0 || height <= 0 || len(pixels) < width * height * 4 {
+		return 0
+	}
+	tex := texture_grow(&t.hdr_texels, width, height)
+	tex.hdr = true
+	halves(t.hdr_texels[tex.first_texel:][:width * height], pixels)
+	return texture_finish(t, &tex)
+}
+
 @(private = "file")
-texture_grow :: proc(t: ^Textures, width, height: int) -> Texture {
+halves :: proc "contextless" (dst: [][4]f16, src: []f32) #no_bounds_check {
+	for &px, i in dst {
+		for c in 0 ..< 4 {
+			px[c] = f16(clamp(src[i * 4 + c], -65504, 65504))
+		}
+	}
+}
+
+// A texture's levels laid out at the end of `table` (texels or
+// hdr_texels), grown once to hold them all; level 0 is for the caller.
+@(private = "file")
+texture_grow :: proc(table: ^[dynamic]$T, width, height: int) -> Texture {
 	tex := Texture {
 		width       = u32(width),
 		height      = u32(height),
-		first_texel = u32(len(t.texels)),
+		first_texel = u32(len(table)),
 	}
 	mw, mh := u32(width), u32(height)
 	total: u32
@@ -80,7 +107,7 @@ texture_grow :: proc(t: ^Textures, width, height: int) -> Texture {
 		mw, mh = max(mw >> 1, 1), max(mh >> 1, 1)
 	}
 	tex.texel_count = total
-	table_grow_non_zero(&t.texels, int(tex.first_texel + total))
+	table_grow_non_zero(table, int(tex.first_texel + total))
 	return tex
 }
 
@@ -90,9 +117,11 @@ texture_finish :: proc(t: ^Textures, tex: ^Texture) -> Texture_Id {
 	sw, sh := int(tex.width), int(tex.height)
 	for l in 1 ..< int(tex.levels) {
 		dw, dh := max(sw >> 1, 1), max(sh >> 1, 1)
-		src := t.texels[tex.mips[l - 1]:][:sw * sh]
-		dst := t.texels[tex.mips[l]:][:dw * dh]
-		downsample_mip(src, sw, sh, dst, dw, dh)
+		if tex.hdr {
+			downsample_mip_hdr(t.hdr_texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.hdr_texels[tex.mips[l]:][:dw * dh], dw, dh)
+		} else {
+			downsample_mip(t.texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.texels[tex.mips[l]:][:dw * dh], dw, dh)
+		}
 		sw, sh = dw, dh
 	}
 	generation_take(&t.generation)
@@ -112,14 +141,31 @@ texture_add_external :: proc(t: ^Textures, width, height: int) -> Texture_Id {
 }
 
 // Decodes an image in memory (PNG, JPEG, GIF, BMP, TGA, QOI or WebP, by
-// odecs' image package; an animation's first frame) into `t`.
+// odecs' image package; an animation's first frame; Radiance HDR as an HDR
+// texture) into `t`.
 texture_decode :: proc(t: ^Textures, data: []u8) -> (Texture_Id, bool) {
 	info, err := image.info(data)
 	if err != .None || info.width <= 0 || info.height <= 0 {
 		return 0, false
 	}
+	if info.format == .HDR {
+		n := info.width * info.height
+		floats, aerr := make([]f32, n * 4)
+		if aerr != nil {
+			return 0, false
+		}
+		defer delete(floats)
+		tex := texture_grow(&t.hdr_texels, info.width, info.height)
+		tex.hdr = true
+		if image.decode_float_into(data, floats) != .None {
+			resize(&t.hdr_texels, int(tex.first_texel))
+			return 0, false
+		}
+		halves(t.hdr_texels[tex.first_texel:][:n], floats)
+		return texture_finish(t, &tex), true
+	}
 	// Straight into level 0 of the texel table.
-	tex := texture_grow(t, info.width, info.height)
+	tex := texture_grow(&t.texels, info.width, info.height)
 	if image.decode_into(data, mem.slice_to_bytes(t.texels[tex.first_texel:][:info.width * info.height])) != .None {
 		resize(&t.texels, int(tex.first_texel))
 		return 0, false
@@ -166,6 +212,31 @@ downsample_mip :: proc "contextless" (src: [][4]u8, sw, sh: int, dst: [][4]u8, d
 	}
 }
 
+// 2x2 box downsample of an HDR level, in f32.
+@(private = "file")
+downsample_mip_hdr :: proc "contextless" (src: [][4]f16, sw, sh: int, dst: [][4]f16, dw, dh: int) #no_bounds_check {
+	for y in 0 ..< dh {
+		row0 := min(y * 2, sh - 1) * sw
+		row1 := min(y * 2 + 1, sh - 1) * sw
+		for x in 0 ..< dw {
+			x0, x1 := min(x * 2, sw - 1), min(x * 2 + 1, sw - 1)
+			sum := linalg.array_cast(src[row0 + x0], f32) + linalg.array_cast(src[row0 + x1], f32) + linalg.array_cast(src[row1 + x0], f32) + linalg.array_cast(src[row1 + x1], f32)
+			dst[y * dw + x] = linalg.array_cast(sum * 0.25, f16)
+		}
+	}
+}
+
+// One level of a texture, bilinearly: an 8-bit texture's raw (sRGB-encoded)
+// values, an HDR one's linear ones.
+@(private)
+sample_level :: #force_inline proc "contextless" (t: ^Textures, tex: ^Texture, l: int, uv: Vec2, clamp_v := false) -> Vec4 {
+	w, h := int(max(tex.width >> u32(l), 1)), int(max(tex.height >> u32(l), 1))
+	if tex.hdr {
+		return sample_mip_hdr(t.hdr_texels[tex.mips[l]:], w, h, uv, clamp_v)
+	}
+	return sample_mip(t.texels[tex.mips[l]:], w, h, uv, clamp_v)
+}
+
 // Trilinearly samples `id` at `uv` (repeating; v = 1 is row 0, the top of the
 // image, matching three.js's flipY and the primitive uvs) with mip level
 // chosen from screen derivatives `duv_dx` and `duv_dy` as the GPU does.
@@ -175,23 +246,22 @@ sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: 
 		return {1, 1, 1, 1}
 	}
 	if tex.levels <= 1 {
-		return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv)
+		return sample_level(t, &tex, 0, uv)
 	}
 	size := Vec2{f32(tex.width), f32(tex.height)}
 	rho2 := max(linalg.length2(duv_dx * size), linalg.length2(duv_dy * size))
 	if rho2 <= 1 {
-		return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv)
+		return sample_level(t, &tex, 0, uv)
 	}
 	lod := clamp(0.5 * math.log2(rho2), 0, f32(tex.levels - 1))
 	l0 := int(lod)
 	l1 := min(l0 + 1, int(tex.levels) - 1)
 	frac := lod - f32(l0)
-	c0 := sample_mip(t.texels[tex.mips[l0]:], int(max(tex.width >> u32(l0), 1)), int(max(tex.height >> u32(l0), 1)), uv)
+	c0 := sample_level(t, &tex, l0, uv)
 	if l0 == l1 || frac <= 0 {
 		return c0
 	}
-	c1 := sample_mip(t.texels[tex.mips[l1]:], int(max(tex.width >> u32(l1), 1)), int(max(tex.height >> u32(l1), 1)), uv)
-	return linalg.lerp(c0, c1, frac)
+	return linalg.lerp(c0, sample_level(t, &tex, l1, uv), frac)
 }
 
 // Bilinearly samples `id`'s top level at `uv`, repeating (as the GPU's
@@ -201,7 +271,7 @@ sample_top :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2) -> Vec
 	if !ok || tex.external {
 		return {1, 1, 1, 1}
 	}
-	return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv)
+	return sample_level(t, &tex, 0, uv)
 }
 
 // Trilinearly samples `id` at explicit `lod`, repeating horizontally and,
@@ -214,18 +284,25 @@ sample_lod :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f
 	}
 	// Not above 0 (magnified, or -inf or NaN where uv does not change).
 	if tex.levels <= 1 || !(lod > 0) {
-		return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv, clamp_v)
+		return sample_level(t, &tex, 0, uv, clamp_v)
 	}
 	lod_clamped := clamp(lod, 0, f32(tex.levels - 1))
 	l0 := int(lod_clamped)
 	l1 := min(l0 + 1, int(tex.levels) - 1)
 	frac := lod_clamped - f32(l0)
-	c0 := sample_mip(t.texels[tex.mips[l0]:], int(max(tex.width >> u32(l0), 1)), int(max(tex.height >> u32(l0), 1)), uv, clamp_v)
+	c0 := sample_level(t, &tex, l0, uv, clamp_v)
 	if l0 == l1 || frac <= 0 {
 		return c0
 	}
-	c1 := sample_mip(t.texels[tex.mips[l1]:], int(max(tex.width >> u32(l1), 1)), int(max(tex.height >> u32(l1), 1)), uv, clamp_v)
-	return linalg.lerp(c0, c1, frac)
+	return linalg.lerp(c0, sample_level(t, &tex, l1, uv, clamp_v), frac)
+}
+
+// `sample_lod`'s colour, linear: an HDR texture's as it is, an 8-bit one's
+// decoded from sRGB (an environment's or background's either way).
+sample_lod_linear :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec3 {
+	tex, ok := texture_get(t, id)
+	c := sample_lod(t, id, uv, lod)
+	return c.rgb if ok && tex.hdr else linear(c.rgb)
 }
 
 BILINEAR_SCALE :: 256
@@ -264,6 +341,31 @@ sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2, clamp_v := 
 	c01 := linalg.array_cast(mip[row1 + ix0], i32)
 	c11 := linalg.array_cast(mip[row1 + ix1], i32)
 	return linalg.array_cast(w00 * c00 + w10 * c10 + w01 * c01 + w11 * c11, f32) * TEXEL_NORM
+}
+
+// `sample_mip` for an HDR level: the same 8-bit subtexel weights (as GPU
+// filtering), linear values.
+@(private)
+sample_mip_hdr :: proc "contextless" (mip: [][4]f16, w, h: int, uv: Vec2, clamp_v := false) -> Vec4 #no_bounds_check {
+	tc := Vec2{linalg.fract(uv.x), clamp(1 - uv.y, 0, 1) if clamp_v else linalg.fract(1 - uv.y)}
+	st := tc * Vec2{f32(w), f32(h)} - 0.5
+	f0 := linalg.floor(st)
+	p0 := linalg.array_cast(f0, int)
+	wt := linalg.array_cast(linalg.clamp(linalg.array_cast(linalg.round((st - f0) * f32(BILINEAR_SCALE)), i32), 0, BILINEAR_SCALE), f32) * (1.0 / BILINEAR_SCALE)
+	ix0 := p0.x + w if p0.x < 0 else (p0.x - w if p0.x >= w else p0.x)
+	ix1 := 0 if ix0 + 1 >= w else ix0 + 1
+	iy0, iy1: int
+	if clamp_v {
+		iy0 = clamp(p0.y, 0, h - 1)
+		iy1 = clamp(p0.y + 1, 0, h - 1)
+	} else {
+		iy0 = p0.y + h if p0.y < 0 else (p0.y - h if p0.y >= h else p0.y)
+		iy1 = 0 if iy0 + 1 >= h else iy0 + 1
+	}
+	row0, row1 := iy0 * w, iy1 * w
+	top := linalg.lerp(linalg.array_cast(mip[row0 + ix0], f32), linalg.array_cast(mip[row0 + ix1], f32), wt.x)
+	bottom := linalg.lerp(linalg.array_cast(mip[row1 + ix0], f32), linalg.array_cast(mip[row1 + ix1], f32), wt.x)
+	return linalg.lerp(top, bottom, wt.y)
 }
 
 // Perturbs unit surface normal `n` by tangent-space `map_n` (-1..1) from screen

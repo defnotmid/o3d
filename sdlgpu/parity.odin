@@ -52,6 +52,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"text", 240, 180, build_text},
 	{"alpha_map", 200, 150, build_alpha_map},
 	{"custom_maps", 200, 150, build_custom_maps},
+	{"hdr_environment", 200, 150, build_hdr_environment},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -527,6 +528,36 @@ build_environment :: proc(a: ^Parity_Assets) -> string {
 	a.scene.tone_mapping_exposure = 1.15
 	a.scene.fog = {kind = .Exp2, color = {0.75, 0.8, 0.9}, density = 0.06}
 
+	o3d.environment_prefilter(&a.textures, env_id)
+	return ""
+}
+
+// An HDR environment (linear half floats): a sky under 1 and a sun at 40,
+// whose highlights stay bright after the radiance pyramid and irradiance
+// average it (in 8 bits they clip at 1), tone mapped; the background is
+// the environment itself, sharp.
+@(private = "file")
+build_hdr_environment :: proc(a: ^Parity_Assets) -> string {
+	EW, EH :: 64, 32
+	env: [EW * EH * 4]f32
+	for y in 0 ..< EH {
+		v := 1 - (f32(y) + 0.5) / f32(EH)
+		for x in 0 ..< EW {
+			dir := o3d.equirect_dir({(f32(x) + 0.5) / f32(EW), v})
+			sky := clamp(dir.y * 0.5 + 0.5, 0, 1)
+			col := o3d.Vec3{0.35, 0.22, 0.12} * (1 - sky) + o3d.Vec3{0.15, 0.35, 0.8} * sky
+			// A smooth sun: a peak of 40, not a texel-sharp disk.
+			sun := math.pow(max(dir.x * 0.6 + dir.y * 0.55 + dir.z * 0.58, 0), 24) * 40
+			i := (y * EW + x) * 4
+			env[i], env[i + 1], env[i + 2], env[i + 3] = col.r + sun, col.g + sun * 0.9, col.b + sun * 0.75, 1
+		}
+	}
+	env_id := o3d.texture_add_hdr(&a.textures, env[:], EW, EH)
+	test_scene(&a.scene, &a.geos)
+	clear(&a.scene.lights)
+	a.scene.environment = env_id
+	a.scene.background = env_id
+	a.scene.tone_mapping = .ACES_Filmic
 	o3d.environment_prefilter(&a.textures, env_id)
 	return ""
 }

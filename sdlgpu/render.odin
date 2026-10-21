@@ -61,7 +61,11 @@ Job :: struct {
 	lighting:             Lighting_Uniforms,
 	env:                  o3d.Shading_Environment,
 	background:           o3d.Texture_Id,
-	bg_params:            [4]f32, // intensity, mip level, tone mapping, exposure
+	// Intensity, mip level, tone mapping, exposure; whether the map is linear (HDR).
+	bg_params:            struct {
+		params: [4]f32,
+		flags:  [4]u32,
+	},
 	shadows:              [o3d.MAX_SHADOWS]o3d.Shadow,
 	shadow_count:         int,
 	// Per shadow: its casters, its map (depth per texel, read by the main
@@ -327,8 +331,15 @@ draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
 	}
 }
 
+@(private = "file")
+hdr_texture :: proc "contextless" (textures: ^o3d.Textures, id: o3d.Texture_Id) -> bool {
+	tex, ok := o3d.texture_get(textures, id)
+	return ok && tex.hdr
+}
+
 // Uploads what `textures` added since the last frame (all mip levels per
-// texture); an external texture's slot stays nil (its texture is bound).
+// texture, an HDR one's as half floats); an external texture's slot stays
+// nil (its texture is bound).
 @(private = "file")
 upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, pass: ^sdl.GPUCopyPass) -> o3d.Error {
 	if textures == nil || len(textures.list) <= len(g.textures) {
@@ -341,7 +352,7 @@ upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, pass: ^sdl.GPUCopyPass
 		}
 		gpu_tex := sdl.CreateGPUTexture(g.device, {
 			type                 = .D2,
-			format               = COLOR_FORMAT,
+			format               = .R16G16B16A16_FLOAT if tex.hdr else COLOR_FORMAT,
 			usage                = {.SAMPLER},
 			width                = tex.width,
 			height               = tex.height,
@@ -352,18 +363,23 @@ upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, pass: ^sdl.GPUCopyPass
 		if gpu_tex == nil {
 			return .Out_Of_Memory
 		}
-		byte_size := tex.texel_count * 4
+		texel_size := u32(size_of([4]f16) if tex.hdr else size_of([4]u8))
+		byte_size := tex.texel_count * texel_size
 		transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = byte_size})
 		if transfer == nil {
 			sdl.ReleaseGPUTexture(g.device, gpu_tex)
 			return .Out_Of_Memory
 		}
 		mapped := sdl.MapGPUTransferBuffer(g.device, transfer, false)
-		mem.copy(mapped, raw_data(textures.texels[tex.first_texel:]), int(byte_size))
+		if tex.hdr {
+			mem.copy(mapped, raw_data(textures.hdr_texels[tex.first_texel:]), int(byte_size))
+		} else {
+			mem.copy(mapped, raw_data(textures.texels[tex.first_texel:]), int(byte_size))
+		}
 		sdl.UnmapGPUTransferBuffer(g.device, transfer)
 		for l in 0 ..< tex.levels {
 			mw, mh := max(tex.width >> l, 1), max(tex.height >> l, 1)
-			offset := (tex.mips[l] - tex.first_texel) * 4
+			offset := (tex.mips[l] - tex.first_texel) * texel_size
 			sdl.UploadToGPUTexture(
 				pass,
 				{transfer_buffer = transfer, offset = offset, pixels_per_row = mw, rows_per_layer = mh},
@@ -446,7 +462,8 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 		}
 	}
 	exposure := active.tone_mapping_exposure if active.tone_mapping_exposure > 0 else 1
-	job.bg_params = {bg_intensity, bg_lod, f32(active.tone_mapping), exposure}
+	job.bg_params.params = {bg_intensity, bg_lod, f32(active.tone_mapping), exposure}
+	job.bg_params.flags = {u32(hdr_texture(textures, job.background)), 0, 0, 0}
 	lu := &job.lighting
 	lu^ = {}
 	lu.eye = {active.camera.position.x, active.camera.position.y, active.camera.position.z, 0}
@@ -457,6 +474,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	}
 	env := job.env
 	lu.env_params = {env.intensity if env.radiance != 0 else 0, env.max_lod if env.radiance != 0 else 0, exposure, active.fog.density}
+	lu.env_flags = {u32(hdr_texture(textures, env.radiance)), 0, 0, 0}
 	if active.fog.kind != .None {
 		fc := o3d.linear(active.fog.color)
 		lu.fog_color = {fc.r, fc.g, fc.b, 0}
