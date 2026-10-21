@@ -1282,3 +1282,37 @@ test_hdr_textures :: proc(t: ^testing.T) {
 	testing.expect(t, abs(sample_lod_linear(&textures, irr, {0.5, 0.5}, 0).g - 100) < 0.5, "irradiance 100")
 	testing.expect(t, abs(sample_lod_linear(&textures, rad, {0.3, 0.6}, 3).r - 100) < 0.5, "a rough radiance level 100")
 }
+
+// A shadow-only material (three.js's ShadowMaterial) draws nothing where
+// it is lit and its colour at its opacity where a caster's shadow falls
+// (test_software_shadow's box, light and bands).
+@(test)
+test_shadow_only :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 8, 0.01}, fov = 60, near = 0.1, far = 100}
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 5, 5}, cast_shadow = true, shadow = {map_size = 256, height = 10, bias = -0.001}})
+	under, catcher, block := MATERIAL_DEFAULT, MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	under.color, under.flags = {1, 0, 0}, {.Basic}
+	catcher.color, catcher.opacity, catcher.flags = {0, 0, 1}, 0.5, {.Shadow_Only}
+	block.flags = {.Cast_Shadow, .Basic}
+	append(&scene.draws, Draw{plane(&g, 6, 6), compose({0, -0.01, 0}, {-math.PI / 2, 0, 0}), under})
+	append(&scene.draws, Draw{plane(&g, 6, 6), compose({0, 0, 0}, {-math.PI / 2, 0, 0}), catcher})
+	append(&scene.draws, Draw{box(&g, 4.8, 0.3, 1.2), compose({0, 1.5, 0}), block})
+	W :: 128
+	s: Software
+	defer software_destroy(&s)
+	px := software_render(&s, &scene, &g, nil, W, W)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	SHADOW_Y, OPEN_Y, X :: 42, 24, 44
+	lit := at(px, X, OPEN_Y)
+	testing.expectf(t, lit.r > 250 && lit.b < 4, "lit: nothing drawn over the red, got %v", lit)
+	shade := at(px, X, SHADOW_Y)
+	testing.expectf(t, shade.b > 120 && shade.r > 100 && shade.r < 220, "shadowed: blue at half over red, got %v", shade)
+}

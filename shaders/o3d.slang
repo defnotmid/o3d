@@ -42,6 +42,7 @@ static const uint FLAG_ALPHA_MASK = 2048;
 static const uint FLAG_TOON = 4096;
 static const uint FLAG_CURVES = 8192;
 static const uint FLAG_ALPHA_MAP = 16384;
+static const uint FLAG_SHADOW_ONLY = 32768;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -453,7 +454,16 @@ float4 surface(VS_Out i, bool front) {
         }
     }
     float3 c;
-    if ((flags & FLAG_BASIC) != 0) {
+    if ((flags & FLAG_SHADOW_ONLY) != 0) {
+        // Only the light its shadows take: 1 minus their factors' product.
+        float3 sn = normalize(i.normal);
+        float mask = 1;
+        for (int si = 0; si < lighting.count.w; si++) {
+            mask *= shadow_factor(si, i.world, sn);
+        }
+        a *= 1 - mask;
+        c = base;
+    } else if ((flags & FLAG_BASIC) != 0) {
         c = base;
     } else {
         float roughness = material.roughness;

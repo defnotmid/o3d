@@ -43,7 +43,10 @@ What is known about three.js carries over:
   cut too), per-slot UV transforms `*_transform`
   (`offset`, `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`),
   and the booleans as a bit set: `flags = {.Transparent, .Alpha_Mask,
-  .Flat_Shading, .No_Size_Attenuation}`), MeshBasicMaterial (`.Basic`),
+  .Flat_Shading, .No_Size_Attenuation}`), ShadowMaterial (`.Shadow_Only`:
+  only the shadows it receives, `color` at `opacity` times the light they
+  take, blended over what is behind: shadows on a backdrop or a video
+  without a visible ground), MeshBasicMaterial (`.Basic`),
   MeshToonMaterial (`.Toon`: banded diffuse and a stepped highlight; any
   front-sided material also takes `outline_width` and `outline_color`, an
   inverted-hull cartoon outline), or

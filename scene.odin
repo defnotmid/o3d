@@ -95,6 +95,10 @@ Material_Flag :: enum u8 {
 	// LineSegments / Points: `size` is in screen pixels rather than world
 	// units (three.js's `sizeAttenuation: false`).
 	No_Size_Attenuation,
+	// Only the shadows it receives (three.js's ShadowMaterial): `color` at
+	// `opacity` times the light its shadows take, blended over what is
+	// behind; it receives shadows, is lit by nothing and reads no maps.
+	Shadow_Only,
 }
 
 Material_Flags :: bit_set[Material_Flag; u16]
@@ -1076,7 +1080,7 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 // from elsewhere (a colour map's, a ShaderMaterial's, an exact shape's
 // coverage), as three.js blends any transparent material.
 blended :: proc "contextless" (m: Material) -> bool {
-	return .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || m.shader != 0 || m.mode == .Curves)
+	return .Shadow_Only in m.flags || .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || m.shader != 0 || m.mode == .Curves)
 }
 
 // ---- shading ----------------------------------------------------------------------------
@@ -1214,6 +1218,7 @@ Shading_Flag :: enum u8 {
 	// area when blended, by sample otherwise.
 	Curves,
 	Alpha_Map,
+	Shadow_Only,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1314,9 +1319,12 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			}
 			uv_xforms[slot] = uv_transform(tf)
 		}
+		if .Shadow_Only in m.flags && m.shader == 0 {
+			f = (f - TEXTURE_FLAGS - {.Basic, .Toon, .Alpha_Mask, .Curves}) + {.Shadow_Only, .Receive_Shadow}
+		}
 		out[i] = {
 			base          = linear(m.color),
-			emissive      = linear(m.emissive) * m.emissive_intensity,
+			emissive      = linear(m.emissive) * m.emissive_intensity if .Shadow_Only not_in f else {},
 			opacity       = clamp(m.opacity, 0, 1) if (.Blended in f || .Alpha_Mask in f) else 1,
 			alpha_cutoff  = m.alpha_cutoff,
 			metalness     = m.metalness,

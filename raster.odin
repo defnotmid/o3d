@@ -194,6 +194,10 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 	if area == 0 {
 		return
 	}
+	if .Shadow_Only in m.flags {
+		draw_shadow_only(job, ref, t, m, y0, y1, area)
+		return
+	}
 	if m.flags & (TEXTURE_FLAGS + {.Curves}) != {} {
 		draw_standard_textured(job, ref, t, m, y0, y1, area, blend, receive)
 		return
@@ -242,6 +246,42 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			lit := shade(m, p, n, job.eye, job.lights, 1, job.env, 1, shadows) + m.emissive
 			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
 			write_samples(s, t, x, y, area, covered, pack(lit, out_alpha), blend)
+		}
+	}
+}
+
+// A shadow-only triangle: its colour at its opacity times the light its
+// shadows take (1 minus the product of their factors), blended.
+@(private = "file")
+draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32) {
+	s := job.s
+	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
+	world, normal: [3]Vec3
+	for k in 0 ..< 3 {
+		world[k] = (^Vec3)(&vs[k * UNTEX_FLOATS])^
+		normal[k] = (^Vec3)(&vs[k * UNTEX_FLOATS + 3])^
+	}
+	for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
+		for x in x_lo ..< x_hi {
+			covered := coverage(t, x, y, area)
+			if covered == {} {
+				continue
+			}
+			c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
+			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
+			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
+			b2 := 1 - b0 - b1
+			iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+			p := (world[0] * b0 + world[1] * b1 + world[2] * b2) / iw
+			n := linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
+			mask: f32 = 1
+			for si in 0 ..< job.shadow_count {
+				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
+			}
+			lit := finish_color(m.base, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
+			write_samples(s, t, x, y, area, covered, pack(lit, m.opacity * (1 - mask)), true)
 		}
 	}
 }

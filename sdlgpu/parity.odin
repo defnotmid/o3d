@@ -53,6 +53,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"alpha_map", 200, 150, build_alpha_map},
 	{"custom_maps", 200, 150, build_custom_maps},
 	{"hdr_environment", 200, 150, build_hdr_environment},
+	{"shadow_only", 200, 150, build_shadow_only},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -559,6 +560,29 @@ build_hdr_environment :: proc(a: ^Parity_Assets) -> string {
 	a.scene.background = env_id
 	a.scene.tone_mapping = .ACES_Filmic
 	o3d.environment_prefilter(&a.textures, env_id)
+	return ""
+}
+
+// A shadow-only ground (three.js's ShadowMaterial) under two casters, over
+// an environment background: the ground shows only their shadows, tinted
+// and half opaque; elsewhere the background shows through.
+@(private = "file")
+build_shadow_only :: proc(a: ^Parity_Assets) -> string {
+	if e := build_environment(a); e != "" {
+		return e
+	}
+	s := &a.scene
+	clear(&s.draws)
+	s.fog = {}
+	s.background_blurriness = 0
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2, position = {2, 6, 3}, cast_shadow = true, shadow = {map_size = 1024, height = 8, bias = -0.0005, normal_bias = 0.01}})
+	catcher := o3d.MATERIAL_DEFAULT
+	catcher.color, catcher.opacity, catcher.flags = {0.1, 0.05, 0.2}, 0.6, {.Shadow_Only}
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), catcher})
+	caster := o3d.MATERIAL_DEFAULT
+	caster.color, caster.roughness, caster.flags = {0.9, 0.5, 0.3}, 0.4, {.Cast_Shadow}
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.6, 32, 16), o3d.compose({-0.5, 0.9, 0}), caster})
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.7, 0.7, 0.7), o3d.compose({0.9, 0.35, -0.3}, {0, 0.6, 0}), caster})
 	return ""
 }
 
