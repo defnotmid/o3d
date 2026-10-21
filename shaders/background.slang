@@ -26,10 +26,11 @@ struct VS_Out {
 [shader("vertex")]
 VS_Out vs_main(uint vid : SV_VertexID) {
     float2 ndc = float2(vid == 1 ? 3.0 : -1.0, vid == 2 ? 3.0 : -1.0);
-    float4 p0 = mul(bg_vs.inv_vp, float4(ndc, 0, 1));
-    float4 p1 = mul(bg_vs.inv_vp, float4(ndc, 1, 1));
+    // From the near plane (depth 1, reversed) to the far (0).
+    float4 p0 = mul(bg_vs.inv_vp, float4(ndc, 1, 1));
+    float4 p1 = mul(bg_vs.inv_vp, float4(ndc, 0, 1));
     VS_Out o;
-    o.position = float4(ndc, 1, 1);
+    o.position = float4(ndc, 0, 1);
     o.ray = p1.xyz / p1.w - p0.xyz / p0.w;
     return o;
 }

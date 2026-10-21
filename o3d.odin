@@ -77,26 +77,30 @@ look_at :: proc "contextless" (eye, target: Vec3, up: Vec3 = {0, 1, 0}) -> Mat4 
 	}
 }
 
-// Perspective projection to clip space with depth 0 (near) to 1 (far) and Y
-// up (SDL_GPU's, D3D's and Metal's convention). `fov` is vertical, degrees.
+// Perspective projection to clip space with reversed depth, 1 at near to 0
+// at far (three.js's reversedDepthBuffer: floats are densest near 0, so
+// far surfaces keep their precision), and Y up (SDL_GPU's, D3D's and
+// Metal's convention). `fov` is vertical, degrees. Both renderers, the
+// camera's and the lights' shadows alike: nearer is greater.
 perspective :: proc "contextless" (fov, aspect, near, far: f32) -> Mat4 {
 	f := 1 / math.tan(fov * math.RAD_PER_DEG * 0.5)
 	return Mat4 {
 		f / aspect, 0, 0, 0,
 		0, f, 0, 0,
-		0, 0, far / (near - far), near * far / (near - far),
+		0, 0, near / (far - near), near * far / (far - near),
 		0, 0, -1, 0,
 	}
 }
 
-// Orthographic projection of a view `height` units tall.
+// Orthographic projection of a view `height` units tall, depth reversed as
+// `perspective`'s.
 orthographic :: proc "contextless" (height, aspect, near, far: f32) -> Mat4 {
 	h := height * 0.5
 	w := h * aspect
 	return Mat4 {
 		1 / w, 0, 0, 0,
 		0, 1 / h, 0, 0,
-		0, 0, 1 / (near - far), near / (near - far),
+		0, 0, 1 / (far - near), far / (far - near),
 		0, 0, 0, 1,
 	}
 }

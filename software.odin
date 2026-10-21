@@ -57,7 +57,7 @@ shadow_floats :: #force_inline proc "contextless" (masked, curved: bool) -> int 
 Software :: struct {
 	width, height: int,
 	color:         []u32, // per sample, RGBA8 sRGB premultiplied
-	depth:         []f32, // per sample, 0 near .. 1 far
+	depth:         []f32, // per sample, 1 near .. 0 far (reversed)
 	pixels:        []u8, // the resolved frame, RGBA8 premultiplied
 	// Scratch per frame (kept, with the chunks' and workers' arrays, to
 	// reuse).
@@ -498,7 +498,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		clip := [3]Vec4{w.positions[v[0]], w.positions[v[1]], w.positions[v[2]]}
 		// Its quad's entry: an exact shape's curve set, or a particle's row.
 		curve := curve_quad_entry(job.geos, geo, indices[t] / 4) if curved_geo else (geo.sprite_table + indices[t] / 4 if geo.mode == .Sprites else 0)
-		if clip[0].z >= 0 && clip[1].z >= 0 && clip[2].z >= 0 {
+		if clip[0].z <= clip[0].w && clip[1].z <= clip[1].w && clip[2].z <= clip[2].w {
 			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, curve, job.width, job.height, side)
 			continue
 		}
@@ -562,7 +562,7 @@ list_chunk :: proc(data: rawptr, ci, _: int) {
 	}
 }
 
-// Clips a triangle crossing the near plane (z >= 0 in clip space) and keeps
+// Clips a triangle crossing the near plane (z <= w in clip space) and keeps
 // what is left as one or two screen triangles; `nf` floats per corner,
 // the `flat` ones the first vertex's, carried, not interpolated.
 @(private = "file")
@@ -574,12 +574,13 @@ clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw: int, cu
 	count := 0
 	for k in 0 ..< 3 {
 		a, b := &tri[k], &tri[(k + 1) % 3]
-		if a.c.z >= 0 {
+		da, db := a.c.w - a.c.z, b.c.w - b.c.z
+		if da >= 0 {
 			in_[count] = a^
 			count += 1
 		}
-		if (a.c.z >= 0) != (b.c.z >= 0) {
-			t := a.c.z / (a.c.z - b.c.z)
+		if (da >= 0) != (db >= 0) {
+			t := da / (da - db)
 			o := &in_[count]
 			o.c = linalg.lerp(a.c, b.c, t)
 			for f in 0 ..< nf {

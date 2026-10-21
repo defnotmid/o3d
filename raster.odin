@@ -19,7 +19,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	s := job.s
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, s.height)
-	slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 1)
+	slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 0)
 	if job.bg_tex == 0 {
 		slice.zero(s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES])
 	} else {
@@ -29,10 +29,11 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 		inv_h := 2.0 / f32(s.height)
 		for y in y0 ..< y1 {
 			ndc_y := 1 - (f32(y) + 0.5) * inv_h
-			p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
-			p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
-			p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
-			p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
+			// From the near plane (depth 1) to the far (0).
+			p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
+			p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
+			p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
+			p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
 			ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
 			ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
 			for x in 0 ..< s.width {
@@ -65,8 +66,8 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	}
 }
 
-// A band of the shadow map: its rows cleared to the far plane, then each
-// triangle's depth at the texel centres it covers, nearest kept.
+// A band of the shadow map: its rows cleared to the far plane (0), then each
+// triangle's depth at the texel centres it covers, nearest (greatest) kept.
 @(private)
 draw_depth_band :: proc(data: rawptr, band, _: int) {
 	job := (^Frame_Job)(data)
@@ -75,7 +76,7 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 	size := job.width
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, job.height)
-	slice.fill(smap[y0 * size:y1 * size], 1)
+	slice.fill(smap[y0 * size:y1 * size], 0)
 	for ref in s.band_tris[s.band_start[band]:s.band_start[band + 1]] {
 		t := s.chunks[ref.chunk].tris[ref.tri]
 		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
@@ -114,7 +115,7 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 				b2 := 1 - b0 - b1
 				z := b0 * t.p[0].z + b1 * t.p[1].z + b2 * t.p[2].z
 				i := y * size + x
-				if z >= 0 && z <= 1 && z < smap[i] {
+				if z >= 0 && z <= 1 && z > smap[i] {
 					iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
 					if curved && !curves_inside(words, (rc[0] * b0 + rc[1] * b1 + rc[2] * b2) / iw, even_odd) {
 						continue
@@ -648,7 +649,7 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: i
 		s1 := edge(t.p[2].xy, t.p[0].xy, p) / area
 		z := s0 * t.p[0].z + s1 * t.p[1].z + (1 - s0 - s1) * t.p[2].z
 		i := (y * s.width + x) * SAMPLES + k
-		if z < 0 || z > 1 || z >= s.depth[i] {
+		if z < 0 || z > 1 || z <= s.depth[i] {
 			continue
 		}
 		switch blend {

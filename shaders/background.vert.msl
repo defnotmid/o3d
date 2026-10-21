@@ -94,26 +94,27 @@ struct VS_Out_0
 
 #line 28
     float2 ndc_0 = float2(_S1, _S2);
-    float4 p0_0 = (((float4(ndc_0, 0.0f, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(3)]))));
-    float4 _S3 = float4(ndc_0, 1.0f, 1.0f);
 
-#line 30
+    float4 p0_0 = (((float4(ndc_0, 1.0f, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(3)]))));
+    float4 _S3 = float4(ndc_0, 0.0f, 1.0f);
+
+#line 31
     float4 p1_0 = (((_S3) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(0)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(1)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(2)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(0)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(1)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(2)][int(3)], (&kernelContext_0)->bg_vs_0->inv_vp_0.data_0[int(3)][int(3)]))));
     thread VS_Out_0 o_0;
     (&o_0)->position_1 = _S3;
     (&o_0)->ray_1 = p1_0.xyz / float3(p1_0.w)  - p0_0.xyz / float3(p0_0.w) ;
     VS_Out_0 _S4 = o_0;
 
-#line 34
+#line 35
     thread vs_main_Result_0 _S5;
 
-#line 34
+#line 35
     (&_S5)->position_0 = _S4.position_1;
 
-#line 34
+#line 35
     (&_S5)->ray_0 = _S4.ray_1;
 
-#line 34
+#line 35
     return _S5;
 }
 

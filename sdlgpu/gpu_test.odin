@@ -119,6 +119,10 @@ test_flare_match_software :: proc(t: ^testing.T) {expect_parity(t, "flare")}
 @(test)
 test_vertex_colors_match_software :: proc(t: ^testing.T) {expect_parity(t, "vertex_colors")}
 
+// Layers 0.005 apart 200 units out with far 40000 (reversed depth).
+@(test)
+test_far_layers_match_software :: proc(t: ^testing.T) {expect_parity(t, "far_layers")}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)

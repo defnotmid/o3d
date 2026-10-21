@@ -1345,7 +1345,7 @@ test_camera_project :: proc(t: ^testing.T) {
 		testing.expectf(t, x >= 0 && x < W && y >= 0 && y < H && px[i] > 200 && px[i + 1] < 40, "the sphere is drawn at %v: %v", pixel, px[i:][:4])
 		software_destroy(&s)
 		_, near_depth, _ := camera_project(cam, W, H, linalg.lerp(cam.position, at, 0.5))
-		testing.expect(t, near_depth < depth, "a nearer point has a smaller depth")
+		testing.expect(t, near_depth > depth, "a nearer point has a greater depth (reversed)")
 	}
 	_, _, in_front := camera_project(cameras[0], W, H, cameras[0].position * 2 - cameras[0].target)
 	testing.expect(t, !in_front, "behind the camera")
@@ -1380,7 +1380,7 @@ test_frame_depth :: proc(t: ^testing.T) {
 	at := depth[int(px.y) * W + int(px.x)]
 	testing.expectf(t, abs(at - d) < 2e-3, "the wall's depth (not the glass's): map %v, point %v", at, d)
 	_, behind, _ := camera_project(scene.camera, W, H, on_wall - {0, 0, 1})
-	testing.expect(t, behind > at, "a point behind the wall is hidden")
+	testing.expect(t, behind < at, "a point behind the wall is hidden (reversed: less)")
 	scene.depth = false
 	software_render(&s, &scene, &g, nil, W, H)
 	testing.expect_value(t, len(software_depth(&s)), 0)
@@ -1695,6 +1695,45 @@ test_vertex_colors :: proc(t: ^testing.T) {
 	testing.expectf(t, at(px, W - 3, y).b > 200 && at(px, W - 3, y).r < 120, "blue at its end: %v", at(px, W - 3, y))
 	testing.expectf(t, at(px, W / 4, 3 * W / 4) == {0, 255, 0, 255}, "a green point: %v", at(px, W / 4, 3 * W / 4))
 	testing.expectf(t, at(px, 3 * W / 4, 3 * W / 4) == {255, 255, 0, 255}, "a yellow point: %v", at(px, 3 * W / 4, 3 * W / 4))
+}
+
+// Depth precision: two layers 0.005 apart 200 units out with near 1 and
+// far 40000 (a solar panel's, with an Earth in the frame). With depth 0 at
+// near the two depths were a few float steps apart near 1 and the far
+// layer showed through; reversed, floats are dense there and the near
+// layer wins everywhere, drawn either order.
+@(test)
+test_depth_precision :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 64
+	s: Software
+	defer software_destroy(&s)
+	for order in 0 ..< 2 {
+		scene_clear(&scene)
+		scene.camera = {position = {0, 0, 0}, target = {0.3, 0.2, -1}, fov = 40, near = 1, far = 40000}
+		red, blue := MATERIAL_DEFAULT, MATERIAL_DEFAULT
+		red.color, red.flags = {1, 0, 0}, {.Basic}
+		blue.color, blue.flags = {0, 0, 1}, {.Basic}
+		// Tilted so each pixel's depths come from the triangles' slopes.
+		front := Draw{plane(&g, 400, 400), compose({60, 40, -200}, {0.4, 0.3, 0}), red}
+		back := Draw{plane(&g, 400, 400), compose({60, 40, -200} + linalg.normalize(Vec3{0.3, 0.2, -1}) * 0.005, {0.4, 0.3, 0}), blue}
+		if order == 0 {
+			append(&scene.draws, front, back)
+		} else {
+			append(&scene.draws, back, front)
+		}
+		px := software_render(&s, &scene, &g, nil, W, W)
+		through := 0
+		for i := 0; i < len(px); i += 4 {
+			if px[i + 2] > px[i] {
+				through += 1
+			}
+		}
+		testing.expectf(t, through == 0, "order %d: the far layer shows at %d of %d pixels", order, through, W * W)
+	}
 }
 
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's

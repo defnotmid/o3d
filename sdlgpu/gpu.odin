@@ -298,7 +298,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
 		_ = sdl.CancelGPUCommandBuffer(cmd)
 		return .Device
 	}
-	clear_shadow := sdl.GPUColorTargetInfo{texture = g.dummy_shadow, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+	clear_shadow := sdl.GPUColorTargetInfo{texture = g.dummy_shadow, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE}
 	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear_shadow, 1, nil))
 	clear := sdl.GPUColorTargetInfo{texture = g.dummy_texture, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
 	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
@@ -503,7 +503,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = g.samples},
-		depth_stencil_state = {compare_op = .LESS, enable_depth_test = true, enable_depth_write = blend == .Opaque},
+		depth_stencil_state = {compare_op = .GREATER, enable_depth_test = true, enable_depth_write = blend == .Opaque},
 		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
@@ -622,7 +622,7 @@ release_custom :: proc(g: ^GPU, c: ^Custom) {
 }
 
 // The shadow pass's pipeline for casters of a material side: depth into the
-// R32_FLOAT map (nearest kept by the depth test), the other side drawn, by
+// R32_FLOAT map (nearest, the greatest, kept by the depth test), the other side drawn, by
 // `vert` and `frag` (`vert` or `skinned_vert` and `shadow_frag`, or
 // `curves_vert` and `shadow_curves_frag` for exact shapes).
 @(private = "file")
@@ -649,7 +649,7 @@ make_shadow_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, side: o3d.Side
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = ._1},
-		depth_stencil_state = {compare_op = .LESS, enable_depth_test = true, enable_depth_write = true},
+		depth_stencil_state = {compare_op = .GREATER, enable_depth_test = true, enable_depth_write = true},
 		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)

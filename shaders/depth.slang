@@ -19,11 +19,11 @@ float4 vs_main(uint vid : SV_VertexID) : SV_Position {
 [shader("fragment")]
 float4 fs_main(float4 position : SV_Position) : SV_Target {
     float d = depthMap.SampleLevel(position.xy / depth_fs.size.xy, 0);
-    if (d >= 1) {
+    if (d <= 0) {
         return float4(depth_fs.params.zzz, 0);
     }
     float near = depth_fs.params.x;
     float far = depth_fs.params.y;
-    float v = depth_fs.params.w != 0 ? near + d * (far - near) : near * far / (far - d * (far - near));
+    float v = depth_fs.params.w != 0 ? far - d * (far - near) : near * far / (near + d * (far - near));
     return float4(v, v, v, 1);
 }

@@ -330,7 +330,7 @@ float shadow_factor(int idx, float3 world, float3 normal) {
     float inv_w = 1 / c.w;
     float u = c.x * inv_w * 0.5 + 0.5;
     float v = 0.5 - c.y * inv_w * 0.5;
-    float z = c.z * inv_w + params.y;
+    float z = c.z * inv_w - params.y;
     if (u < 0 || u > 1 || v < 0 || v > 1 || z < 0 || z > 1) {
         return 1;
     }
@@ -352,7 +352,7 @@ float shadow_factor(int idx, float3 world, float3 normal) {
             // The texel itself: its centre through the nearest sampler (Load
             // on a combined texture-sampler miscompiles to MSL).
             float depth = sample_shadow_map(idx, (float2(col, row) + 0.5) / float(size));
-            acc += wx[i] * (z <= depth ? 1.0 : 0.0);
+            acc += wx[i] * (z >= depth ? 1.0 : 0.0);
         }
         lit += wy[j] * acc;
     }
@@ -582,9 +582,9 @@ float view_depth(float depth) {
     float near = lighting.frameParams.z;
     float far = lighting.frameParams.w;
     if (lighting.envFlags.y != 0u) {
-        return near + depth * (far - near);
+        return far - depth * (far - near);
     }
-    return near * far / (far - depth * (far - near));
+    return near * far / (near + depth * (far - near));
 }
 
 // Points on a disc of radius 1 (o3d.OCCLUSION_TAPS).
@@ -606,7 +606,7 @@ float sprite_visibility(float4 probe) {
             continue;
         }
         float d = sceneDepth.SampleLevel((floor(p) + 0.5) / size, 0);
-        if (d >= 1 || probe.z < d) {
+        if (d <= 0 || probe.z > d) {
             seen++;
         }
     }

@@ -261,8 +261,8 @@ Scene :: struct {
 	tone_mapping_exposure: f32,
 	fog:                   Fog,
 	// Also draw the frame's depth (`software_depth`, `o3d_sdlgpu.depth` /
-	// `read_depth`): per pixel, the depth both renderers test (0 near, 1
-	// far, 1 where nothing is) of the nearest opaque draw at its centre, as
+	// `read_depth`): per pixel, the depth both renderers test (reversed: 1
+	// near, 0 far, 0 where nothing is) of the nearest opaque draw at its centre, as
 	// `camera_project` gives a point's. For post effects (depth of field,
 	// haze) and to know whether something hides a point (a flare, a label).
 	depth:                 bool,
@@ -785,7 +785,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 		for p, i in rows {
 			w := (M * Vec4{p.position.x, p.position.y, p.position.z, 1}).xyz
 			clip := view_proj * Vec4{w.x, w.y, w.z, 1}
-			append(&exp.sprite_keys, Sprite_Key{distance = clip.w if !scene.camera.orthographic else clip.z, row = u32(i)})
+			append(&exp.sprite_keys, Sprite_Key{distance = clip.w if !scene.camera.orthographic else -clip.z, row = u32(i)})
 		}
 		if .Additive not_in d.material.flags {
 			slice.stable_sort_by(exp.sprite_keys[:], proc(a, b: Sprite_Key) -> bool {return a.distance > b.distance})
@@ -830,7 +830,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 			row := Sprite_Row{color = p.color}
 			if probe_radius > 0 {
 				// Behind the camera: off the frame.
-				row.probe = {-1e6, -1e6, 2, probe_radius}
+				row.probe = {-1e6, -1e6, -1, probe_radius}
 				clip := view_proj * Vec4{w.x, w.y, w.z, 1}
 				if clip.w > 0 {
 					row.probe.xyz = {(clip.x / clip.w * 0.5 + 0.5) * frame.x, (0.5 - clip.y / clip.w * 0.5) * frame.y, clip.z / clip.w}
@@ -1272,7 +1272,7 @@ sprite_visibility :: proc "contextless" (probe: Vec4, depths: []f32, width, heig
 			continue
 		}
 		d := depths[int(p.y) * width + int(p.x)]
-		if d >= 1 || probe.z < d {
+		if d <= 0 || probe.z > d {
 			seen += 1
 		}
 	}
@@ -1285,14 +1285,14 @@ view_depth :: proc "contextless" (c: Camera, depth: f32) -> f32 {
 	near := c.near if c.near > 0 else 0.1
 	far := c.far if c.far > near else near * 1e4
 	if c.orthographic {
-		return near + depth * (far - near)
+		return far - depth * (far - near)
 	}
-	return near * far / (far - depth * (far - near))
+	return near * far / (near + depth * (far - near))
 }
 
 // Where world point `p` falls on a `width x height` frame of camera `c`, as
 // both renderers map it: `pixel` from the top left (pixel centres at .5),
-// `depth` the depth they test (0 at near, 1 at far), and whether it is in
+// `depth` the depth they test (reversed: 1 at near, 0 at far), and whether it is in
 // front of the camera (behind it, `pixel` means nothing). Whether something
 // nearer hides it is the frame's depth's to say.
 camera_project :: proc "contextless" (c: Camera, width, height: int, p: Vec3) -> (pixel: Vec2, depth: f32, in_front: bool) {
@@ -1322,7 +1322,7 @@ point_hidden :: proc "contextless" (c: Camera, depths: []f32, width, height: int
 	x0 := clamp(int(math.floor(pixel.x - 0.5)), 0, width - 1)
 	y0 := clamp(int(math.floor(pixel.y - 0.5)), 0, height - 1)
 	x1, y1 := min(x0 + 1, width - 1), min(y0 + 1, height - 1)
-	farthest := max(depths[y0 * width + x0], depths[y0 * width + x1], depths[y1 * width + x0], depths[y1 * width + x1])
+	farthest := min(depths[y0 * width + x0], depths[y0 * width + x1], depths[y1 * width + x0], depths[y1 * width + x1])
 	point := view_depth(c, depth)
 	return view_depth(c, farthest) + bias < point * (1 - 1e-5)
 }
@@ -1336,8 +1336,8 @@ depth_image :: proc "contextless" (c: Camera, depths: []f32, width, height: int,
 	n := min(width * height, len(depths), len(out) / 4)
 	for i in 0 ..< n {
 		d := depths[i]
-		v := f16(view_depth(c, d)) if d < 1 else f16(far)
-		out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = v, v, v, 1 if d < 1 else 0
+		v := f16(view_depth(c, d)) if d > 0 else f16(far)
+		out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = v, v, v, 1 if d > 0 else 0
 	}
 }
 

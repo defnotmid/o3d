@@ -271,13 +271,13 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 }
 
 // A depth pass: `draws`' depth through `view_proj` into `map_tex` (cleared
-// to 1). A shadow map's casters are drawn with their other side; the
+// to 0, the far plane: depth is reversed). A shadow map's casters are drawn with their other side; the
 // frame's depth (`own_side`) with their own.
 @(private = "file")
 draw_depth :: proc(g: ^GPU, job: ^Job, draws: []int, view_proj: o3d.Mat4, map_tex, depth_tex: ^sdl.GPUTexture, own_side: bool, cmd: ^sdl.GPUCommandBuffer) {
 	scene, geos := job.scene, job.geos
-	color := sdl.GPUColorTargetInfo{texture = map_tex, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
-	depth := sdl.GPUDepthStencilTargetInfo{texture = depth_tex, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+	color := sdl.GPUColorTargetInfo{texture = map_tex, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = depth_tex, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	defer sdl.EndGPURenderPass(pass)
 	if g.vertices.buffer == nil && job.dynamic_vertices.buffer == nil {
@@ -596,7 +596,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		color.store_op, color.resolve_texture = .RESOLVE, g.resolved
 		frame = g.resolved
 	}
-	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
 	sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})

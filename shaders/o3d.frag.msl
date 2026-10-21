@@ -288,7 +288,7 @@ float shadow_factor_0(int idx_1, float3 world_0, float3 normal_0, KernelContext_
     float inv_w_0 = 1.0f / _S7;
     float u_0 = c_2.x * inv_w_0 * 0.5f + 0.5f;
     float v_0 = 0.5f - c_2.y * inv_w_0 * 0.5f;
-    float z_0 = c_2.z * inv_w_0 + params_0.y;
+    float z_0 = c_2.z * inv_w_0 - params_0.y;
 
 #line 333
     bool _S8;
@@ -457,7 +457,7 @@ float shadow_factor_0(int idx_1, float3 world_0, float3 normal_0, KernelContext_
             float _S16;
 
 #line 355
-            if(z_0 <= _S14)
+            if(z_0 >= _S14)
             {
 
 #line 355

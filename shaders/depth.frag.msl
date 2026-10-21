@@ -43,7 +43,7 @@ struct KernelContext_0
 #line 20
     (&kernelContext_0)->depthMap_sampler_0 = depthMap_sampler_1;
     float _S1 = ((depthMap_texture_1).sample((depthMap_sampler_1), (position_0.xy / depth_fs_1->size_0.xy), level((0.0f))).x);
-    if(_S1 >= 1.0f)
+    if(_S1 <= 0.0f)
     {
 
 #line 22
@@ -59,7 +59,7 @@ struct KernelContext_0
     {
 
 #line 27
-        v_0 = near_0 + _S1 * (far_0 - near_0);
+        v_0 = far_0 - _S1 * (far_0 - near_0);
 
 #line 27
     }
@@ -67,7 +67,7 @@ struct KernelContext_0
     {
 
 #line 27
-        v_0 = near_0 * far_0 / (far_0 - _S1 * (far_0 - near_0));
+        v_0 = near_0 * far_0 / (near_0 + _S1 * (far_0 - near_0));
 
 #line 27
     }

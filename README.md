@@ -509,6 +509,15 @@ includes ovg's `shaders/curves.slang` from there too.
   (three.js's Lensflare): with a `depth_offset` past the camera the quads
   draw over everything (at the near plane) yet are probed where the sun is,
   so a flare and its ghosts fade as a hull passes in front of it.
+- **Reversed depth:** `perspective` and `orthographic` map near to depth 1
+  and far to 0 (three.js's reversedDepthBuffer), for the camera and the
+  lights' shadows alike: both renderers clear depth to 0 and keep the
+  greater. A float's precision is densest near 0, so far surfaces keep
+  theirs: layers 0.005 apart 200 units out with near 1 and far 40000 no
+  longer fight (`far_layers`, `test_depth_precision`), and `near` needs no
+  tuning. The frame's depth, `camera_project`'s depth and a ShaderMaterial's
+  `projectionMatrix` and `gl_FragCoord.z` follow it; `view_depth`,
+  `point_hidden` and `depth_image` turn it into distances as before.
 - **Blending:** `blend_of(material)` is a draw's `Blend`: `.Opaque`
   (depth written), `.Over` (blended: transparent with some alpha) or `.Add`
   (`.Additive`, three.js's AdditiveBlending: the colour times its opacity
@@ -530,7 +539,7 @@ includes ovg's `shaders/curves.slang` from there too.
   anti-aliased edges keep their colour.
 - **Frame depth:** with `Scene.depth` both renderers also draw the
   frame's depth through their shadow pass, from the camera at the frame's
-  size: per pixel, the depth they test (0 near, 1 far, 1 where nothing is,
+  size: per pixel, the depth they test (reversed: 1 near, 0 far, 0 where nothing is,
   `camera_project`'s depth for a point) of the nearest opaque draw at the
   pixel's centre (blended draws let what is behind show; ShaderMaterials
   with their plain geometry, alpha masks cut). `software_depth` gives the

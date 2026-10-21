@@ -157,8 +157,9 @@ shadow_side :: proc "contextless" (side: Side) -> Side {
 // How lit a point (world position, normal) is by the shadow light, 0 to 1:
 // three.js's PCF filter, a 3x3 grid of bilinear depth comparisons one texel
 // apart, which weighs a 4x4 block of texels by (1 - f, 1, 1, f) per axis.
-// A texel is lit when the point's depth (plus the bias) is no farther than
-// it; texels past the edge repeat the edge; outside the camera is lit.
+// A texel is lit when the point's depth (plus the bias, toward the light
+// when negative) is no farther than it (depths reversed: no less); texels
+// past the edge repeat the edge; outside the camera is lit.
 shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: Vec3) -> f32 {
 	p := world + normal * sh.normal_bias
 	c := sh.view_proj * Vec4{p.x, p.y, p.z, 1}
@@ -168,7 +169,7 @@ shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: 
 	inv_w := 1 / c.w
 	u := c.x * inv_w * 0.5 + 0.5
 	v := 0.5 - c.y * inv_w * 0.5 // rows from the top, as the map is drawn
-	z := c.z * inv_w + sh.bias
+	z := c.z * inv_w - sh.bias
 	if u < 0 || u > 1 || v < 0 || v > 1 || z < 0 || z > 1 {
 		return 1
 	}
@@ -185,7 +186,7 @@ shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: 
 		acc: f32
 		for i in 0 ..< 4 {
 			col := clamp(int(x0) - 1 + i, 0, size - 1)
-			acc += wx[i] * (1 if z <= depths[row * size + col] else 0)
+			acc += wx[i] * (1 if z >= depths[row * size + col] else 0)
 		}
 		lit += wy[j] * acc
 	}

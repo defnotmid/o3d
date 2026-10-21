@@ -3,6 +3,7 @@ package o3d_sdlgpu
 import "core:encoding/base64"
 import "core:fmt"
 import "core:math"
+import "core:math/linalg"
 
 import sdl "vendor:sdl3"
 
@@ -59,6 +60,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"additive", 240, 180, build_additive},
 	{"flare", 240, 180, build_flare},
 	{"vertex_colors", 240, 180, build_vertex_colors},
+	{"far_layers", 240, 180, build_far_layers},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -908,6 +910,33 @@ build_vertex_colors :: proc(a: ^Parity_Assets) -> string {
 	star := o3d.MATERIAL_DEFAULT
 	star.size, star.flags = 3, {.Basic, .Vertex_Colors, .No_Size_Attenuation}
 	append(&s.draws, o3d.Draw{o3d.scene_points(s, stars[:], star_c[:]), o3d.compose({0, 0, 0}), star})
+	return ""
+}
+
+// Depth precision (reversed depth): striped panels 0.005 in front of
+// blue ones 200 units out with near 1 and far 40000, the back drawn last;
+// no blue shows through on either renderer.
+@(private = "file")
+build_far_layers :: proc(a: ^Parity_Assets) -> string {
+	s := &a.scene
+	o3d.scene_clear(s)
+	dir := linalg.normalize(o3d.Vec3{0.3, 0.2, -1})
+	s.camera = {position = {0, 0, 0}, target = dir, fov = 30, near = 1, far = 40000}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2, position = {1, 2, 3}})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
+	front, back := o3d.MATERIAL_DEFAULT, o3d.MATERIAL_DEFAULT
+	front.color, front.roughness = {0.8, 0.7, 0.3}, 0.5
+	back.color, back.flags = {0, 0, 1}, {.Basic}
+	for k in 0 ..< 5 {
+		at := dir * 200 + o3d.Vec3{f32(k - 2) * 14, f32(k % 2) * 6 - 3, 0}
+		turn := o3d.Vec3{0.4, 0.3 + f32(k) * 0.1, 0}
+		append(&s.draws, o3d.Draw{o3d.box(&a.geos, 12, 8, 0.05), o3d.compose(at, turn), front})
+		append(&s.draws, o3d.Draw{o3d.box(&a.geos, 12, 8, 0.05), o3d.compose(at + dir * 0.005, turn), back})
+	}
+	// The Earth far behind.
+	earth := o3d.MATERIAL_DEFAULT
+	earth.color = {0.2, 0.4, 0.8}
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 3000, 48, 24), o3d.compose(dir * 20000 + o3d.Vec3{0, -2500, 0}), earth})
 	return ""
 }
 
@@ -1772,7 +1801,7 @@ depth_check :: proc(g: ^GPU) -> (err: string) {
 		}
 		differ, drawn := 0, 0
 		for d, i in cpu_depth {
-			drawn += 1 if d < 1 else 0
+			drawn += 1 if d > 0 else 0
 			differ += 1 if abs(d - gpu_depth[i]) > 1e-4 else 0
 		}
 		if drawn == 0 {
