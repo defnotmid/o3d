@@ -157,6 +157,9 @@ Material :: struct {
 	shader:              Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
 	uniforms:            Uniform_Range,
+	// The shader's `uniform sampler2D`s by channel (`shader_map` finds a
+	// sampler's by name): mipmapped, repeating; 0 samples white.
+	shader_maps:         [SHADER_MAPS]Texture_Id,
 }
 
 // A ShaderMaterial uniform, three.js's `uniforms: { name: { value } }`: its
@@ -1188,6 +1191,7 @@ Shading_Material :: struct {
 	ao_map:        Texture_Id,
 	alpha_map:     Texture_Id,
 	shader:        Shader_Id, // 0: the standard material
+	shader_maps:   [SHADER_MAPS]Texture_Id,
 }
 
 // Bit values are the shader's FLAG_* constants (o3d_test checks).
@@ -1329,6 +1333,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			ao_map        = m.ao_map,
 			alpha_map     = m.alpha_map,
 			shader        = m.shader,
+			shader_maps   = m.shader_maps,
 		}
 	}
 }

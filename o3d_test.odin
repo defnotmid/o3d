@@ -249,7 +249,7 @@ test_shader_table :: proc(t: ^testing.T) {
 	} {
 		{WAVE_VERT, "void main() { gl_FragColor = vec4(undefinedThing); }", "Fragment:1:"},
 		{"attribute vec3 color; void main() { gl_Position = vec4(color, 1.0); }", "void main() { gl_FragColor = vec4(1.0); }", "attribute color"},
-		{WAVE_VERT, "uniform sampler2D map; varying vec2 vUv; void main() { gl_FragColor = texture2D(map, vUv); }", "textures"},
+		{"uniform sampler2D map; void main() { gl_Position = texture2D(map, vec2(0.5)); }", "void main() { gl_FragColor = vec4(1.0); }", "fragment shaders only"},
 	}
 	for c in cases {
 		bad, errs := shader(&shaders, c.vertex, c.fragment)
@@ -1162,5 +1162,54 @@ test_tube_and_instance_builtins :: proc(t: ^testing.T) {
 		color := (^Vec3)(&block[color_at])^
 		index := (^f32)(&block[id_at])^
 		testing.expectf(t, linalg.length(color - w.color) < 1e-5 && index == w.id, "instance %d: instanceColor %v, instanceId %v", k, color, index)
+	}
+}
+
+// A ShaderMaterial's sampler2D: found by name, and read as three.js reads
+// it (uv (0.25, 0.75) is the image's top-left quarter; texelFetch's (0, 1)
+// the top row's first texel). A vertex shader may not sample.
+@(test)
+test_shader_maps :: proc(t: ^testing.T) {
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	VERT :: `void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`
+	FRAG :: `uniform sampler2D other;
+uniform sampler2D map;
+uniform float uFetch;
+void main() {
+  vec4 a = texture2D(map, vec2(0.25, 0.75));
+  vec4 b = texelFetch(map, ivec2(0, 1), 0);
+  gl_FragColor = vec4(mix(a.rgb, b.rgb, uFetch) * texture2D(other, vec2(0.5)).rgb, 1.0);
+}`
+	id, errors := shader(&shaders, VERT, FRAG)
+	testing.expect_value(t, errors, "")
+	testing.expect_value(t, shader_map(&shaders, id, "map"), 1)
+	testing.expect_value(t, shader_map(&shaders, id, "other"), 0)
+	testing.expect_value(t, shader_map(&shaders, id, "nope"), -1)
+	_, verrors := shader(&shaders, `uniform sampler2D map; void main() { gl_Position = texture2D(map, vec2(0.5)); }`, `void main() { gl_FragColor = vec4(1.0); }`)
+	testing.expect(t, verrors != "", "a vertex shader's sampler is refused")
+
+	// 2x2, rows from the top: red, green / blue, white.
+	px := [16]u8{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255}
+	tex := texture_add(&textures, px[:], 2, 2)
+	scene: Scene
+	defer scene_destroy(&scene)
+	for fetch in ([]f32{0, 1}) {
+		scene_clear(&scene)
+		scene.camera = {position = {0, 0, 1}, fov = 90, near = 0.1, far = 10}
+		m := MATERIAL_DEFAULT
+		m.shader = id
+		m.shader_maps[shader_map(&shaders, id, "map")] = tex
+		m.uniforms = scene_uniforms(&scene, {"uFetch", {fetch}})
+		append(&scene.draws, Draw{plane(&g, 4, 4), compose({0, 0, 0}), m})
+		s: Software
+		out := software_render(&s, &scene, &g, &shaders, 8, 8, nil, &textures)
+		// `other` has no texture: white.
+		testing.expectf(t, out[(4 * 8 + 4) * 4] == 255 && out[(4 * 8 + 4) * 4 + 1] < 8, "fetch %v: the top-left texel (red), got %v", fetch, out[(4 * 8 + 4) * 4:][:4])
+		software_destroy(&s)
 	}
 }

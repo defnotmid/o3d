@@ -507,6 +507,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 			info := sdl.GPUShaderCreateInfo {
 				stage               = .VERTEX if stage == .Vertex else .FRAGMENT,
 				num_uniform_buffers = 1 if m.block_size > 0 else 0,
+				num_samplers        = u32(m.num_samplers),
 			}
 			if .SPIRV in formats {
 				info.code, info.code_size = ([^]u8)(raw_data(m.spirv)), len(m.spirv) * size_of(u32)

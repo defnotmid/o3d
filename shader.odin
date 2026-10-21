@@ -81,6 +81,10 @@ VERTEX_ATTRIBUTES := [Vertex_Attribute]struct {
 // what GLSL ES 3.0 guarantees).
 MAX_VARYING_FLOATS :: 64
 
+// A ShaderMaterial's textures: `Material.shader_maps`, one per oksl
+// channel (its `uniform sampler2D`s in declaration order).
+SHADER_MAPS :: oksl.CHANNEL_COUNT
+
 // A compiled shader and what its stages read, found once.
 Shader :: struct {
 	pipeline:       ^oksl.Pipeline, // nil: it failed to compile (`errors`)
@@ -142,6 +146,21 @@ shader_get :: proc "contextless" (s: ^Shaders, id: Shader_Id) -> ^Shader {
 	return &s.list[id - 1]
 }
 
+// The channel of the shader's `uniform sampler2D` named `name`: its index
+// in `Material.shader_maps` (-1: no such sampler). Found once, kept.
+shader_map :: proc "contextless" (s: ^Shaders, id: Shader_Id, name: string) -> int {
+	sh := shader_get(s, id)
+	if sh == nil || sh.pipeline == nil {
+		return -1
+	}
+	for n, i in sh.pipeline.fragment.channel_names {
+		if n == name && n != "" {
+			return i
+		}
+	}
+	return -1
+}
+
 // The varying floats that are flat (by offset in a vertex's record).
 shader_flat :: proc "contextless" (sh: ^Shader) -> []u8 {
 	return sh.flat[:sh.flat_count]
@@ -167,8 +186,8 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 	sh.attributes = {.Position = -1, .Normal = -1, .Uv = -1}
 	for &offsets, stage in sh.builtins {
 		m := shader_module(&sh, stage)
-		if m.num_samplers > 0 {
-			fail(&sh, p, "o3d: textures are not supported yet\n")
+		if stage == .Vertex && m.num_samplers > 0 {
+			fail(&sh, p, "Vertex: o3d samples textures in fragment shaders only\n")
 			return
 		}
 		for b in Builtin {
@@ -220,6 +239,13 @@ prelude :: proc(stage: Shader_Stage, glsl3: bool) -> string {
 		}
 	}
 	strings.write_string(&b, "#define texture2D texture\n#define texture2DLodEXT textureLod\n#define texture2DProj textureProj\n")
+	if stage == .Fragment {
+		// three.js's uv runs up the image (flipY); o3d's images and the
+		// GPU's sampling run down it.
+		strings.write_string(&b, "#define texture(s, c) texture(s, vec2((c).x, 1.0 - (c).y))\n")
+		strings.write_string(&b, "#define textureLod(s, c, l) textureLod(s, vec2((c).x, 1.0 - (c).y), l)\n")
+		strings.write_string(&b, "#define texelFetch(s, p, l) texelFetch(s, ivec2((p).x, textureSize(s, l).y - 1 - (p).y), l)\n")
+	}
 	for row in BUILTINS {
 		if stage == .Vertex || row.fragment {
 			fmt.sbprintf(&b, "uniform %s %s;\n", row.type, row.name)

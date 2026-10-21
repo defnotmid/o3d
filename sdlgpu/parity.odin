@@ -51,6 +51,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"curve_shadow", 200, 150, build_curve_shadow},
 	{"text", 240, 180, build_text},
 	{"alpha_map", 200, 150, build_alpha_map},
+	{"custom_maps", 200, 150, build_custom_maps},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -170,6 +171,77 @@ build_alpha_map :: proc(a: ^Parity_Assets) -> string {
 	panel.color, panel.flags, panel.side = {1, 0.6, 0.3}, {.Transparent}, .Double
 	panel.alpha_map = fade_id
 	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 1, 1), o3d.compose({0.9, 0.7, 0.6}, {0, -0.5, 0}), panel})
+	return ""
+}
+
+MAPS_FLOOR_VERT :: `varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`
+// GLSL 1 texture2D at the level its derivatives pick: a floor receding
+// far enough to sample several mip levels.
+MAPS_FLOOR_FRAG :: `uniform sampler2D map;
+varying vec2 vUv;
+void main() {
+  gl_FragColor = vec4(texture2D(map, vUv * 6.0).rgb, 1.0);
+}`
+MAPS_BOX_VERT :: `out vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`
+// GLSL 3 with two samplers: textureSize and texelFetch of one, texture of
+// the other.
+MAPS_BOX_FRAG :: `uniform sampler2D tint;
+uniform sampler2D map;
+in vec2 vUv;
+out vec4 fragColor;
+void main() {
+  ivec2 size = textureSize(map, 0);
+  vec3 texel = texelFetch(map, ivec2(vUv * vec2(size)), 0).rgb;
+  fragColor = vec4(mix(texel, texture(tint, vUv).rgb, 0.4), 1.0);
+}`
+
+// ShaderMaterial textures: a smooth pattern (so hardware and software
+// filtering stay close) with its full mip chain.
+@(private = "file")
+build_custom_maps :: proc(a: ^Parity_Assets) -> string {
+	T :: 64
+	px: [T * T * 4]u8
+	tint_px: [16 * 16 * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			u, v := f32(x) / T, f32(y) / T
+			px[i] = u8(clamp(0.5 + 0.45 * math.cos(u * math.TAU), 0, 1) * 255)
+			px[i + 1] = u8(clamp(0.5 + 0.45 * math.sin(v * math.TAU * 2), 0, 1) * 255)
+			px[i + 2] = u8(clamp(0.3 + 0.6 * u * v, 0, 1) * 255)
+			px[i + 3] = 255
+		}
+	}
+	for i in 0 ..< 16 * 16 {
+		tint_px[i * 4], tint_px[i * 4 + 1], tint_px[i * 4 + 2], tint_px[i * 4 + 3] = u8(i % 16 * 16), 90, u8(255 - i / 16 * 16), 255
+	}
+	tex := o3d.texture_add(&a.textures, px[:], T, T)
+	tint := o3d.texture_add(&a.textures, tint_px[:], 16, 16)
+	floor_id, e1 := o3d.shader(&a.shaders, MAPS_FLOOR_VERT, MAPS_FLOOR_FRAG, false)
+	box_id, e2 := o3d.shader(&a.shaders, MAPS_BOX_VERT, MAPS_BOX_FRAG, true)
+	if e1 != "" || e2 != "" {
+		return e1 if e1 != "" else e2
+	}
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0, 1.2, 4}, target = {0, 0.2, -4}, fov = 50, near = 0.1, far = 60}
+	m := o3d.MATERIAL_DEFAULT
+	m.shader = floor_id
+	m.shader_maps[o3d.shader_map(&a.shaders, floor_id, "map")] = tex
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 8, 24), o3d.compose({0, 0, -8}, {-math.PI / 2, 0, 0}), m})
+	m = o3d.MATERIAL_DEFAULT
+	m.shader = box_id
+	m.shader_maps[o3d.shader_map(&a.shaders, box_id, "map")] = tex
+	m.shader_maps[o3d.shader_map(&a.shaders, box_id, "tint")] = tint
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.8, 0.8, 0.8), o3d.compose({0.9, 0.6, 0.8}, {0.4, 0.6, 0}), m})
 	return ""
 }
 

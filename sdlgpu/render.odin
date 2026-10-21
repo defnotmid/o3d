@@ -591,6 +591,13 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 				sdl.BindGPUGraphicsPipeline(pass, p)
 				bound = p
 			}
+			if n := o3d.shader_module(o3d.shader_get(shaders, m.shader), .Fragment).num_samplers; n > 0 {
+				maps: [o3d.SHADER_MAPS]sdl.GPUTextureSamplerBinding
+				for id, c in m.shader_maps {
+					maps[c] = tex_binding(g, id)
+				}
+				sdl.BindGPUFragmentSamplers(pass, 0, &maps[0], u32(min(n, len(maps))))
+			}
 			for stage in o3d.Shader_Stage {
 				at := job.blocks.at[di][stage]
 				if at < 0 {

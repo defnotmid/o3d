@@ -54,8 +54,13 @@ What is known about three.js carries over:
   `cameraPosition`, `isOrthographic`, plus `instanceColor` and `instanceId`:
   an instanced draw's instance colour, white without one, and 0-based index)
   and attributes (`position`, `normal`, `uv`), compiled by [oksl](https://github.com/defnotmid/oksl) on both
-  renderers. The output is written as the shader leaves it; `.Transparent`
-  blends it, `side` culls as for any material. `projectionMatrix` maps depth to
+  renderers. Fragment shaders sample textures as three.js's do: `uniform
+  sampler2D`s bound to `Material.shader_maps` by channel (`shader_map`
+  finds a sampler's by name, once), `texture` / `texture2D` at the level
+  its derivatives pick (the full mip chain, repeating), `textureLod`,
+  `texelFetch` and `textureSize`, uv up the image as with three.js's flipY;
+  an unbound sampler reads white. The output is written as the shader
+  leaves it; `.Transparent` blends it, `side` culls as for any material. `projectionMatrix` maps depth to
   0..1 (SDL_GPU's clip space) rather than WebGL's -1..1, which matters only to
   shaders that build their own. On a morphed or skinned mesh, `position` and
   `normal` arrive already morphed and posed by the skin's joints.
@@ -205,6 +210,7 @@ wave, errors := o3d.shader(&shaders, vertex_glsl, fragment_glsl)   // errors: "F
 w := o3d.MATERIAL_DEFAULT
 w.shader = wave
 w.uniforms = o3d.scene_uniforms(&scene, {"uTime", {t}}, {"uColor", {0.3, 0.8, 0.4}})
+w.shader_maps[o3d.shader_map(&shaders, wave, "map")] = earth   // its `uniform sampler2D map`
 append(&scene.draws, o3d.Draw{o3d.sphere(&geos, 1), o3d.compose(), w})
 
 // GPU (o3d/sdlgpu): borrows the host's SDL_GPU device, or makes a headless one
@@ -548,7 +554,8 @@ includes ovg's `shaders/curves.slang` from there too.
   except flat ones. A band shades a run of one custom draw's triangles as
   2x2 quads (helper lanes for derivatives) in one oksl call, then writes
   them through the same coverage, depth and blending as the standard
-  material, in triangle order.
+  material, in triangle order. Its samplers read the draw's
+  `shader_maps` at the level oksl picks from the quad's derivatives.
 - Errors are values (`Error`); no threads of its own: the software
   renderer runs its phases on the caller's `thread.Pool`.
 
@@ -580,10 +587,7 @@ For onimite:
    drawing mapped onto a surface. Today a texture is added once
    (`texture_add`); this needs an update path the host fills per frame
    (on the GPU: a texture the host renders into).
-4. **ShaderMaterial textures** (small here): `uniform sampler2D` bound to
-   `Textures`; `texelFetch` / `textureSize` and CPU implicit-LOD
-   `texture()` wait on oksl (deferred there).
-5. **Exact extrusion caps**, optional: extrusions' caps as exact shapes
+4. **Exact extrusion caps**, optional: extrusions' caps as exact shapes
    (unbevelled first; a bevelled cap is an offset outline). Opaque caps
    draw by sample, which equals the mesh, so this waits on a need.
 

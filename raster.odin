@@ -513,7 +513,14 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		helpers      = q.helpers[:],
 		varyings     = q.values[:],
 	}
-	oksl.run_fragment(&sh.pipeline.fragment.program, block(&s.blocks, draw, .Fragment), quads, q.colours[:], q.shaded[:], &w.vm)
+	maps := Shader_Maps{textures = job.textures, ids = s.materials[draw].shader_maps}
+	sizes: [SHADER_MAPS][2]i32
+	for id, c in maps.ids {
+		if tex, ok := texture_get(job.textures, id); ok && !tex.external {
+			sizes[c] = {i32(tex.width), i32(tex.height)}
+		}
+	}
+	oksl.run_fragment(&sh.pipeline.fragment.program, block(&s.blocks, draw, .Fragment), quads, q.colours[:], q.shaded[:], &w.vm, {sampler = sample_shader_map, user = &maps, channel_sizes = sizes[:]})
 	blend := .Blended in s.materials[draw].flags
 	for qi in 0 ..< nq {
 		ref := q.tri[qi]
@@ -525,6 +532,28 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		}
 	}
 	return taken
+}
+
+// A ShaderMaterial draw's textures, for its sampler.
+@(private = "file")
+Shader_Maps :: struct {
+	textures: ^Textures,
+	ids:      [SHADER_MAPS]Texture_Id,
+}
+
+// oksl's sampler: a channel's texture at uv (running down the image, as
+// the prelude flips three.js's) and the level oksl picked, repeating as
+// the GPU's sampler; white without one.
+@(private = "file")
+sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32) -> [4]f32 {
+	maps := (^Shader_Maps)(user)
+	if channel < 0 || channel >= SHADER_MAPS {
+		return 1
+	}
+	if _, ok := texture_get(maps.textures, maps.ids[channel]); !ok {
+		return 1
+	}
+	return sample_lod(maps.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = false)
 }
 
 // The samples of pixel (x, y) inside the triangle.

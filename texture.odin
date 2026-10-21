@@ -204,25 +204,27 @@ sample_top :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2) -> Vec
 	return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv)
 }
 
-// Trilinearly samples `id` at explicit `lod` with horizontal repeat and
-// vertical pole clamp (for equirectangular environment and background maps).
-sample_lod :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec4 {
+// Trilinearly samples `id` at explicit `lod`, repeating horizontally and,
+// with `clamp_v`, clamping vertically at the poles (equirectangular
+// environment and background maps); else repeating both ways.
+sample_lod :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32, clamp_v := true) -> Vec4 {
 	tex, ok := texture_get(t, id)
 	if !ok || tex.external {
 		return {0, 0, 0, 0}
 	}
-	if tex.levels <= 1 || lod <= 0 {
-		return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv, true)
+	// Not above 0 (magnified, or -inf or NaN where uv does not change).
+	if tex.levels <= 1 || !(lod > 0) {
+		return sample_mip(t.texels[tex.mips[0]:], int(tex.width), int(tex.height), uv, clamp_v)
 	}
 	lod_clamped := clamp(lod, 0, f32(tex.levels - 1))
 	l0 := int(lod_clamped)
 	l1 := min(l0 + 1, int(tex.levels) - 1)
 	frac := lod_clamped - f32(l0)
-	c0 := sample_mip(t.texels[tex.mips[l0]:], int(max(tex.width >> u32(l0), 1)), int(max(tex.height >> u32(l0), 1)), uv, true)
+	c0 := sample_mip(t.texels[tex.mips[l0]:], int(max(tex.width >> u32(l0), 1)), int(max(tex.height >> u32(l0), 1)), uv, clamp_v)
 	if l0 == l1 || frac <= 0 {
 		return c0
 	}
-	c1 := sample_mip(t.texels[tex.mips[l1]:], int(max(tex.width >> u32(l1), 1)), int(max(tex.height >> u32(l1), 1)), uv, true)
+	c1 := sample_mip(t.texels[tex.mips[l1]:], int(max(tex.width >> u32(l1), 1)), int(max(tex.height >> u32(l1), 1)), uv, clamp_v)
 	return linalg.lerp(c0, c1, frac)
 }
 
