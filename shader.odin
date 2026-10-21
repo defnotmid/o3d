@@ -17,7 +17,9 @@ import "deps:oksl"
 // offsets found when the shader was compiled, the material's own by name
 // (`scene_uniforms`). The output is written as the shader leaves it (no
 // colour conversion, as three.js's ShaderMaterial); a transparent material
-// is blended over what is behind.
+// is blended over what is behind. The fragment prelude declares o3d's
+// functions a shader calls (`Prelude_Function`): the scene's shadows, tone
+// mapping, fog and output encoding.
 
 // 0 is the standard material.
 Shader_Id :: distinct u32
@@ -41,30 +43,71 @@ Builtin :: enum u8 {
 	// 0-based index.
 	Instance_Color,
 	Instance_Id,
-	// `shadowAt`'s (declared when the fragment shader calls it): the first
-	// shadow-casting light's view-projection, and its map's size, bias,
-	// normal bias and 1 (0: no light casts).
+	// `shadowAt`'s: the first shadow-casting light's view-projection, and
+	// its map's size, bias, normal bias and 1 (0: no light casts).
 	Shadow_Matrix,
 	Shadow_Params,
+	// `toneMapping`'s: the scene's mode (`Tone_Mapping`) and exposure.
+	Tone_Params,
+	// `fogged`'s: the fog's linear colour; its kind (`Fog_Kind`), near, far
+	// and density (`fog_terms`).
+	Fog_Color,
+	Fog_Params,
 }
 
 @(rodata)
 BUILTINS := [Builtin]struct {
 	name, type: string,
 	fragment:   bool,
-	shadow:     bool,
+	// Declared only for these functions (none: always).
+	functions:  bit_set[Prelude_Function],
 } {
-	.Model_Matrix      = {"modelMatrix", "mat4", false, false},
-	.Model_View_Matrix = {"modelViewMatrix", "mat4", false, false},
-	.Projection_Matrix = {"projectionMatrix", "mat4", false, false},
-	.View_Matrix       = {"viewMatrix", "mat4", true, false},
-	.Normal_Matrix     = {"normalMatrix", "mat3", false, false},
-	.Camera_Position   = {"cameraPosition", "vec3", true, false},
-	.Is_Orthographic   = {"isOrthographic", "bool", true, false},
-	.Instance_Color    = {"instanceColor", "vec3", true, false},
-	.Instance_Id       = {"instanceId", "float", true, false},
-	.Shadow_Matrix     = {"o3dShadowMatrix", "mat4", true, true},
-	.Shadow_Params     = {"o3dShadowParams", "vec4", true, true},
+	.Model_Matrix      = {"modelMatrix", "mat4", false, {}},
+	.Model_View_Matrix = {"modelViewMatrix", "mat4", false, {}},
+	.Projection_Matrix = {"projectionMatrix", "mat4", false, {}},
+	.View_Matrix       = {"viewMatrix", "mat4", true, {}},
+	.Normal_Matrix     = {"normalMatrix", "mat3", false, {}},
+	.Camera_Position   = {"cameraPosition", "vec3", true, {}},
+	.Is_Orthographic   = {"isOrthographic", "bool", true, {}},
+	.Instance_Color    = {"instanceColor", "vec3", true, {}},
+	.Instance_Id       = {"instanceId", "float", true, {}},
+	.Shadow_Matrix     = {"o3dShadowMatrix", "mat4", true, {.Shadow_At}},
+	.Shadow_Params     = {"o3dShadowParams", "vec4", true, {.Shadow_At}},
+	.Tone_Params       = {"o3dToneParams", "vec4", true, {.Tone_Mapping}},
+	.Fog_Color         = {"o3dFogColor", "vec3", true, {.Fogged}},
+	.Fog_Params        = {"o3dFogParams", "vec4", true, {.Fogged}},
+}
+
+// The functions the fragment prelude declares for a shader that calls them
+// (its source names them), with the built-ins they read, so a
+// ShaderMaterial can finish its colour as the standard material does:
+//
+//	gl_FragColor = linearToOutputTexel(vec4(fogged(toneMapping(c), worldPosition), a));
+//
+// (o3d's standard order: tone mapping, fog in linear, then sRGB; three.js
+// fogs after encoding). three.js's names where it has the function.
+Prelude_Function :: enum u8 {
+	// `float shadowAt(vec3 worldPosition, vec3 worldNormal)` (SHADOW_PRELUDE).
+	Shadow_At,
+	// `vec3 toneMapping(vec3 color)`: the scene's tone mapping and exposure
+	// (`tone_map`), linear to linear; as is without tone mapping.
+	Tone_Mapping,
+	// `vec3 fogged(vec3 color, vec3 worldPosition)`: towards the scene's
+	// fog's colour by the distance from the camera (`fog_factor`), linear.
+	Fogged,
+	// `vec4 linearToOutputTexel(vec4 value)`: linear to sRGB, as o3d writes
+	// the standard material (clamped to 0..1), alpha as is.
+	Linear_To_Output,
+}
+
+@(rodata)
+PRELUDE_FUNCTIONS := [Prelude_Function]struct {
+	name, glsl: string,
+} {
+	.Shadow_At        = {"shadowAt", SHADOW_PRELUDE},
+	.Tone_Mapping     = {"toneMapping", TONE_PRELUDE},
+	.Fogged           = {"fogged", FOG_PRELUDE},
+	.Linear_To_Output = {"linearToOutputTexel", OUTPUT_PRELUDE},
 }
 
 // The shadow map's sampler `shadowAt` reads (a channel of its own).
@@ -114,6 +157,89 @@ float shadowAt(vec3 worldPosition, vec3 worldNormal) {
 		lit += wy * acc;
 	}
 	return lit / 9.0;
+}
+`
+
+// tone_map's modes, as o3d.odin's and shaders/common.slang's.
+@(private = "file")
+TONE_PRELUDE :: `vec3 toneMapping(vec3 color) {
+	float mode = o3dToneParams.x;
+	if (mode == 0.0) {
+		return color;
+	}
+	vec3 v = color * o3dToneParams.y;
+	if (mode == 1.0) {
+		return clamp(v, 0.0, 1.0);
+	}
+	if (mode == 2.0) {
+		return clamp(v / (vec3(1.0) + v), 0.0, 1.0);
+	}
+	if (mode == 3.0) {
+		vec3 x = max(v - vec3(0.004), vec3(0.0));
+		vec3 u = (x * (6.2 * x + vec3(0.5))) / (x * (6.2 * x + vec3(1.7)) + vec3(0.06));
+		return pow(u, vec3(2.2));
+	}
+	if (mode == 4.0) {
+		v *= 1.0 / 0.6;
+		v = vec3(dot(vec3(0.59719, 0.35458, 0.04823), v), dot(vec3(0.07600, 0.90834, 0.01566), v), dot(vec3(0.02840, 0.13383, 0.83777), v));
+		vec3 a = v * (v + vec3(0.0245786)) - vec3(0.000090537);
+		vec3 b = v * (0.983729 * v + vec3(0.4329510)) + vec3(0.238081);
+		v = a / b;
+		v = vec3(dot(vec3(1.60475, -0.53108, -0.07367), v), dot(vec3(-0.10208, 1.10813, -0.00605), v), dot(vec3(-0.00327, -0.07276, 1.07602), v));
+		return clamp(v, 0.0, 1.0);
+	}
+	if (mode == 5.0) {
+		// Linear Rec.709 -> Rec.2020 -> AgX's inset, the curve, its outset.
+		vec3 r = vec3(dot(vec3(0.6274039, 0.3292830, 0.0433131), v), dot(vec3(0.0690973, 0.9195404, 0.0113623), v), dot(vec3(0.0163914, 0.0880133, 0.8955953), v));
+		r = max(r, vec3(1e-10));
+		vec3 inset = vec3(dot(vec3(0.85662715, 0.09512124, 0.04825161), r), dot(vec3(0.13731897, 0.76124199, 0.10143904), r), dot(vec3(0.11189821, 0.07679942, 0.81130237), r));
+		inset = max(inset, vec3(1e-10));
+		vec3 x = clamp((log2(inset) + vec3(12.47393)) * (1.0 / 16.5), 0.0, 1.0);
+		vec3 x2 = x * x;
+		vec3 x4 = x2 * x2;
+		x = 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - vec3(0.00232);
+		vec3 o = vec3(dot(vec3(1.12710058, -0.11060664, -0.01649394), x), dot(vec3(-0.14132976, 1.15782370, -0.01649394), x), dot(vec3(-0.14132976, -0.11060664, 1.25193641), x));
+		o = pow(max(o, vec3(0.0)), vec3(2.2));
+		return clamp(vec3(dot(vec3(1.6604910, -0.5876411, -0.0728499), o), dot(vec3(-0.1245505, 1.1328999, -0.0083494), o), dot(vec3(-0.0181508, -0.1005789, 1.1187297), o)), 0.0, 1.0);
+	}
+	// Khronos PBR Neutral.
+	float lo = min(v.r, min(v.g, v.b));
+	float offset = lo < 0.08 ? lo - 6.25 * lo * lo : 0.04;
+	v -= vec3(offset);
+	float peak = max(v.r, max(v.g, v.b));
+	if (peak < 0.76) {
+		return clamp(v, 0.0, 1.0);
+	}
+	float newPeak = 1.0 - 0.24 * 0.24 / (peak + 0.24 - 0.76);
+	v *= newPeak / peak;
+	float g = 1.0 - 1.0 / (0.15 * (peak - newPeak) + 1.0);
+	return clamp(mix(v, vec3(newPeak), g), 0.0, 1.0);
+}
+`
+
+// fog_factor's, the terms resolved (fog_terms).
+@(private = "file")
+FOG_PRELUDE :: `vec3 fogged(vec3 color, vec3 worldPosition) {
+	float dist = length(worldPosition - cameraPosition);
+	float f = 0.0;
+	if (o3dFogParams.x == 1.0) {
+		f = clamp((dist - o3dFogParams.y) / max(o3dFogParams.z - o3dFogParams.y, 1e-6), 0.0, 1.0);
+	} else if (o3dFogParams.x == 2.0) {
+		float d = o3dFogParams.w * dist;
+		f = clamp(1.0 - exp(-d * d), 0.0, 1.0);
+	}
+	return mix(color, o3dFogColor, f);
+}
+`
+
+// linear_to_srgb's.
+@(private = "file")
+OUTPUT_PRELUDE :: `float o3dSrgb(float c) {
+	c = clamp(c, 0.0, 1.0);
+	return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+vec4 linearToOutputTexel(vec4 value) {
+	return vec4(o3dSrgb(value.r), o3dSrgb(value.g), o3dSrgb(value.b), value.a);
 }
 `
 
@@ -232,8 +358,13 @@ shader_module :: proc "contextless" (sh: ^Shader, stage: Shader_Stage) -> ^oksl.
 
 @(private = "file")
 make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
-	shadows := strings.contains(fragment, "shadowAt")
-	p, errors, ok := oksl.compile_pipeline({vertex = vertex, fragment = fragment, vertex_prelude = prelude(.Vertex, glsl3, false), fragment_prelude = prelude(.Fragment, glsl3, shadows)})
+	functions: bit_set[Prelude_Function]
+	for f in Prelude_Function {
+		if strings.contains(fragment, PRELUDE_FUNCTIONS[f].name) {
+			functions += {f}
+		}
+	}
+	p, errors, ok := oksl.compile_pipeline({vertex = vertex, fragment = fragment, vertex_prelude = prelude(.Vertex, glsl3, {}), fragment_prelude = prelude(.Fragment, glsl3, functions)})
 	fail :: proc(sh: ^Shader, p: ^oksl.Pipeline, text: string) {
 		oksl.destroy_pipeline(p)
 		sh.pipeline = nil
@@ -292,9 +423,10 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 	return
 }
 
-// three.js's prefix for a ShaderMaterial stage.
+// three.js's prefix for a ShaderMaterial stage, with the functions the
+// shader calls.
 @(private = "file")
-prelude :: proc(stage: Shader_Stage, glsl3, shadows: bool) -> string {
+prelude :: proc(stage: Shader_Stage, glsl3: bool, functions: bit_set[Prelude_Function]) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "precision highp float;\nprecision highp int;\n")
 	if stage == .Vertex {
@@ -314,12 +446,12 @@ prelude :: proc(stage: Shader_Stage, glsl3, shadows: bool) -> string {
 		strings.write_string(&b, "#define texelFetch(s, p, l) texelFetch(s, ivec2((p).x, textureSize(s, l).y - 1 - (p).y), l)\n")
 	}
 	for row in BUILTINS {
-		if (stage == .Vertex || row.fragment) && (!row.shadow || shadows) {
+		if (stage == .Vertex || row.fragment) && (row.functions == {} || row.functions & functions != {}) {
 			fmt.sbprintf(&b, "uniform %s %s;\n", row.type, row.name)
 		}
 	}
-	if shadows {
-		strings.write_string(&b, SHADOW_PRELUDE)
+	for f in functions {
+		strings.write_string(&b, PRELUDE_FUNCTIONS[f].glsl)
 	}
 	if stage == .Vertex {
 		for row in VERTEX_ATTRIBUTES {
@@ -354,6 +486,9 @@ shader_blocks_destroy :: proc(b: ^Shader_Blocks) {
 // first of the frame's `shadows` for `shadowAt`), then the material's
 // uniforms by name.
 shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadows: []Shadow, out: ^Shader_Blocks) {
+	fog_near, fog_far, fog_density := fog_terms(scene.fog)
+	tone_params := [4]f32{f32(scene.tone_mapping), scene.tone_mapping_exposure if scene.tone_mapping_exposure > 0 else 1, 0, 0}
+	fog_params := [4]f32{f32(scene.fog.kind), fog_near, fog_far, fog_density}
 	n := len(scene.draws)
 	clear(&out.bytes)
 	table_grow_non_zero(&out.at, n)
@@ -411,6 +546,12 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadow
 					} else {
 						put(dst, [4]f32{})
 					}
+				case .Tone_Params:
+					put(dst, tone_params)
+				case .Fog_Color:
+					put(dst, linear(scene.fog.color))
+				case .Fog_Params:
+					put(dst, fog_params)
 				}
 			}
 			for u in scene.uniforms[m.uniforms.first:][:m.uniforms.count] {

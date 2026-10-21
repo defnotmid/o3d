@@ -88,7 +88,7 @@ halves :: proc "contextless" (dst: [][4]f16, src: []f32) #no_bounds_check {
 
 // A texture's levels laid out at the end of `table` (texels or
 // hdr_texels), grown once to hold them all; level 0 is for the caller.
-@(private = "file")
+@(private)
 texture_grow :: proc(table: ^[dynamic]$T, width, height: int) -> Texture {
 	tex := Texture {
 		width       = u32(width),
@@ -112,7 +112,7 @@ texture_grow :: proc(table: ^[dynamic]$T, width, height: int) -> Texture {
 }
 
 // Downsamples level 0 of a grown texture into its mip chain and lists it.
-@(private = "file")
+@(private)
 texture_finish :: proc(t: ^Textures, tex: ^Texture) -> Texture_Id {
 	sw, sh := int(tex.width), int(tex.height)
 	for l in 1 ..< int(tex.levels) {

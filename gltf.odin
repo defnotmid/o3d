@@ -282,36 +282,59 @@ model_material :: proc "contextless" (m: ^Model, name: string) -> Model_Material
 
 // The model's box in its rest pose and its own space (its nodes'
 // transforms, no animation, skins and morphs at rest): its size for
-// placing and framing. `ok` false: it has no geometry.
+// placing and framing, its roots' boxes together (`model_node_bounds`).
+// `ok` false: it has no geometry.
 model_bounds :: proc(m: ^Model, geos: ^Geometries) -> (lo, hi: Vec3, ok: bool) {
 	n := len(m.nodes)
-	world := make([]Mat4, n, context.temp_allocator)
+	boxes := make([][2]Vec3, n, context.temp_allocator)
+	model_node_bounds(m, geos, boxes)
 	lo, hi = {max(f32), max(f32), max(f32)}, {min(f32), min(f32), min(f32)}
-	for i in 0 ..< n {
-		parent := m.nodes.parent[i]
-		world[i] = world[parent] * m.nodes.local[i] if parent >= 0 else m.nodes.local[i]
-		mi := m.nodes.mesh[i]
-		if mi < 0 || int(mi) >= len(m.meshes) {
-			continue
-		}
-		mesh := m.meshes[mi]
-		for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
-			g := geometry_get(geos, prim.geometry) or_continue
-			if g.vertex_count == 0 {
-				continue
-			}
-			for k in 0 ..< 8 {
-				corner := Vec3{g.box_max.x if k & 1 != 0 else g.box_min.x, g.box_max.y if k & 2 != 0 else g.box_min.y, g.box_max.z if k & 4 != 0 else g.box_min.z}
-				q := (world[i] * Vec4{corner.x, corner.y, corner.z, 1}).xyz
-				lo, hi = linalg.min(lo, q), linalg.max(hi, q)
-			}
-			ok = true
+	for b, i in boxes {
+		if m.nodes.parent[i] < 0 {
+			lo, hi = linalg.min(lo, b[0]), linalg.max(hi, b[1])
 		}
 	}
-	if !ok {
+	if lo.x > hi.x {
 		return {}, {}, false
 	}
-	return
+	return lo, hi, true
+}
+
+// Each node's box in the rest pose and the model's space: of its meshes and
+// the nodes under it ({lo, hi} by Model_Node_Id - 1; lo past hi where none
+// has geometry), for placing or parting a model's pieces. `boxes` is the
+// caller's, one per node.
+model_node_bounds :: proc(m: ^Model, geos: ^Geometries, boxes: [][2]Vec3) {
+	n := min(len(m.nodes), len(boxes))
+	parents := m.nodes.parent[:n]
+	meshes := m.nodes.mesh[:n]
+	locals := m.nodes.local[:n]
+	world := make([]Mat4, n, context.temp_allocator)
+	// Parents come first: worlds down the list, boxes back up it.
+	for i in 0 ..< n {
+		world[i] = world[parents[i]] * locals[i] if parents[i] >= 0 else locals[i]
+		lo, hi := Vec3{max(f32), max(f32), max(f32)}, Vec3{min(f32), min(f32), min(f32)}
+		if mi := meshes[i]; mi >= 0 && int(mi) < len(m.meshes) {
+			mesh := m.meshes[mi]
+			for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
+				g := geometry_get(geos, prim.geometry) or_continue
+				if g.vertex_count == 0 {
+					continue
+				}
+				for k in 0 ..< 8 {
+					corner := Vec3{g.box_max.x if k & 1 != 0 else g.box_min.x, g.box_max.y if k & 2 != 0 else g.box_min.y, g.box_max.z if k & 4 != 0 else g.box_min.z}
+					q := (world[i] * Vec4{corner.x, corner.y, corner.z, 1}).xyz
+					lo, hi = linalg.min(lo, q), linalg.max(hi, q)
+				}
+			}
+		}
+		boxes[i] = {lo, hi}
+	}
+	for i := n - 1; i >= 0; i -= 1 {
+		if p := parents[i]; p >= 0 {
+			boxes[p] = {linalg.min(boxes[p][0], boxes[i][0]), linalg.max(boxes[p][1], boxes[i][1])}
+		}
+	}
 }
 
 // Where `node` was in the world at the last `gltf_draw` with `pose` (nil:

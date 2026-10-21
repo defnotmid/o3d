@@ -1855,6 +1855,70 @@ void main() {
 	}
 }
 
+// A ShaderMaterial finishing its colour with toneMapping, fogged and
+// linearToOutputTexel draws what the standard material does with the same
+// colour, under every tone mapping and fog (an unlit plane, a colour past 1
+// by the exposure); a shader that calls none declares none.
+@(test)
+test_shader_tone_fog :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	scene: Scene
+	defer scene_destroy(&scene)
+	VERT :: `varying vec3 vWorld;
+void main() {
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vWorld = w.xyz;
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`
+	FRAG :: `uniform vec3 color;
+varying vec3 vWorld;
+void main() {
+  gl_FragColor = linearToOutputTexel(vec4(fogged(toneMapping(color), vWorld), 1.0));
+}`
+	id, errors := shader(&shaders, VERT, FRAG)
+	testing.expectf(t, errors == "", "compiles: %s", errors)
+	plain, plain_errors := shader(&shaders, VERT, "void main() { gl_FragColor = vec4(1.0); }")
+	testing.expectf(t, plain_errors == "", "compiles: %s", plain_errors)
+	for b in Builtin {
+		if BUILTINS[b].functions != {} {
+			testing.expectf(t, shader_get(&shaders, plain).builtins[.Fragment][b] < 0, "%v is not declared", b)
+		}
+	}
+	W :: 8
+	s: Software
+	defer software_destroy(&s)
+	C :: Vec3{0.9, 0.5, 0.2}
+	fogs := []Fog{{}, {kind = .Linear, color = {0.2, 0.4, 0.8}, near = 2, far = 12}, {kind = .Exp2, color = {0.8, 0.3, 0.1}, density = 0.12}}
+	for mode in Tone_Mapping {
+		for fog in fogs {
+			pixels: [2][4]u8
+			for custom, k in ([]bool{false, true}) {
+				scene_clear(&scene)
+				scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+				scene.tone_mapping, scene.tone_mapping_exposure = mode, 3
+				scene.fog = fog
+				m := MATERIAL_DEFAULT
+				m.color, m.flags = C, {.Basic}
+				if custom {
+					m.shader = id
+					lc := linear(C)
+					m.uniforms = scene_uniforms(&scene, {"color", lc[:]})
+				}
+				append(&scene.draws, Draw{plane(&g, 4, 4), compose({0, 0, 0}), m})
+				px := software_render(&s, &scene, &g, &shaders, W, W)
+				i := (W / 2 * W + W / 2) * 4
+				pixels[k] = {px[i], px[i + 1], px[i + 2], px[i + 3]}
+			}
+			for c in 0 ..< 4 {
+				testing.expectf(t, abs(int(pixels[0][c]) - int(pixels[1][c])) <= 1, "%v, fog %v: standard %v, shader %v", mode, fog.kind, pixels[0], pixels[1])
+			}
+		}
+	}
+}
+
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's
 // bottom edge on its point (a wide one too), and `depth_offset` brings one inside a wall in
 // front of it, covering the same pixels.
@@ -2034,4 +2098,36 @@ test_depth_image :: proc(t: ^testing.T) {
 	c := (16 * W + 16) * 4
 	testing.expectf(t, abs(f32(out[c]) - 2.5) < 2e-3 && out[c + 3] == 1, "the plane 2.5 away: %v", out[c:][:4])
 	testing.expectf(t, out[0] == 99 && out[1] == 99 && out[3] == 0, "nothing: far, a 0: %v", out[:4])
+}
+
+// The sky (three.js's Sky): blue overhead, the sun's disc far brighter
+// than the sky beside it, finite below the horizon; baked, its texels
+// are the radiance towards their centres.
+@(test)
+test_sky :: proc(t: ^testing.T) {
+	sky := SKY_DEFAULT
+	sky.sun = {0, 0.3, -1}
+	zenith := sky_radiance(sky, {0, 1, 0})
+	testing.expectf(t, zenith.b > zenith.r * 1.5, "blue overhead: %v", zenith)
+	sun := sky_radiance(sky, linalg.normalize(sky.sun))
+	beside := sky_radiance(sky, linalg.normalize(Vec3{0.1, 0.3, -1}))
+	testing.expectf(t, sun.r > beside.r * 20, "the disc %v, beside it %v", sun, beside)
+	below := sky_radiance(sky, {0, -1, 0})
+	testing.expectf(t, below.r > 0 && below.r < 1e4 && below.b > 0 && below.b < 1e4, "below the horizon, finite: %v", below)
+	textures: Textures
+	defer textures_destroy(&textures)
+	W :: 64
+	id := sky_texture(&textures, sky, W)
+	tex, ok := texture_get(&textures, id)
+	testing.expect(t, ok && tex.hdr && tex.width == W && tex.height == W / 2 && tex.levels == 7, "a 64 x 32 HDR texture with its mipmaps")
+	for y in ([]int{0, 15, 31}) {
+		for x in ([]int{0, 40}) {
+			want := sky_radiance(sky, equirect_dir({(f32(x) + 0.5) / W, 1 - (f32(y) + 0.5) / (W / 2)}))
+			got := textures.hdr_texels[tex.first_texel + u32(y * W + x)]
+			for c in 0 ..< 3 {
+				testing.expectf(t, abs(f32(got[c]) - want[c]) <= 2e-3 * want[c] + 1e-4, "texel %d, %d: %v, %v", x, y, got, want)
+			}
+		}
+	}
+	testing.expect_value(t, sky_texture(&textures, sky, 1), Texture_Id(0))
 }

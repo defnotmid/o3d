@@ -63,6 +63,8 @@ PARITY_CASES := [?]Parity_Case {
 	{"far_layers", 240, 180, build_far_layers},
 	{"triplanar", 240, 180, build_triplanar},
 	{"custom_shadow", 240, 180, build_custom_shadow},
+	{"custom_finish", 240, 180, build_custom_finish},
+	{"sky", 240, 180, build_sky},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -1077,6 +1079,79 @@ build_custom_shadow :: proc(a: ^Parity_Assets) -> string {
 	caster.color, caster.flags = {0.8, 0.4, 0.3}, {.Cast_Shadow}
 	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.6, 0.6, 0.6), o3d.compose({-0.4, 1.1, 0}, {0.3, 0.5, 0}), caster})
 	append(&s.draws, o3d.Draw{o3d.torus(&a.geos, 0.3, 0.08, 12, 32), o3d.compose({0.75, 1.4, 0.4}, {1.2, 0, 0}), caster})
+	return ""
+}
+
+// A ShaderMaterial finishing its colour as the standard material does:
+// the scene's tone mapping, fog and output encoding.
+@(private = "file")
+FINISH_FRAG :: `uniform vec3 sunDir;
+uniform vec3 ground;
+varying vec3 vWorld;
+varying vec3 vNormal;
+varying vec2 vUv;
+void main() {
+  vec3 n = normalize(vNormal);
+  float stripe = step(0.5, fract(vUv.x * 8.0));
+  vec3 c = ground * (0.6 + 0.4 * stripe) * (0.3 + 4.0 * max(dot(n, normalize(sunDir)), 0.0));
+  gl_FragColor = linearToOutputTexel(vec4(fogged(toneMapping(c), vWorld), 1.0));
+}`
+
+// ShaderMaterials finished with toneMapping, fogged and linearToOutputTexel
+// (a striped ground and a bright sphere, past 1) beside standard spheres,
+// under AgX with an exposure and FogExp2.
+@(private = "file")
+build_custom_finish :: proc(a: ^Parity_Assets) -> string {
+	id, errors := o3d.shader(&a.shaders, LIT_VERT, FINISH_FRAG)
+	if errors != "" {
+		return errors
+	}
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0, 1.6, 6}, target = {0, 0.5, -4}, fov = 50, near = 0.1, far = 100}
+	s.tone_mapping, s.tone_mapping_exposure = .AgX, 1.4
+	s.fog = {kind = .Exp2, color = {0.75, 0.62, 0.55}, density = 0.07}
+	sun := o3d.Vec3{-1, 1.2, 0.8}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.9, 0.8}, intensity = 3, position = sun})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.3})
+	m := o3d.MATERIAL_DEFAULT
+	m.shader = id
+	m.uniforms = o3d.scene_uniforms(s, {"sunDir", {sun.x, sun.y, sun.z}}, {"ground", {0.35, 0.3, 0.22}})
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 40, 40), o3d.compose({0, 0, -10}, {-math.PI / 2, 0, 0}), m})
+	hot := m
+	hot.uniforms = o3d.scene_uniforms(s, {"sunDir", {sun.x, sun.y, sun.z}}, {"ground", {0.9, 0.5, 0.2}})
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.7, 32, 16), o3d.compose({-1.2, 0.7, 0}), hot})
+	for z, k in ([]f32{0, -6, -14}) {
+		std := o3d.MATERIAL_DEFAULT
+		std.color, std.roughness = {0.3, 0.55, 0.85}, 0.5
+		append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.7, 32, 16), o3d.compose({1.2 + f32(k), 0.7, z}), std})
+	}
+	return ""
+}
+
+// three.js's Sky at dawn baked by o3d.sky_texture: the background and,
+// prefiltered, the environment of a mirror, a rough metal and a dielectric
+// sphere (ACES, exposure 0.5 as three.js's example).
+@(private = "file")
+build_sky :: proc(a: ^Parity_Assets) -> string {
+	sky := o3d.SKY_DEFAULT
+	sky.sun = {0.6, 0.08, -1}
+	sky.turbidity, sky.rayleigh, sky.mie_directional_g = 10, 3, 0.7
+	id := o3d.sky_texture(&a.textures, sky, 512)
+	o3d.environment_prefilter(&a.textures, id)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0, 0.4, 4}, target = {0.3, 0.6, -1}, fov = 55, near = 0.1, far = 50}
+	s.background = id
+	s.environment = id
+	s.tone_mapping, s.tone_mapping_exposure = .ACES_Filmic, 0.5
+	for roughness, k in ([]f32{0.05, 0.45, 0.6}) {
+		m := o3d.MATERIAL_DEFAULT
+		m.color = {0.95, 0.95, 0.95} if k < 2 else {0.8, 0.3, 0.2}
+		m.metalness = 1 if k < 2 else 0
+		m.roughness = roughness
+		append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.45, 48, 24), o3d.compose({-1.1 + 1.1 * f32(k), 0.2, 0}), m})
+	}
 	return ""
 }
 

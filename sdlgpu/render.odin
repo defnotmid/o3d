@@ -503,7 +503,8 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 		lu.shadow_params[si] = {f32(job.shadows[si].size), job.shadows[si].bias, job.shadows[si].normal_bias, 0}
 	}
 	env := job.env
-	lu.env_params = {env.intensity if env.radiance != 0 else 0, env.max_lod if env.radiance != 0 else 0, exposure, active.fog.density}
+	fog_near, fog_far, fog_density := o3d.fog_terms(active.fog)
+	lu.env_params = {env.intensity if env.radiance != 0 else 0, env.max_lod if env.radiance != 0 else 0, exposure, fog_density}
 	lu.env_flags = {u32(hdr_texture(textures, env.radiance)), u32(active.camera.orthographic), 0, 0}
 	near := active.camera.near if active.camera.near > 0 else 0.1
 	far := active.camera.far if active.camera.far > near else near * 1e4
@@ -511,7 +512,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	if active.fog.kind != .None {
 		fc := o3d.linear(active.fog.color)
 		lu.fog_color = {fc.r, fc.g, fc.b, 0}
-		lu.fog_params = {active.fog.near, active.fog.far, 0, 0}
+		lu.fog_params = {fog_near, fog_far, 0, 0}
 	}
 	for l, i in lights[:nl] {
 		lu.lights[i] = {

@@ -131,6 +131,14 @@ test_triplanar_match_software :: proc(t: ^testing.T) {expect_parity(t, "triplana
 @(test)
 test_custom_shadow_match_software :: proc(t: ^testing.T) {expect_parity(t, "custom_shadow")}
 
+// ShaderMaterials finished with the scene's tone mapping and fog.
+@(test)
+test_custom_finish_match_software :: proc(t: ^testing.T) {expect_parity(t, "custom_finish")}
+
+// A baked Sky as the background and the environment.
+@(test)
+test_sky_match_software :: proc(t: ^testing.T) {expect_parity(t, "sky")}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)

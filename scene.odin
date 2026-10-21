@@ -1513,18 +1513,27 @@ shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int 
 	return n
 }
 
+// The fog's near, far and density, defaults in place of unset ones.
+fog_terms :: #force_inline proc "contextless" (fog: Fog) -> (near, far, density: f32) {
+	if fog.far > fog.near {
+		near, far = fog.near, fog.far
+	} else {
+		near, far = 1, 1000
+	}
+	density = fog.density if fog.density > 0 else 0.00025
+	return
+}
+
 // Fog blend factor 0..1 at Euclidean camera distance `dist` (`shaders/o3d.slang`).
 fog_factor :: #force_inline proc "contextless" (fog: Fog, dist: f32) -> f32 {
+	near, far, density := fog_terms(fog)
 	switch fog.kind {
 	case .None:
 		return 0
 	case .Linear:
-		near := fog.near if fog.far > fog.near else 1
-		far := fog.far if fog.far > fog.near else 1000
 		return clamp((dist - near) / max(far - near, 1e-6), 0, 1)
 	case .Exp2:
-		d := fog.density if fog.density > 0 else 0.00025
-		dd := d * dist
+		dd := density * dist
 		return clamp(1 - math.exp(-dd * dd), 0, 1)
 	}
 	return 0

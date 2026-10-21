@@ -1364,3 +1364,37 @@ f 3/3 2/2 1/1
 	testing.expect_value(t, m.primitives[1].material_id, model_material(&m, "missing"))
 	testing.expect_value(t, model_material(&m, "lit"), Model_Material_Id(1))
 }
+
+// model_node_bounds: a node's box holds its meshes' and its children's in
+// the model's space; a node with nothing under it is empty; model_bounds
+// is the roots' together.
+@(test)
+test_model_node_bounds :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	m: Model
+	defer model_destroy(&m)
+	unit := box(&geos) // -0.5 .. 0.5
+	append(&m.primitives, Model_Primitive{geometry = unit})
+	append(&m.meshes, Model_Mesh{first_primitive = 0, primitive_count = 1})
+	node :: proc(m: ^Model, parent, mesh: i32, local: Mat4) {
+		append(&m.nodes, Model_Node{parent = parent, mesh = mesh, skin = -1, light = -1, local = local})
+	}
+	// 0: a root moved 10 along x holding 1 (its box, up 2, twice the size)
+	// and 2 (nothing); 3: another root, a box at the origin.
+	node(&m, -1, -1, linalg.matrix4_translate_f32({10, 0, 0}))
+	node(&m, 0, 0, linalg.matrix4_translate_f32({0, 2, 0}) * linalg.matrix4_scale_f32({2, 2, 2}))
+	node(&m, 0, -1, linalg.MATRIX4F32_IDENTITY)
+	node(&m, -1, 0, linalg.MATRIX4F32_IDENTITY)
+	boxes: [4][2]Vec3
+	model_node_bounds(&m, &geos, boxes[:])
+	near :: proc(a, b: Vec3) -> bool {
+		return linalg.length(a - b) < 1e-5
+	}
+	testing.expectf(t, near(boxes[1][0], {9, 1, -1}) && near(boxes[1][1], {11, 3, 1}), "the child's own box: %v", boxes[1])
+	testing.expectf(t, boxes[0] == boxes[1], "the root holds its child's: %v", boxes[0])
+	testing.expectf(t, boxes[2][0].x > boxes[2][1].x, "nothing under it: empty, %v", boxes[2])
+	testing.expectf(t, near(boxes[3][0], {-0.5, -0.5, -0.5}) && near(boxes[3][1], {0.5, 0.5, 0.5}), "the other root: %v", boxes[3])
+	lo, hi, ok := model_bounds(&m, &geos)
+	testing.expectf(t, ok && near(lo, {-0.5, -0.5, -1}) && near(hi, {11, 3, 1}), "the roots together: %v .. %v", lo, hi)
+}

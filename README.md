@@ -89,7 +89,12 @@ What is known about three.js carries over:
   the point is by the first shadow-casting light, 0 to 1, as the standard
   material's (normal bias, bias, the same PCF; three.js's getShadow). Its
   map takes the shader's first sampler channel (`shader_map` finds the
-  shader's own by name).
+  shader's own by name). A ShaderMaterial's colour is written as it leaves
+  it, as three.js's; it finishes as the standard material does by calling
+  `toneMapping(color)` (the scene's tone mapping and exposure, linear to
+  linear), `fogged(color, worldPosition)` (the scene's fog, linear) and
+  `linearToOutputTexel(value)` (sRGB), in that order. These, like
+  `shadowAt`, are declared only for a shader that names them.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
   (radiusTop 0 is a cone), `torus`, `capsule(radius, height, capSegments,
@@ -151,6 +156,8 @@ geos: o3d.Geometries                       // kept: geometry is made once
 textures: o3d.Textures                     // kept: textures and mipmaps are made once
 albedo, _ := o3d.texture_load(&textures, "brick.png")
 sky, _ := o3d.texture_load(&textures, "sky.hdr")          // Radiance HDR: linear half floats, past 1
+// or three.js's Sky (Preetham), baked once at load: dawn = o3d.sky_texture(&textures, {sun = {0.6, 0.08, -1}, up = {0, 1, 0},
+//     turbidity = 10, rayleigh = 3, mie_coefficient = 0.005, mie_directional_g = 0.7}, 2048)
 scene: o3d.Scene                           // filled every frame
 o3d.scene_clear(&scene)
 scene.camera = {position = {0, 2, 6}, target = {0, 0.5, 0}, fov = 40, near = 0.1, far = 100}
@@ -189,6 +196,8 @@ parts.transforms[wheel - 1] = {set = {.Rotation}, rotation = spin}   // the whee
 o3d.gltf_draw(&scene, &rover, flags = {.Cast_Shadow}, parts = &parts)
 hub := o3d.model_node_world(&rover, wheel)                           // where the wheel went, to attach other draws
 lo, hi, _ := o3d.model_bounds(&rover, &geos)                         // its rest-pose box, for placing and framing
+boxes := make([][2]o3d.Vec3, len(rover.nodes))
+o3d.model_node_bounds(&rover, &geos, boxes)                          // each node's subtree's {lo, hi} in the model's space
 
 // Where a world point lands on the frame (a lens flare, a label): pixel, depth, in front
 px, depth, in_front := o3d.camera_project(scene.camera, 1920, 1080, sun_position)
@@ -246,6 +255,7 @@ w.shader = wave
 w.uniforms = o3d.scene_uniforms(&scene, {"uTime", {t}}, {"uColor", {0.3, 0.8, 0.4}})
 w.shader_maps[o3d.shader_map(&shaders, wave, "map")] = earth   // its `uniform sampler2D map`
 // shadows in it: `float lit = max(dot(n, sunDir), 0.0) * shadowAt(vWorld, n);` (the first shadow light's)
+// finished as the standard material: `gl_FragColor = linearToOutputTexel(vec4(fogged(toneMapping(c), vWorld), 1.0));`
 append(&scene.draws, o3d.Draw{o3d.sphere(&geos, 1), o3d.compose(), w})
 
 // GPU (o3d/sdlgpu): borrows the host's SDL_GPU device, or makes a headless one
@@ -486,7 +496,11 @@ includes ovg's `shaders/curves.slang` from there too.
   made in float, both renderers read it linear (RGBA16F on the GPU), so a
   sun far past 1 lights as one and tone mapping takes it down. Standard
   material maps read an HDR texture's values as they would encoded colour;
-  HDR is for environments, backgrounds and ShaderMaterials.
+  HDR is for environments, backgrounds and ShaderMaterials. `sky_texture`
+  bakes three.js's Sky (Preetham's daylight with the sun's disc, `Sky`,
+  `SKY_DEFAULT`, `sky_radiance` per direction) into such a texture, for
+  the background and, prefiltered, the environment (three.js draws it as
+  a mesh and bakes it with PMREMGenerator).
   Changing one means changing the other; the tests compare the two
   renderers.
 - **Particles:** `scene_particles` keeps a frame's particles as rows
