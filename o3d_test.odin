@@ -1438,3 +1438,39 @@ test_particles :: proc(t: ^testing.T) {
 	left, right := at(px, W / 2 - 8, W / 2), at(px, W / 2 + 8, W / 2)
 	testing.expectf(t, left.r != right.r && min(left.r, right.r) < 200, "faded by how far the wall is behind: %v %v", left, right)
 }
+
+// point_hidden: points on a steeply tilted surface are not hidden by it
+// (no bias), a point a little behind it is, one in front is not, one
+// behind the camera or off the frame is.
+@(test)
+test_point_hidden :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0.5, 4}, target = {0, 0, 0}, fov = 50, near = 0.1, far = 50}
+	scene.depth = true
+	wall := MATERIAL_DEFAULT
+	wall.flags = {.Basic}
+	tilt := compose({0, 0, 0}, {0, 1.2, 0})
+	append(&scene.draws, Draw{plane(&g, 6, 6), tilt, wall})
+	W, H :: 64, 48
+	s: Software
+	defer software_destroy(&s)
+	software_render(&s, &scene, &g, nil, W, H)
+	depths := software_depth(&s)
+	hidden_on := 0
+	for i in 0 ..< 200 {
+		u := f32(i % 20) / 19 * 2.4 - 1.2
+		v := f32(i / 20) / 9 * 2 - 1
+		on := (tilt * Vec4{u, v, 0, 1}).xyz
+		hidden_on += 1 if point_hidden(scene.camera, depths, W, H, on) else 0
+	}
+	testing.expectf(t, hidden_on == 0, "%d of 200 points on the wall hidden by it", hidden_on)
+	n := (tilt * Vec4{0, 0, 1, 0}).xyz
+	testing.expect(t, point_hidden(scene.camera, depths, W, H, -n * 0.05), "a point just behind the wall is hidden")
+	testing.expect(t, !point_hidden(scene.camera, depths, W, H, n * 0.05), "one in front is not")
+	testing.expect(t, point_hidden(scene.camera, depths, W, H, {0, 0.5, 6}), "behind the camera")
+	testing.expect(t, point_hidden(scene.camera, depths, W, H, {40, 0, 0}), "off the frame")
+}

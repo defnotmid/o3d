@@ -196,7 +196,7 @@ append(&scene.draws, o3d.Draw{puffs, o3d.compose(), smoke})          // drawn un
 
 // The frame's depth, to hide it behind what is nearer and for post effects
 scene.depth = true                                                   // then render as usual
-hidden := depth > o3d.software_depth(&sw)[int(px.y) * 1920 + int(px.x)]   // GPU: o3d_sdlgpu.depth(&g) (R32F), read_depth
+hidden := o3d.point_hidden(scene.camera, o3d.software_depth(&sw), 1920, 1080, sun_position)   // GPU: read_depth(&g, o3d_sdlgpu.depth(&g), ...)
 
 // Text and logos: outlines (flattened to points) grouped into shapes, extruded once, drawn per frame
 shapes := o3d.shapes_from_contours(glyph_contours)          // ShapePath.toShapes; holes found by containment
@@ -486,7 +486,10 @@ includes ovg's `shaders/curves.slang` from there too.
   pixel's centre (blended draws let what is behind show; ShaderMaterials
   with their plain geometry, alpha masks cut). `software_depth` gives the
   software renderer's; `o3d_sdlgpu.depth` / `job_depth` a sampleable R32F
-  texture for the host's own passes and `read_depth` its values. gpu_check
+  texture for the host's own passes and `read_depth` its values;
+  `point_hidden` says whether it hides a world point (the four texels
+  around it, the farthest kept, so a point on a drawn surface is not hidden
+  by it; `bias` for points a little inside one). gpu_check
   compares the two (all but 0 to 2 texels in some 30000 within 3e-6).
 - **External textures:** `texture_add_external` adds a `Textures` entry
   with no texels, for pixels the host already has on the GPU and changes

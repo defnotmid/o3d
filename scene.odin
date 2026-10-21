@@ -1201,6 +1201,27 @@ camera_project :: proc "contextless" (c: Camera, width, height: int, p: Vec3) ->
 	return pixel, clip.z * iw, true
 }
 
+// Whether what the frame's depth holds (`depths`: software_depth's or
+// read_depth's, `width x height`) hides world point `p` from camera `c`:
+// something there is nearer than the point by more than `bias` (world
+// units along the camera's axis; for a point a little inside a surface).
+// The four texels around the point are read and the farthest kept, so a
+// point on a drawn surface (a label pinned to a part) is not hidden by its
+// own surface's depth, sampled at pixel centres. Off the frame or behind
+// the camera: hidden (not seen).
+point_hidden :: proc "contextless" (c: Camera, depths: []f32, width, height: int, p: Vec3, bias: f32 = 0) -> bool {
+	pixel, depth, in_front := camera_project(c, width, height, p)
+	if !in_front || len(depths) < width * height || pixel.x < 0 || pixel.y < 0 || pixel.x >= f32(width) || pixel.y >= f32(height) {
+		return true
+	}
+	x0 := clamp(int(math.floor(pixel.x - 0.5)), 0, width - 1)
+	y0 := clamp(int(math.floor(pixel.y - 0.5)), 0, height - 1)
+	x1, y1 := min(x0 + 1, width - 1), min(y0 + 1, height - 1)
+	farthest := max(depths[y0 * width + x0], depths[y0 * width + x1], depths[y1 * width + x0], depths[y1 * width + x1])
+	point := view_depth(c, depth)
+	return view_depth(c, farthest) + bias < point * (1 - 1e-5)
+}
+
 // The order to draw in: the draws that can be seen (with geometry, and a
 // compiled shader if they ask for one, the bounding sphere at least partly
 // in the view), the opaque ones as listed, then the blended ones farthest
