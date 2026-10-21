@@ -1213,3 +1213,29 @@ void main() {
 		software_destroy(&s)
 	}
 }
+
+// A transparent material whose only transparency is its alpha map blends:
+// where the map's green is 0, what is behind shows through.
+@(test)
+test_alpha_map_blends :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	clear_px := [4]u8{0, 0, 0, 255} // green 0: fully transparent
+	clear_id := texture_add(&textures, clear_px[:], 1, 1)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 2}, fov = 60, near = 0.1, far = 10}
+	behind, front := MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	behind.color, behind.flags = {1, 0, 0}, {.Basic}
+	front.color, front.flags, front.alpha_map = {1, 1, 1}, {.Basic, .Transparent}, clear_id
+	append(&scene.draws, Draw{plane(&g, 4, 4), compose({0, 0, -1}), behind})
+	append(&scene.draws, Draw{plane(&g, 4, 4), compose({0, 0, 0}), front})
+	s: Software
+	defer software_destroy(&s)
+	px := software_render(&s, &scene, &g, nil, 8, 8, nil, &textures)
+	c := px[(4 * 8 + 4) * 4:][:4]
+	testing.expectf(t, c[0] > 240 && c[1] < 16 && c[2] < 16, "the red plane behind shows through: %v", c)
+}

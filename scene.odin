@@ -1076,7 +1076,7 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 // from elsewhere (a colour map's, a ShaderMaterial's, an exact shape's
 // coverage), as three.js blends any transparent material.
 blended :: proc "contextless" (m: Material) -> bool {
-	return .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.shader != 0 || m.mode == .Curves)
+	return .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || m.shader != 0 || m.mode == .Curves)
 }
 
 // ---- shading ----------------------------------------------------------------------------
