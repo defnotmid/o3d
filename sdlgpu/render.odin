@@ -2,6 +2,7 @@ package o3d_sdlgpu
 
 import "core:math/linalg"
 import "core:mem"
+import "core:slice"
 import sdl "vendor:sdl3"
 
 import o3d ".."
@@ -74,6 +75,13 @@ Job :: struct {
 	shadow_maps:          [o3d.MAX_SHADOWS]^sdl.GPUTexture,
 	shadow_depths:        [o3d.MAX_SHADOWS]^sdl.GPUTexture,
 	shadow_sizes:         [o3d.MAX_SHADOWS]u32,
+	// The frame's depth (`Scene.depth`): its draws, its map (R32F, sampled
+	// by the host: `job_depth`) and depth buffer at `depth_size`.
+	depth:                bool,
+	depth_draws:          [dynamic]int,
+	depth_map:            ^sdl.GPUTexture,
+	depth_buffer:         ^sdl.GPUTexture,
+	depth_size:           [2]u32,
 	order:                [dynamic]int,
 	materials:            [dynamic]o3d.Shading_Material, // per draw
 	blocks:               o3d.Shader_Blocks,
@@ -91,6 +99,8 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 		release_shadow_slot(g, job, idx)
 		delete(job.casters[idx])
 	}
+	release_depth(g, job)
+	delete(job.depth_draws)
 	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
@@ -253,12 +263,14 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 	return nil
 }
 
-// The shadow pass: the casters' depth from a shadow light into its map.
+// A depth pass: `draws`' depth through `view_proj` into `map_tex` (cleared
+// to 1). A shadow map's casters are drawn with their other side; the
+// frame's depth (`own_side`) with their own.
 @(private = "file")
-draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
-	scene, geos, shadow := job.scene, job.geos, &job.shadows[idx]
-	color := sdl.GPUColorTargetInfo{texture = job.shadow_maps[idx], clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
-	depth := sdl.GPUDepthStencilTargetInfo{texture = job.shadow_depths[idx], clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+draw_depth :: proc(g: ^GPU, job: ^Job, draws: []int, view_proj: o3d.Mat4, map_tex, depth_tex: ^sdl.GPUTexture, own_side: bool, cmd: ^sdl.GPUCommandBuffer) {
+	scene, geos := job.scene, job.geos
+	color := sdl.GPUColorTargetInfo{texture = map_tex, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = depth_tex, clear_depth = 1, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	defer sdl.EndGPURenderPass(pass)
 	if g.vertices.buffer == nil && job.dynamic_vertices.buffer == nil {
@@ -268,9 +280,9 @@ draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
 	bound: ^sdl.GPUGraphicsPipeline
 	bound_vb: ^sdl.GPUBuffer
 	bound_ib: ^sdl.GPUBuffer
-	for di in job.casters[idx] {
+	for di in draws {
 		m := &job.materials[di]
-		if .Alpha_Mask in m.flags && .Color_Map not_in m.flags && m.opacity < m.alpha_cutoff {
+		if .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} == {} && m.opacity < m.alpha_cutoff {
 			continue
 		}
 		d := &scene.draws[di]
@@ -288,9 +300,12 @@ draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
 		joints := o3d.scene_draw_joints(scene, di)
 		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
 		curved := .Curves in m.flags
-		p := g.shadow_skinned_pipelines[d.material.side] if skinned else g.shadow_pipelines[d.material.side]
+		// The shadow pipelines cull by the other side: indexed by the other
+		// side, they cull by the material's own.
+		side := o3d.shadow_side(d.material.side) if own_side else d.material.side
+		p := g.shadow_skinned_pipelines[side] if skinned else g.shadow_pipelines[side]
 		if curved {
-			p = g.shadow_curve_pipelines[d.material.side]
+			p = g.shadow_curve_pipelines[side]
 		}
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
@@ -301,7 +316,7 @@ draw_shadow :: proc(g: ^GPU, job: ^Job, idx: int, cmd: ^sdl.GPUCommandBuffer) {
 		}
 		mask_samplers := [2]sdl.GPUTextureSamplerBinding{tex_binding(g, m.color_map), tex_binding(g, m.alpha_map)}
 		sdl.BindGPUFragmentSamplers(pass, 0, &mask_samplers[0], len(mask_samplers))
-		du := make_draw_uniforms(shadow.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
+		du := make_draw_uniforms(view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m, geo)
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
@@ -461,6 +476,13 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 			}
 		}
 	}
+	job.depth = active.depth
+	if job.depth {
+		if !ensure_depth(g, job, width, height) {
+			return .Out_Of_Memory
+		}
+		o3d.depth_draws(active, geos, shaders, proj * view, &job.depth_draws, &job.expanded)
+	}
 	exposure := active.tone_mapping_exposure if active.tone_mapping_exposure > 0 else 1
 	job.bg_params.params = {bg_intensity, bg_lod, f32(active.tone_mapping), exposure}
 	job.bg_params.flags = {u32(hdr_texture(textures, job.background)), 0, 0, 0}
@@ -545,7 +567,10 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	scene, geos, shaders := job.scene, job.geos, job.shaders
 	width, height := job.width, job.height
 	for si in 0 ..< job.shadow_count {
-		draw_shadow(g, job, si, cmd)
+		draw_depth(g, job, job.casters[si][:], job.shadows[si].view_proj, job.shadow_maps[si], job.shadow_depths[si], false, cmd)
+	}
+	if job.depth {
+		draw_depth(g, job, job.depth_draws[:], job.view_proj, job.depth_map, job.depth_buffer, true, cmd)
 	}
 	shadow_maps: [o3d.MAX_SHADOWS]^sdl.GPUTexture
 	for &m, si in shadow_maps {
@@ -707,6 +732,28 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	sdl.EndGPUCopyPass(copy_pass)
 	return nil
 }
+// The frame's depth map from the job's last render of a scene with
+// `Scene.depth` (R32F, `width x height` of that render, rows from the top;
+// nil without): to bind in the host's own passes (depth of field, haze).
+job_depth :: proc "contextless" (job: ^Job) -> ^sdl.GPUTexture {
+	return job.depth_map if job.depth else nil
+}
+
+// `job_depth` of the GPU's own job (`render`).
+depth :: proc "contextless" (g: ^GPU) -> ^sdl.GPUTexture {
+	return job_depth(&g.job)
+}
+
+// A depth map's values (`width x height` floats), as `o3d.software_depth`
+// gives the software renderer's.
+read_depth :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height: u32, allocator := context.allocator) -> (depths: []f32, err: o3d.Error) {
+	if tex == nil {
+		return nil, .Not_Prepared
+	}
+	bytes := read(g, tex, width, height, allocator) or_return
+	return slice.reinterpret([]f32, bytes), nil
+}
+
 // The texture's pixels (RGBA8 premultiplied), for tests and saving.
 read :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height: u32, allocator := context.allocator) -> (pixels: []u8, err: o3d.Error) {
 	size := width * height * 4

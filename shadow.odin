@@ -124,6 +124,24 @@ shadow_casters :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, sh: 
 	}
 }
 
+// The draws a frame's depth (`Scene.depth`) holds: the opaque ones that can
+// be seen (blended ones let what is behind show; ShaderMaterials with their
+// plain geometry, as shadows draw them).
+depth_draws :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view_proj: Mat4, order: ^[dynamic]int, exp: ^Expanded_Draws = nil) {
+	clear(order)
+	n := len(scene.draws)
+	models := scene.draws.model[:n]
+	geometries := scene.draws.geometry[:n]
+	for m, i in scene_materials(scene) {
+		if blended(m) || (m.shader != 0 && shader_get(shaders, m.shader) == nil) {
+			continue
+		}
+		if draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
+			append(order, i)
+		}
+	}
+}
+
 // The side a caster is drawn with: the other one (three.js's shadowSide).
 shadow_side :: proc "contextless" (side: Side) -> Side {
 	switch side {

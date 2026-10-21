@@ -76,6 +76,8 @@ Software :: struct {
 	workers:       [dynamic]Worker,
 	// Each shadow light's depth per texel (shadow.size squared), drawn first.
 	shadow_maps:   [MAX_SHADOWS][]f32,
+	// The frame's depth per pixel (`Scene.depth`), drawn after them.
+	depth_map:     [dynamic]f32,
 	expanded:      Expanded_Draws,
 }
 
@@ -101,6 +103,7 @@ software_destroy :: proc(s: ^Software) {
 	for &sm in s.shadow_maps {
 		delete(sm)
 	}
+	delete(s.depth_map)
 	expanded_draws_destroy(&s.expanded)
 	s^ = {}
 }
@@ -232,7 +235,17 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		shadow_casters(active, geos, shaders, sh, &s.order, &s.expanded)
 		job.shadow_index = si
 		job.view_proj, job.width, job.height, job.depth_only = sh.view_proj, size, size, true
+		job.depth_target, job.own_side = s.shadow_maps[si], false
 		run_pass(s, active, geos, &job, pool, draw_depth_band)
+	}
+	if active.depth {
+		table_grow_non_zero(&s.depth_map, width * height)
+		depth_draws(active, geos, shaders, proj * view, &s.order, &s.expanded)
+		job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, true
+		job.depth_target, job.own_side = s.depth_map[:width * height], true
+		run_pass(s, active, geos, &job, pool, draw_depth_band)
+	} else {
+		clear(&s.depth_map)
 	}
 	draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
 	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
@@ -241,6 +254,12 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	}
 	run_pass(s, active, geos, &job, pool, draw_band)
 	return s.pixels
+}
+
+// The frame's depth per pixel from the last `software_render` of a scene
+// with `Scene.depth` (rows from the top; empty without).
+software_depth :: proc "contextless" (s: ^Software) -> []f32 {
+	return s.depth_map[:]
 }
 
 // The phases over the draws in `s.order` into a `job.width x job.height`
@@ -297,10 +316,13 @@ Frame_Job :: struct {
 	fog:           Fog,
 	fog_color:     Vec3,
 	// The pass: its camera and target, and whether it draws only depth
-	// (the shadow map: positions only, the casters' other side).
+	// (into `depth_target`: positions only; a shadow map's casters with
+	// their other side, the frame's depth with their own).
 	view_proj:     Mat4,
 	width, height: int,
 	depth_only:    bool,
+	depth_target:  []f32,
+	own_side:      bool,
 	bands:         int,
 }
 
@@ -432,7 +454,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		}
 		oksl.run_vertex(&sh.pipeline.vertex.program, block(&s.blocks, di, .Vertex), attrs[:], count, w.positions[:], w.values[:], &w.vm)
 	}
-	side := shadow_side(d.material.side) if job.depth_only else d.material.side
+	side := shadow_side(d.material.side) if job.depth_only && !job.own_side else d.material.side
 	values := raw_data(w.values) // nil with no floats (the shadow map): never read
 	curved_geo := geo.mode == .Curves && .Curves in m.flags
 	for t := 0; t + 2 < len(indices); t += 3 {

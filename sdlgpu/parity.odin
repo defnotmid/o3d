@@ -1323,3 +1323,58 @@ jobs_check :: proc(g: ^GPU) -> (err: string) {
 	}
 	return ""
 }
+
+// The frame's depth (Scene.depth) on both renderers, over cases with
+// ShaderMaterials, an alpha-masked cutout, skins, morphs, exact shapes and
+// alpha maps: the GPU's map against the software renderer's, texel by
+// texel. Pixel centres on triangle edges may fall on either side of the
+// edge on different rasterizers: at most 1 in 2000 texels may differ (on
+// Vulkan 0 to 2 of some 30000 do; elsewhere within 3e-6).
+depth_check :: proc(g: ^GPU) -> (err: string) {
+	NAMES :: [?]string{"shadow", "skinned", "morph", "curves", "alpha_map"}
+	for name in NAMES {
+		c: Parity_Case
+		for pc in PARITY_CASES {
+			if pc.name == name {
+				c = pc
+			}
+		}
+		a: Parity_Assets
+		defer parity_assets_destroy(&a)
+		if e := c.build(&a); e != "" {
+			return fmt.tprintf("depth: %s: %s", name, e)
+		}
+		a.scene.depth = true
+		w, h := u32(c.width), u32(c.height)
+		out := target(g, w, h)
+		defer sdl.ReleaseGPUTexture(g.device, out)
+		if e := render(g, &a.scene, &a.geos, &a.shaders, out, w, h, textures = &a.textures); e != nil {
+			return fmt.tprintf("depth: %s: render: %v", name, e)
+		}
+		gpu_depth, rerr := read_depth(g, depth(g), w, h)
+		defer delete(gpu_depth)
+		if rerr != nil || len(gpu_depth) != int(w * h) {
+			return fmt.tprintf("depth: %s: no GPU depth", name)
+		}
+		sw: o3d.Software
+		defer o3d.software_destroy(&sw)
+		o3d.software_render(&sw, &a.scene, &a.geos, &a.shaders, int(w), int(h), nil, &a.textures)
+		cpu_depth := o3d.software_depth(&sw)
+		if len(cpu_depth) != len(gpu_depth) {
+			return fmt.tprintf("depth: %s: no software depth", name)
+		}
+		differ, drawn := 0, 0
+		for d, i in cpu_depth {
+			drawn += 1 if d < 1 else 0
+			differ += 1 if abs(d - gpu_depth[i]) > 1e-4 else 0
+		}
+		if drawn == 0 {
+			return fmt.tprintf("depth: %s: nothing drawn", name)
+		}
+		share := f64(differ) / f64(len(cpu_depth))
+		if share > 1.0 / 2000 {
+			return fmt.tprintf("depth: %s: %d of %d texels differ", name, differ, len(cpu_depth))
+		}
+	}
+	return ""
+}

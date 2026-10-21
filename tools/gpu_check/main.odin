@@ -50,7 +50,7 @@ main :: proc() {
 		name, ok: string,
 		run:      proc(g: ^gpu.GPU) -> string,
 	}
-	checks := [?]Check{{"external", "bound = uploaded, unbound = no map", gpu.external_check}, {"jobs", "prepared, recorded = rendered", gpu.jobs_check}}
+	checks := [?]Check{{"external", "bound = uploaded, unbound = no map", gpu.external_check}, {"jobs", "prepared, recorded = rendered", gpu.jobs_check}, {"depth", "GPU depth = software depth", gpu.depth_check}}
 	for c in checks {
 		if err := c.run(&g); err != "" {
 			fmt.printf("%-12s FAIL  %s\n", c.name, err)

@@ -232,6 +232,12 @@ Scene :: struct {
 	tone_mapping:          Tone_Mapping,
 	tone_mapping_exposure: f32,
 	fog:                   Fog,
+	// Also draw the frame's depth (`software_depth`, `o3d_sdlgpu.depth` /
+	// `read_depth`): per pixel, the depth both renderers test (0 near, 1
+	// far, 1 where nothing is) of the nearest opaque draw at its centre, as
+	// `camera_project` gives a point's. For post effects (depth of field,
+	// haze) and to know whether something hides a point (a flare, a label).
+	depth:                 bool,
 	// ShaderMaterials' uniforms: each a name and its floats'
 	// uniform_floats[first:][:count].
 	uniforms:              [dynamic]struct {
@@ -267,6 +273,7 @@ scene_clear :: proc(s: ^Scene) {
 	s.tone_mapping = .None
 	s.tone_mapping_exposure = 0
 	s.fog = {}
+	s.depth = false
 	clear(&s.lights)
 	clear(&s.draws)
 	clear(&s.uniforms)
@@ -706,6 +713,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	out.tone_mapping = scene.tone_mapping
 	out.tone_mapping_exposure = scene.tone_mapping_exposure
 	out.fog = scene.fog
+	out.depth = scene.depth
 	append(&out.lights, ..scene.lights[:])
 	append(&out.uniforms, ..scene.uniforms[:])
 	append(&out.uniform_floats, ..scene.uniform_floats[:])

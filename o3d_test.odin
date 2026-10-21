@@ -1349,3 +1349,38 @@ test_camera_project :: proc(t: ^testing.T) {
 	_, _, in_front := camera_project(cameras[0], W, H, cameras[0].position * 2 - cameras[0].target)
 	testing.expect(t, !in_front, "behind the camera")
 }
+
+// The frame's depth (Scene.depth): what camera_project says of a point on
+// the nearest opaque surface; a point behind it is hidden (its projected
+// depth is past the map's); blended draws are not in it; nothing without
+// asking.
+@(test)
+test_frame_depth :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0.3, 0.4, 4}, target = {0, 0, 0}, fov = 50, near = 0.1, far = 20}
+	scene.depth = true
+	wall, glass := MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	wall.flags = {.Basic}
+	glass.flags, glass.opacity = {.Basic, .Transparent}, 0.5
+	append(&scene.draws, Draw{plane(&g, 6, 6), compose({0, 0, 0}), wall})
+	append(&scene.draws, Draw{plane(&g, 6, 6), compose({0, 0, 1}), glass})
+	W, H :: 80, 60
+	s: Software
+	defer software_destroy(&s)
+	software_render(&s, &scene, &g, nil, W, H)
+	depth := software_depth(&s)
+	testing.expect_value(t, len(depth), W * H)
+	on_wall := Vec3{0.4, -0.3, 0}
+	px, d, _ := camera_project(scene.camera, W, H, on_wall)
+	at := depth[int(px.y) * W + int(px.x)]
+	testing.expectf(t, abs(at - d) < 2e-3, "the wall's depth (not the glass's): map %v, point %v", at, d)
+	_, behind, _ := camera_project(scene.camera, W, H, on_wall - {0, 0, 1})
+	testing.expect(t, behind > at, "a point behind the wall is hidden")
+	scene.depth = false
+	software_render(&s, &scene, &g, nil, W, H)
+	testing.expect_value(t, len(software_depth(&s)), 0)
+}

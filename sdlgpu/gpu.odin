@@ -611,6 +611,31 @@ ensure_shadow :: proc(g: ^GPU, job: ^Job, idx: int, size: u32) -> bool {
 	return job.shadow_maps[idx] != nil && job.shadow_depths[idx] != nil
 }
 
+// A job's frame depth map (R32F, sampled by the host) and its depth buffer
+// at the frame's size, remade when it changes.
+@(private)
+ensure_depth :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
+	if job.depth_size == {width, height} && job.depth_map != nil {
+		return true
+	}
+	release_depth(g, job)
+	job.depth_map = sdl.CreateGPUTexture(g.device, {type = .D2, format = SHADOW_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1})
+	job.depth_buffer = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1})
+	job.depth_size = {width, height}
+	return job.depth_map != nil && job.depth_buffer != nil
+}
+
+@(private)
+release_depth :: proc(g: ^GPU, job: ^Job) {
+	if job.depth_map != nil {
+		sdl.ReleaseGPUTexture(g.device, job.depth_map)
+	}
+	if job.depth_buffer != nil {
+		sdl.ReleaseGPUTexture(g.device, job.depth_buffer)
+	}
+	job.depth_map, job.depth_buffer, job.depth_size = nil, nil, {}
+}
+
 @(private)
 release_shadow_slot :: proc(g: ^GPU, job: ^Job, idx: int) {
 	if job.shadow_maps[idx] != nil {

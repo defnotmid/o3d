@@ -85,7 +85,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 draw_depth_band :: proc(data: rawptr, band, _: int) {
 	job := (^Frame_Job)(data)
 	s := job.s
-	smap := s.shadow_maps[job.shadow_index]
+	smap := job.depth_target
 	size := job.width
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, job.height)

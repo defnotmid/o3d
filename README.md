@@ -187,6 +187,9 @@ lo, hi, _ := o3d.model_bounds(&rover, &geos)                         // its rest
 
 // Where a world point lands on the frame (a lens flare, a label): pixel, depth, in front
 px, depth, in_front := o3d.camera_project(scene.camera, 1920, 1080, sun_position)
+// The frame's depth, to hide it behind what is nearer and for post effects
+scene.depth = true                                                   // then render as usual
+hidden := depth > o3d.software_depth(&sw)[int(px.y) * 1920 + int(px.x)]   // GPU: o3d_sdlgpu.depth(&g) (R32F), read_depth
 
 // Text and logos: outlines (flattened to points) grouped into shapes, extruded once, drawn per frame
 shapes := o3d.shapes_from_contours(glyph_contours)          // ShapePath.toShapes; holes found by containment
@@ -457,6 +460,15 @@ includes ovg's `shaders/curves.slang` from there too.
   HDR is for environments, backgrounds and ShaderMaterials.
   Changing one means changing the other; the tests compare the two
   renderers.
+- **Frame depth:** with `Scene.depth` both renderers also draw the
+  frame's depth through their shadow pass, from the camera at the frame's
+  size: per pixel, the depth they test (0 near, 1 far, 1 where nothing is,
+  `camera_project`'s depth for a point) of the nearest opaque draw at the
+  pixel's centre (blended draws let what is behind show; ShaderMaterials
+  with their plain geometry, alpha masks cut). `software_depth` gives the
+  software renderer's; `o3d_sdlgpu.depth` / `job_depth` a sampleable R32F
+  texture for the host's own passes and `read_depth` its values. gpu_check
+  compares the two (all but 0 to 2 texels in some 30000 within 3e-6).
 - **External textures:** `texture_add_external` adds a `Textures` entry
   with no texels, for pixels the host already has on the GPU and changes
   every frame (a video's frames). `o3d_sdlgpu.texture_set_external` binds
