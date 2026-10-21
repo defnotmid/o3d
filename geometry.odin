@@ -133,6 +133,9 @@ Draw_Mode :: enum u8 {
 	Lines     = 1,
 	Points    = 2,
 	Curves    = 3,
+	// Particles (`scene_particles`): camera-facing quads, each with its own
+	// size, rotation, colour and opacity (a row of the sprite table).
+	Sprites   = 4,
 }
 
 Geometry :: struct {
@@ -146,6 +149,10 @@ Geometry :: struct {
 	// one a quad (its curve set's first word, `CURVE_EVEN_ODD` set for that
 	// fill rule); `uv1` is each quad's shape coordinate.
 	curve_table:                u32,
+	// `.Sprites`: its first row (a scene's `particles` for scene_particles'
+	// geometry; `Expanded_Draws.sprite_rows`, one a quad, for the quads
+	// drawn).
+	sprite_table:               u32,
 	// Distance from the origin to the farthest vertex (culling, sorting),
 	// and the largest morph position delta length across targets.
 	radius, morph_radius:       f32,

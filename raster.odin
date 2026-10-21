@@ -198,7 +198,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 		draw_shadow_only(job, ref, t, m, y0, y1, area)
 		return
 	}
-	if m.flags & (TEXTURE_FLAGS + {.Curves}) != {} {
+	if m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite}) != {} {
 		draw_standard_textured(job, ref, t, m, y0, y1, area, blend, receive)
 		return
 	}
@@ -310,6 +310,10 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 	if curved {
 		words, even_odd = curve_entry_words(job.geos, t.curve)
 	}
+	// A particle: its row's colour and opacity; soft against the frame's depth.
+	sprite := .Sprite in m.flags
+	row := s.expanded.sprite_rows[t.curve] if sprite && int(t.curve) < len(s.expanded.sprite_rows) else 1
+	soft := sprite && m.softness > 0 && len(s.depth_map) == s.width * s.height
 	inv_area := 1 / area
 	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width) &~ 1
 	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
@@ -355,6 +359,16 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				if .Alpha_Map in m.flags {
 					a_uv, a_dx, a_dy := slot_uv(m, .Alpha, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
 					opacity *= sample(job.textures, m.alpha_map, a_uv, a_dx, a_dy).g
+				}
+				if sprite {
+					pm.base *= linear(row.rgb)
+					opacity *= row.a
+					if soft {
+						// Faded by how far in front of the frame's depth it is.
+						clip := job.view_proj * Vec4{worlds[l].x, worlds[l].y, worlds[l].z, 1}
+						in_front := view_depth(job.scene.camera, s.depth_map[y * s.width + x]) - view_depth(job.scene.camera, clip.z / clip.w)
+						opacity *= clamp(in_front / m.softness, 0, 1)
+					}
 				}
 				if .Alpha_Mask in m.flags {
 					if opacity < m.alpha_cutoff {
@@ -415,7 +429,11 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				}
 				lit := shade(&pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
 				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				write_samples(s, t, x, y, area, covered, pack(lit, opacity), blend)
+				if .Additive in m.flags {
+					add_samples(s, t, x, y, area, covered, pack(lit, opacity))
+				} else {
+					write_samples(s, t, x, y, area, covered, pack(lit, opacity), blend)
+				}
 			}
 		}
 	}
@@ -627,6 +645,28 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: i
 			s.color[i] = col
 			s.depth[i] = z
 		}
+	}
+}
+
+// `write_samples` adding (premultiplied colour added, alpha over): an
+// additive draw's.
+@(private = "file")
+add_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: int, area: f32, covered: Sample_Mask, col: u32) {
+	for k in covered {
+		p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
+		s0 := edge(t.p[1].xy, t.p[2].xy, p) / area
+		s1 := edge(t.p[2].xy, t.p[0].xy, p) / area
+		z := s0 * t.p[0].z + s1 * t.p[1].z + (1 - s0 - s1) * t.p[2].z
+		i := (y * s.width + x) * SAMPLES + k
+		if z < 0 || z > 1 || z >= s.depth[i] {
+			continue
+		}
+		dst := s.color[i]
+		out := over(col, dst) & 0xff000000
+		for sh in ([3]u32{0, 8, 16}) {
+			out |= min(((col >> sh) & 0xff) + ((dst >> sh) & 0xff), 255) << sh
+		}
+		s.color[i] = out
 	}
 }
 

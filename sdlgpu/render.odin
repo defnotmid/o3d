@@ -91,6 +91,8 @@ Job :: struct {
 	// The expanded line/point geometry and ShaderMaterials' posed vertices.
 	dynamic_vertices:     Pool_Buffer,
 	dynamic_indices:      Pool_Buffer,
+	// The particle quads' rows (`Expanded_Draws.sprite_rows`).
+	sprite_rows:          Pool_Buffer,
 	custom_skinned:       Pool_Buffer,
 }
 
@@ -101,7 +103,7 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	}
 	release_depth(g, job)
 	delete(job.depth_draws)
-	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned}) {
+	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned, &job.sprite_rows}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
@@ -136,6 +138,10 @@ upload_dynamic :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPUCopyPass) -> o3d.Error 
 	job.dynamic_indices.uploaded = 0
 	upload_pool(g, &job.dynamic_vertices, {.VERTEX}, mem.slice_to_bytes(job.expanded.vertices[:]), pass) or_return
 	upload_pool(g, &job.dynamic_indices, {.INDEX}, mem.slice_to_bytes(job.expanded.indices[:]), pass) or_return
+	if len(job.expanded.sprite_rows) > 0 {
+		job.sprite_rows.uploaded = 0
+		upload_pool(g, &job.sprite_rows, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(job.expanded.sprite_rows[:]), pass) or_return
+	}
 	return nil
 }
 
@@ -219,7 +225,8 @@ make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Mate
 		flags        = m.flags,
 		alpha_cutoff = m.alpha_cutoff,
 		uv_sets      = m.uv_sets,
-		curve_table  = geo.curve_table,
+		curve_table  = geo.sprite_table if geo.mode == .Sprites else geo.curve_table,
+		softness     = m.softness,
 	}
 	for s, i in o3d.Texture_Slot {
 		t := m.uv_transforms[s]
@@ -463,6 +470,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	lights: [o3d.MAX_LIGHTS]o3d.Shading_Light
 	nl := o3d.shading_lights(active.lights[:], &lights)
 	o3d.shading_materials(o3d.scene_materials(active), &job.materials, textures)
+	o3d.sprite_materials(active, geos, &job.expanded, job.materials[:])
 	o3d.shader_blocks(active, shaders, view, proj, &job.blocks)
 	ns := o3d.frame_shadows(active, &job.shadows)
 	for si in 0 ..< ns {
@@ -476,7 +484,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 			}
 		}
 	}
-	job.depth = active.depth
+	job.depth = o3d.needs_depth(active)
 	if job.depth {
 		if !ensure_depth(g, job, width, height) {
 			return .Out_Of_Memory
@@ -496,7 +504,10 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	}
 	env := job.env
 	lu.env_params = {env.intensity if env.radiance != 0 else 0, env.max_lod if env.radiance != 0 else 0, exposure, active.fog.density}
-	lu.env_flags = {u32(hdr_texture(textures, env.radiance)), 0, 0, 0}
+	lu.env_flags = {u32(hdr_texture(textures, env.radiance)), u32(active.camera.orthographic), 0, 0}
+	near := active.camera.near if active.camera.near > 0 else 0.1
+	far := active.camera.far if active.camera.far > near else near * 1e4
+	lu.frame_params = {f32(width), f32(height), near, far}
 	if active.fog.kind != .None {
 		fc := o3d.linear(active.fog.color)
 		lu.fog_color = {fc.r, fc.g, fc.b, 0}
@@ -671,9 +682,13 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		joints := o3d.scene_draw_joints(scene, di)
 		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
 		curved := .Curves in m.flags
+		sprite := .Sprite in m.flags && job.sprite_rows.buffer != nil
 		p := g.skinned_pipelines[d.material.side][1 if blend else 0] if skinned else g.pipelines[d.material.side][1 if blend else 0]
 		if curved {
 			p = g.curve_pipelines[d.material.side][1 if blend else 0]
+		}
+		if sprite {
+			p = g.sprite_pipelines[d.material.side][1 if .Additive in m.flags else 0]
 		}
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
@@ -682,7 +697,10 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		if curved {
 			sdl.BindGPUFragmentStorageBuffers(pass, 0, &g.curve_words.buffer, 1)
 		}
-		samplers := [13]sdl.GPUTextureSamplerBinding {
+		if sprite {
+			sdl.BindGPUFragmentStorageBuffers(pass, 0, &job.sprite_rows.buffer, 1)
+		}
+		samplers := [14]sdl.GPUTextureSamplerBinding {
 			tex_binding(g, m.color_map),
 			{texture = shadow_maps[0], sampler = g.shadow_sampler},
 			tex_binding(g, m.normal_map),
@@ -696,8 +714,10 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 			{texture = shadow_maps[2], sampler = g.shadow_sampler},
 			{texture = shadow_maps[3], sampler = g.shadow_sampler},
 			tex_binding(g, m.alpha_map),
+			// Sprites: the frame's depth (soft particles).
+			{texture = job.depth_map if job.depth && job.depth_map != nil else g.dummy_shadow, sampler = g.shadow_sampler},
 		}
-		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], len(samplers))
+		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], 14 if sprite else 13)
 		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m, geo)
@@ -713,8 +733,8 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 			copy(ju[:], joints)
 			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
-		} else if (du.morph_info.x > 0 || curved) && geo.first_vertex > 0 {
-			// Vertices counted from 0 (SV_VertexID: morph deltas, curves' quads).
+		} else if (du.morph_info.x > 0 || curved || sprite) && geo.first_vertex > 0 {
+			// Vertices counted from 0 (SV_VertexID: morph deltas, curves' and sprites' quads).
 			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
 			bound_vb = nil
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)

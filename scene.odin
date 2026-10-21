@@ -2,6 +2,7 @@ package o3d
 
 import "core:math"
 import "core:math/linalg"
+import "core:slice"
 
 // A frame's scene: one camera, the lights, and draws (geometry, its world
 // transform, its material). Filled from scratch every frame; the draws keep
@@ -99,6 +100,9 @@ Material_Flag :: enum u8 {
 	// `opacity` times the light its shadows take, blended over what is
 	// behind; it receives shadows, is lit by nothing and reads no maps.
 	Shadow_Only,
+	// Particles: added to what is behind (three.js's AdditiveBlending:
+	// sparks, flames, glows), not blended over it.
+	Additive,
 }
 
 Material_Flags :: bit_set[Material_Flag; u16]
@@ -133,6 +137,9 @@ Material :: struct {
 	emissive_intensity:  f32,
 	opacity:             f32,
 	alpha_cutoff:        f32,
+	// Particles: how far before an opaque surface they fade out (world
+	// units; soft particles, by the frame's depth; 0: a hard edge).
+	softness:            f32,
 	ao_map_intensity:    f32,
 	// Line width (`.Lines`) or point size (`.Points`); 0 takes defaults
 	// (0.03 world / 2 px for lines, 0.08 world / 4 px for points).
@@ -259,6 +266,8 @@ Scene :: struct {
 	instances:             [dynamic]Instance,
 	// Per-frame line/point geometries (SCENE_GEO_BIT + index).
 	path_geos:             [dynamic]Geometry,
+	// Per-frame particles (`scene_particles`), by row.
+	particles:             [dynamic]Particle,
 	path_vertices:         [dynamic]Vertex,
 	path_indices:          [dynamic]u32,
 }
@@ -286,6 +295,7 @@ scene_clear :: proc(s: ^Scene) {
 	clear(&s.draw_instances)
 	clear(&s.instances)
 	clear(&s.path_geos)
+	clear(&s.particles)
 	clear(&s.path_vertices)
 	clear(&s.path_indices)
 }
@@ -427,6 +437,35 @@ scene_tube :: proc(s: ^Scene, points: []Vec3, radius: f32 = 0.08, radial_segment
 		mode         = .Triangles,
 		radius       = rad,
 	})
+	return id
+}
+
+// A particle: a camera-facing quad `size` across (world units, or pixels
+// with `.No_Size_Attenuation`) turned `rotation` radians in the view plane,
+// its colour (sRGB) and opacity times its material's (and its
+// `color_map`'s, the sprite).
+Particle :: struct {
+	position: Vec3,
+	size:     f32,
+	color:    Vec4,
+	rotation: f32,
+}
+
+// Per-frame particles in `s`: draw the geometry with a transparent (or
+// `.Additive`) material, its `color_map` the sprite, `softness` to fade
+// them into what they meet. Drawn unlit, farthest first when blended.
+scene_particles :: proc(s: ^Scene, particles: []Particle) -> Geometry_Id {
+	if len(particles) == 0 {
+		return 0
+	}
+	first := u32(len(s.particles))
+	append(&s.particles, ..particles)
+	r: f32
+	for p in particles {
+		r = max(r, linalg.length(p.position) + p.size)
+	}
+	id := SCENE_GEO_BIT + Geometry_Id(len(s.path_geos))
+	append(&s.path_geos, Geometry{vertex_count = u32(len(particles)), sprite_table = first, mode = .Sprites, radius = r})
 	return id
 }
 
@@ -607,6 +646,7 @@ scene_destroy :: proc(s: ^Scene) {
 	delete(s.draw_instances)
 	delete(s.instances)
 	delete(s.path_geos)
+	delete(s.particles)
 	delete(s.path_vertices)
 	delete(s.path_indices)
 	s^ = {}
@@ -621,6 +661,17 @@ Expanded_Draws :: struct {
 	vertices:    [dynamic]Vertex,
 	indices:     [dynamic]u32,
 	posed_verts: [dynamic]Vertex,
+	// The drawn particle quads' rows, one a quad: colour (sRGB, times the
+	// material's) and opacity.
+	sprite_rows: [dynamic][4]f32,
+	// Scratch: particles by distance, to draw the farthest first.
+	sprite_keys: [dynamic]Sprite_Key,
+}
+
+@(private)
+Sprite_Key :: struct {
+	distance: f32,
+	row:      u32,
 }
 
 expanded_draws_destroy :: proc(e: ^Expanded_Draws) {
@@ -629,6 +680,8 @@ expanded_draws_destroy :: proc(e: ^Expanded_Draws) {
 	delete(e.vertices)
 	delete(e.indices)
 	delete(e.posed_verts)
+	delete(e.sprite_rows)
+	delete(e.sprite_keys)
 	e^ = {}
 }
 
@@ -672,6 +725,62 @@ scene_geometry_mesh :: proc "contextless" (scene: ^Scene, g: ^Geometries, id: Ge
 	return geometry_mesh(g, id)
 }
 
+// A particle draw's quads (per instance), the farthest first unless they
+// add, each with its row in `exp.sprite_rows`.
+@(private = "file")
+expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geometry, insts: []Instance, view_proj: Mat4, cam_right, cam_up, cam_back: Vec3, scale_px: f32, draws: ^#soa[dynamic]Draw) {
+	rows := scene.particles[geo.sprite_table:][:geo.vertex_count]
+	px_space := .No_Size_Attenuation in d.material.flags
+	default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
+	run_insts := insts if len(insts) > 0 else default_inst[:]
+	for inst in run_insts {
+		M := d.model * inst.transform if len(insts) > 0 else d.model
+		m_scale := mat_scale(M)
+		// World positions, and the order to draw them in.
+		clear(&exp.sprite_keys)
+		for p, i in rows {
+			w := (M * Vec4{p.position.x, p.position.y, p.position.z, 1}).xyz
+			clip := view_proj * Vec4{w.x, w.y, w.z, 1}
+			append(&exp.sprite_keys, Sprite_Key{distance = clip.w if !scene.camera.orthographic else clip.z, row = u32(i)})
+		}
+		if .Additive not_in d.material.flags {
+			slice.stable_sort_by(exp.sprite_keys[:], proc(a, b: Sprite_Key) -> bool {return a.distance > b.distance})
+		}
+		first_v := u32(len(exp.vertices))
+		first_i := u32(len(exp.indices))
+		first_row := u32(len(exp.sprite_rows))
+		r_max: f32
+		for key in exp.sprite_keys {
+			p := rows[key.row]
+			w := (M * Vec4{p.position.x, p.position.y, p.position.z, 1}).xyz
+			half: f32
+			if px_space {
+				w_clip := (view_proj * Vec4{w.x, w.y, w.z, 1}).w if !scene.camera.orthographic else 1
+				half = 0.5 * p.size * max(w_clip, 1e-4) * scale_px
+			} else {
+				half = 0.5 * p.size * m_scale
+			}
+			c, sn := math.cos(p.rotation), math.sin(p.rotation)
+			rx := (cam_right * c + cam_up * sn) * half
+			uy := (cam_up * c - cam_right * sn) * half
+			base := u32(len(exp.vertices)) - first_v
+			append(&exp.vertices, Vertex{w - rx - uy, cam_back, {0, 0}, {}}, Vertex{w + rx - uy, cam_back, {1, 0}, {}}, Vertex{w + rx + uy, cam_back, {1, 1}, {}}, Vertex{w - rx + uy, cam_back, {0, 1}, {}})
+			append(&exp.indices, base, base + 1, base + 2, base, base + 2, base + 3)
+			append(&exp.sprite_rows, p.color)
+			r_max = max(r_max, linalg.length(w) + half * 1.5)
+		}
+		append(&exp.geos, Geometry{first_vertex = first_v, vertex_count = u32(len(exp.vertices)) - first_v, first_index = first_i, index_count = u32(len(exp.indices)) - first_i, mode = .Sprites, sprite_table = first_row, radius = r_max})
+		// Unlit, always blended (each particle's own opacity) or added.
+		mat := d.material
+		mat.mode = .Sprites
+		mat.flags += {.Basic, .Transparent}
+		if len(insts) > 0 && (inst.has_color || inst.color != {}) {
+			mat.color = linear_to_srgb_vec3(linear(mat.color) * linear(inst.color))
+		}
+		append(draws, Draw{geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos) - 1), model = linalg.MATRIX4F32_IDENTITY, material = mat})
+	}
+}
+
 @(private = "file")
 effective_draw_mode :: #force_inline proc "contextless" (m: Material, geo: Geometry) -> Draw_Mode {
 	return m.mode if m.mode != .Triangles else geo.mode
@@ -687,6 +796,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	clear(&exp.geos)
 	clear(&exp.vertices)
 	clear(&exp.indices)
+	clear(&exp.sprite_rows)
 	need_expand := len(scene.instances) > 0 || len(scene.path_geos) > 0
 	if !need_expand {
 		for i in 0 ..< len(scene.draws) {
@@ -769,6 +879,12 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 					mat.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
 				}
 				append(&out.draws, Draw{geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos) - 1), model = M, material = mat})
+			}
+			continue
+		}
+		if mode == .Sprites {
+			if geo.mode == .Sprites && d.geometry >= SCENE_GEO_BIT {
+				expand_particles(exp, scene, d, geo, insts, view_proj, cam_right, cam_up, cam_back, scale_px, &out.draws)
 			}
 			continue
 		}
@@ -1035,6 +1151,40 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 	return
 }
 
+// Marks the draws of particle quads (`.Sprites` geometry) in their shading
+// materials, for both renderers' sprite paths.
+sprite_materials :: proc "contextless" (scene: ^Scene, geos: ^Geometries, exp: ^Expanded_Draws, materials: []Shading_Material) {
+	for g, i in scene.draws.geometry[:len(scene.draws)] {
+		if geo, ok := geometry_get_any(geos, exp, g); ok && geo.mode == .Sprites && i < len(materials) {
+			materials[i].flags += {.Sprite}
+		}
+	}
+}
+
+// Whether a frame needs its depth drawn: asked for, or soft particles.
+needs_depth :: proc "contextless" (scene: ^Scene) -> bool {
+	if scene.depth {
+		return true
+	}
+	for m in scene.draws.material[:len(scene.draws)] {
+		if m.softness > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// A depth value (the frame's depth, `camera_project`'s) as distance along
+// the camera's axis: what depth of field, haze and soft particles compare.
+view_depth :: proc "contextless" (c: Camera, depth: f32) -> f32 {
+	near := c.near if c.near > 0 else 0.1
+	far := c.far if c.far > near else near * 1e4
+	if c.orthographic {
+		return near + depth * (far - near)
+	}
+	return near * far / (far - depth * (far - near))
+}
+
 // Where world point `p` falls on a `width x height` frame of camera `c`, as
 // both renderers map it: `pixel` from the top left (pixel centres at .5),
 // `depth` the depth they test (0 at near, 1 at far), and whether it is in
@@ -1104,7 +1254,7 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 // from elsewhere (a colour map's, a ShaderMaterial's, an exact shape's
 // coverage), as three.js blends any transparent material.
 blended :: proc "contextless" (m: Material) -> bool {
-	return .Shadow_Only in m.flags || .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || m.shader != 0 || m.mode == .Curves)
+	return .Shadow_Only in m.flags || .Additive in m.flags || .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || m.shader != 0 || m.mode == .Curves || m.mode == .Sprites)
 }
 
 // ---- shading ----------------------------------------------------------------------------
@@ -1205,6 +1355,7 @@ Shading_Material :: struct {
 	emissive:      Vec3, // linear, times intensity
 	opacity:       f32, // 1 unless blended or alpha-masked
 	alpha_cutoff:  f32,
+	softness:      f32, // particles: fade distance before the frame's depth
 	metalness:     f32,
 	roughness:     f32,
 	ao_intensity:  f32,
@@ -1243,6 +1394,10 @@ Shading_Flag :: enum u8 {
 	Curves,
 	Alpha_Map,
 	Shadow_Only,
+	// A particle quad (`.Sprites` geometry): its row's colour and opacity,
+	// faded by `softness` against the frame's depth.
+	Sprite,
+	Additive,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1343,6 +1498,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			}
 			uv_xforms[slot] = uv_transform(tf)
 		}
+		if .Additive in m.flags {
+			f += {.Additive}
+		}
 		if .Shadow_Only in m.flags && m.shader == 0 {
 			f = (f - TEXTURE_FLAGS - {.Basic, .Toon, .Alpha_Mask, .Curves}) + {.Shadow_Only, .Receive_Shadow}
 		}
@@ -1351,6 +1509,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			emissive      = linear(m.emissive) * m.emissive_intensity if .Shadow_Only not_in f else {},
 			opacity       = clamp(m.opacity, 0, 1) if (.Blended in f || .Alpha_Mask in f) else 1,
 			alpha_cutoff  = m.alpha_cutoff,
+			softness      = m.softness,
 			metalness     = m.metalness,
 			roughness     = m.roughness,
 			ao_intensity  = m.ao_map_intensity,

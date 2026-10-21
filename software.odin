@@ -193,6 +193,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	lights: [MAX_LIGHTS]Shading_Light
 	nl := shading_lights(active.lights[:], &lights)
 	shading_materials(scene_materials(active), &s.materials, textures)
+	sprite_materials(active, geos, &s.expanded, s.materials[:])
 	shader_blocks(active, shaders, view, proj, &s.blocks)
 	threads := 0
 	if pool != nil {
@@ -238,7 +239,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.depth_target, job.own_side = s.shadow_maps[si], false
 		run_pass(s, active, geos, &job, pool, draw_depth_band)
 	}
-	if active.depth {
+	if needs_depth(active) {
 		table_grow_non_zero(&s.depth_map, width * height)
 		depth_draws(active, geos, shaders, proj * view, &s.order, &s.expanded)
 		job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, true
@@ -369,7 +370,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	}
 	count := int(hi - lo) + 1
 	sh := shader_get(job.shaders, m.shader) if !job.depth_only else nil
-	textured := m.flags & (TEXTURE_FLAGS + {.Curves}) != {}
+	textured := m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite}) != {}
 	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS if textured else UNTEX_FLOATS)
 	masked, curved: bool
 	if job.depth_only {
@@ -460,7 +461,8 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	for t := 0; t + 2 < len(indices); t += 3 {
 		v := [3]int{int(indices[t] - lo), int(indices[t + 1] - lo), int(indices[t + 2] - lo)}
 		clip := [3]Vec4{w.positions[v[0]], w.positions[v[1]], w.positions[v[2]]}
-		curve := curve_quad_entry(job.geos, geo, indices[t] / 4) if curved_geo else 0
+		// Its quad's entry: an exact shape's curve set, or a particle's row.
+		curve := curve_quad_entry(job.geos, geo, indices[t] / 4) if curved_geo else (geo.sprite_table + indices[t] / 4 if geo.mode == .Sprites else 0)
 		if clip[0].z >= 0 && clip[1].z >= 0 && clip[2].z >= 0 {
 			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, curve, job.width, job.height, side)
 			continue

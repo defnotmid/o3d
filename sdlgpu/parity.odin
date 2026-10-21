@@ -54,6 +54,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"custom_maps", 200, 150, build_custom_maps},
 	{"hdr_environment", 200, 150, build_hdr_environment},
 	{"shadow_only", 200, 150, build_shadow_only},
+	{"particles", 240, 180, build_particles},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -583,6 +584,63 @@ build_shadow_only :: proc(a: ^Parity_Assets) -> string {
 	caster.color, caster.roughness, caster.flags = {0.9, 0.5, 0.3}, 0.4, {.Cast_Shadow}
 	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.6, 32, 16), o3d.compose({-0.5, 0.9, 0}), caster})
 	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.7, 0.7, 0.7), o3d.compose({0.9, 0.35, -0.3}, {0, 0.6, 0}), caster})
+	return ""
+}
+
+// Particles: a soft smoke column (blended, rotated, farthest first, fading
+// where it cuts the floor and the box) and additive sparks, both a radial
+// sprite, over a lit floor and box.
+@(private = "file")
+build_particles :: proc(a: ^Parity_Assets) -> string {
+	T :: 32
+	puff_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			q := o3d.Vec2{f32(x) + 0.5, f32(y) + 0.5} / T - 0.5
+			r := math.sqrt(q.x * q.x + q.y * q.y) * 2
+			i := (y * T + x) * 4
+			fall := clamp(1 - r, 0, 1)
+			puff_px[i], puff_px[i + 1], puff_px[i + 2], puff_px[i + 3] = 255, 255, 255, u8(fall * fall * (3 - 2 * fall) * 255)
+		}
+	}
+	puff := o3d.texture_add(&a.textures, puff_px[:], T, T)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {2.4, 1.6, 3.6}, target = {0, 0.8, 0}, fov = 45, near = 0.1, far = 30}
+	append(&s.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.85, 1}, ground = {0.3, 0.25, 0.2}, intensity = 1.2})
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.9}, intensity = 2, position = {3, 5, 2}})
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness = {0.35, 0.37, 0.42}, 0.9
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	box := o3d.MATERIAL_DEFAULT
+	box.color, box.roughness = {0.7, 0.3, 0.2}, 0.5
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.6, 0.6, 0.6), o3d.compose({0.35, 0.3, -0.2}, {0, 0.5, 0}), box})
+	seed: u32 = 12345
+	rnd :: proc(seed: ^u32) -> f32 {
+		seed^ = seed^ * 1664525 + 1013904223
+		return f32(seed^ >> 8) / f32(1 << 24)
+	}
+	smoke: [120]o3d.Particle
+	for &p, i in smoke {
+		h := f32(i) / len(smoke)
+		p.position = {(rnd(&seed) - 0.5) * (0.3 + h), h * 2.2, (rnd(&seed) - 0.5) * (0.3 + h)}
+		p.size = 0.35 + 0.5 * h
+		p.rotation = rnd(&seed) * math.TAU
+		grey := 0.6 + 0.3 * rnd(&seed)
+		p.color = {grey, grey, grey * 1.05, 0.45 - 0.25 * h}
+	}
+	m := o3d.MATERIAL_DEFAULT
+	m.color_map, m.softness = puff, 0.3
+	append(&s.draws, o3d.Draw{o3d.scene_particles(s, smoke[:]), o3d.compose({-0.3, 0, 0.2}), m})
+	sparks: [80]o3d.Particle
+	for &p in sparks {
+		p.position = {(rnd(&seed) - 0.5) * 1.6, rnd(&seed) * 1.6, (rnd(&seed) - 0.5) * 1.6}
+		p.size = 0.05 + 0.06 * rnd(&seed)
+		p.color = {1, 0.55 + 0.3 * rnd(&seed), 0.2, 0.9}
+	}
+	add := o3d.MATERIAL_DEFAULT
+	add.color_map, add.flags = puff, {.Additive}
+	append(&s.draws, o3d.Draw{o3d.scene_particles(s, sparks[:]), o3d.compose({0.6, 0.2, 0.6}), add})
 	return ""
 }
 

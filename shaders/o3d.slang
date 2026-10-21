@@ -43,6 +43,8 @@ static const uint FLAG_TOON = 4096;
 static const uint FLAG_CURVES = 8192;
 static const uint FLAG_ALPHA_MAP = 16384;
 static const uint FLAG_SHADOW_ONLY = 32768;
+static const uint FLAG_SPRITE = 65536;
+static const uint FLAG_ADDITIVE = 131072;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -79,8 +81,8 @@ struct Material {
     uint flags;
     float alpha_cutoff;
     uint uv_sets;
-    uint curve_table;
-    uint pad;
+    uint curve_table; // an exact shape's or glyph run's quad table, or a particle draw's first row
+    float softness;   // particles: fade distance before the frame's depth
     float4 uv_transforms[14];
 };
 
@@ -106,8 +108,11 @@ struct Lighting {
     float4x4 shadowMatrix[MAX_SHADOWS];
     float4 shadowParams[MAX_SHADOWS];
     float4 envParams;
-    // x: the environment's maps are linear (HDR), not sRGB-encoded.
+    // x: the environment's maps are linear (HDR), not sRGB-encoded;
+    // y: the camera is orthographic.
     uint4 envFlags;
+    // The frame's width and height, the camera's near and far.
+    float4 frameParams;
     float4 fogColor;
     float4 fogParams;
     Light lights[MAX_LIGHTS];
@@ -139,6 +144,11 @@ struct Joints_VS {
 [[vk::binding(12, 2)]] Sampler2D<float4> alphaMap : register(t12, space2);
 // The shadow pass's alpha map, after its colour map.
 [[vk::binding(1, 2)]] Sampler2D<float4> shadowAlphaMap : register(t1, space2) : register(s1, space2);
+// Particles: the frame's depth (soft particles) after the main pass's
+// samplers, and the rows after it (SPIR-V; on Metal after the uniform
+// buffers, as curveWords).
+[[vk::binding(13, 2)]] Sampler2D<float> sceneDepth : register(t13, space2) : register(s13, space2);
+[[vk::binding(14, 2)]] StructuredBuffer<float4> spriteRows : register(t2, space2);
 // Exact shapes' curves (Geometries.curve_words): after the samplers in
 // SPIR-V's set 2, after the uniform buffers on Metal (slang numbers the
 // buffer from the register; no DXIL for these entries): fs_curves' at
@@ -421,10 +431,11 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
 
 // The standard material's colour at a fragment (premultiplied sRGB), as
 // fs_main writes it.
-float4 surface(VS_Out i, bool front) {
+// `tint` (sRGB colour, opacity) multiplies the material's: a particle's row.
+float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
     uint flags = material.flags;
-    float3 base = material.color.rgb;
-    float a = material.color.a;
+    float3 base = material.color.rgb * linear_rgb(tint.rgb);
+    float a = material.color.a * tint.a;
     float3 dp_dx = ddx(i.world);
     float3 dp_dy = ddy(i.world);
     float2 d0x = ddx(i.uv);
@@ -534,6 +545,29 @@ float4 surface(VS_Out i, bool front) {
 [shader("fragment")]
 float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
     return surface(i, front);
+}
+
+// A view depth from a depth value (o3d.view_depth).
+float view_depth(float depth) {
+    float near = lighting.frameParams.z;
+    float far = lighting.frameParams.w;
+    if (lighting.envFlags.y != 0u) {
+        return near + depth * (far - near);
+    }
+    return near * far / (far - depth * (far - near));
+}
+
+// A particle quad: its row's colour and opacity, faded by how far in front
+// of the frame's depth it is (soft particles).
+[shader("fragment")]
+float4 fs_sprite(VS_Curves_Out i, bool front : SV_IsFrontFace) : SV_Target {
+    float4 row = spriteRows[material.curve_table + i.quad];
+    if (material.softness > 0) {
+        float2 uv = i.position.xy / lighting.frameParams.xy;
+        float behind = view_depth(sceneDepth.SampleLevel(uv, 0));
+        row.a *= saturate((behind - view_depth(i.position.z)) / material.softness);
+    }
+    return surface(curves_surface_in(i), front, row);
 }
 
 // Sample positions in a pixel (the standard 4x MSAA pattern, software.odin's

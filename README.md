@@ -187,6 +187,13 @@ lo, hi, _ := o3d.model_bounds(&rover, &geos)                         // its rest
 
 // Where a world point lands on the frame (a lens flare, a label): pixel, depth, in front
 px, depth, in_front := o3d.camera_project(scene.camera, 1920, 1080, sun_position)
+// Particles, per frame: rows of position, size, rotation, colour and opacity (the emitter is the host's)
+puffs := o3d.scene_particles(&scene, smoke_rows)                    // []o3d.Particle
+smoke := o3d.MATERIAL_DEFAULT
+smoke.color_map, smoke.softness = puff_sprite, 0.3                   // the sprite; fade 0.3 before what they meet
+append(&scene.draws, o3d.Draw{puffs, o3d.compose(), smoke})          // drawn unlit, farthest first
+// sparks: the same with flags = {.Additive}
+
 // The frame's depth, to hide it behind what is nearer and for post effects
 scene.depth = true                                                   // then render as usual
 hidden := depth > o3d.software_depth(&sw)[int(px.y) * 1920 + int(px.x)]   // GPU: o3d_sdlgpu.depth(&g) (R32F), read_depth
@@ -460,6 +467,18 @@ includes ovg's `shaders/curves.slang` from there too.
   HDR is for environments, backgrounds and ShaderMaterials.
   Changing one means changing the other; the tests compare the two
   renderers.
+- **Particles:** `scene_particles` keeps a frame's particles as rows
+  (position, size in world units or pixels, rotation in the view plane,
+  sRGB colour and opacity); expansion turns each into a camera-facing quad
+  (farthest first unless `.Additive`) with a row in the frame's sprite
+  table, which both renderers read per quad as exact shapes read their
+  curve tables (the GPU through the curves' vertex shader and
+  `fs_sprite`). The material's `color_map` is the sprite and its colour and
+  opacity multiply the row's; drawn unlit, blended or added
+  (`.Additive`), fogged and tone mapped; `softness` fades a particle over
+  that distance before the frame's depth (soft particles), which is then
+  drawn for them. The emitter (where particles are, frame by frame) is the
+  host's.
 - **Frame depth:** with `Scene.depth` both renderers also draw the
   frame's depth through their shadow pass, from the camera at the frame's
   size: per pixel, the depth they test (0 near, 1 far, 1 where nothing is,

@@ -1384,3 +1384,57 @@ test_frame_depth :: proc(t: ^testing.T) {
 	software_render(&s, &scene, &g, nil, W, H)
 	testing.expect_value(t, len(software_depth(&s)), 0)
 }
+
+// Particles: drawn farthest first whatever their order (the near one's
+// colour over the far one's), added with .Additive, faded near what they
+// cut with softness.
+@(test)
+test_particles :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 32
+	s: Software
+	defer software_destroy(&s)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	frame :: proc(scene: ^Scene) {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+	}
+	// Near red listed first, far blue second: red still on top.
+	frame(&scene)
+	m := MATERIAL_DEFAULT
+	pair := [2]Particle{{position = {0, 0, 1}, size = 2, color = {1, 0, 0, 1}}, {position = {0, 0, -1}, size = 2, color = {0, 0, 1, 1}}}
+	append(&scene.draws, Draw{scene_particles(&scene, pair[:]), compose({0, 0, 0}), m})
+	c := at(software_render(&s, &scene, &g, nil, W, W), W / 2, W / 2)
+	testing.expectf(t, c.r > 250 && c.b < 4, "the near particle on top: %v", c)
+
+	// Added: two half reds make a full red.
+	frame(&scene)
+	add := MATERIAL_DEFAULT
+	add.color, add.flags = {1, 0, 0}, {.Additive}
+	halves := [2]Particle{{position = {0, 0, 0}, size = 2, color = {1, 1, 1, 0.5}}, {position = {0, 0, 0.5}, size = 2, color = {1, 1, 1, 0.5}}}
+	append(&scene.draws, Draw{scene_particles(&scene, halves[:]), compose({0, 0, 0}), add})
+	c = at(software_render(&s, &scene, &g, nil, W, W), W / 2, W / 2)
+	testing.expectf(t, c.r > 250, "two halves added: %v", c)
+
+	// Soft: a particle half through a wall fades toward where it meets it.
+	frame(&scene)
+	wall := MATERIAL_DEFAULT
+	wall.flags = {.Basic}
+	wall.color = {0, 0, 0}
+	append(&scene.draws, Draw{plane(&g, 10, 10), compose({0, 0, 0}, {0, 0.8, 0}), wall})
+	soft := MATERIAL_DEFAULT
+	soft.color, soft.softness = {1, 1, 1}, 1
+	one := [1]Particle{{position = {0, 0, 0.3}, size = 3, color = {1, 1, 1, 1}}}
+	append(&scene.draws, Draw{scene_particles(&scene, one[:]), compose({0, 0, 0}), soft})
+	px := software_render(&s, &scene, &g, nil, W, W)
+	// The wall turns about y: on one side it is behind the particle (faded
+	// a little), on the other nearly at it (faded most).
+	left, right := at(px, W / 2 - 8, W / 2), at(px, W / 2 + 8, W / 2)
+	testing.expectf(t, left.r != right.r && min(left.r, right.r) < 200, "faded by how far the wall is behind: %v %v", left, right)
+}

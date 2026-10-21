@@ -15,6 +15,7 @@ UNITS=(
 	o3d:frag:fs_main
 	o3d:shadow:fs_shadow
 	o3d:curves_frag:fs_curves
+	o3d:sprite_frag:fs_sprite
 	o3d:shadow_curves:fs_shadow_curves
 	background:vert:vs_main
 	background:frag:fs_main
