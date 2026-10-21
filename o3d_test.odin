@@ -1150,7 +1150,7 @@ test_tube_and_instance_builtins :: proc(t: ^testing.T) {
 
 	blocks: Shader_Blocks
 	defer shader_blocks_destroy(&blocks)
-	shader_blocks(out, &shaders, view, proj, &blocks)
+	shader_blocks(out, &shaders, view, proj, nil, &blocks)
 	sh := shader_get(&shaders, id)
 	color_at, id_at := sh.builtins[.Fragment][.Instance_Color], sh.builtins[.Fragment][.Instance_Id]
 	testing.expect(t, color_at >= 0 && id_at >= 0)
@@ -1798,6 +1798,61 @@ test_triplanar :: proc(t: ^testing.T) {
 	testing.expectf(t, same(a, b, 0, 0, 16, 48) <= 2, "world: stays, %d", same(a, b, 0, 0, 16, 48))
 	a = frame(&scene, &g, &s, &textures, quad, tex, .Uv, 0)
 	testing.expectf(t, same(a, a, 0, 3, 16, 44) == 0, "by uv: one texel")
+}
+
+// A ShaderMaterial calling shadowAt: dark under a box the shadow light
+// sees, lit beside it, lit everywhere when no light casts; its map takes
+// the first channel and the shader's own sampler the next.
+@(test)
+test_shader_shadow :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	scene: Scene
+	defer scene_destroy(&scene)
+	VERT :: `varying vec3 vWorld;
+varying vec3 vNormal;
+void main() {
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vWorld = w.xyz;
+  vNormal = mat3(modelMatrix) * normal;
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`
+	FRAG :: `uniform sampler2D tint;
+varying vec3 vWorld;
+varying vec3 vNormal;
+void main() {
+  gl_FragColor = vec4(vec3(shadowAt(vWorld, vNormal)) * texture2D(tint, vec2(0.5)).rgb, 1.0);
+}`
+	id, errors := shader(&shaders, VERT, FRAG)
+	testing.expectf(t, errors == "", "compiles: %s", errors)
+	sh := shader_get(&shaders, id)
+	testing.expect(t, sh != nil && sh.shadow_channel == 0 && shader_map(&shaders, id, "tint") == 1, "the shadow map first, the shader's own next")
+	W :: 32
+	s: Software
+	defer software_destroy(&s)
+	for casting in ([]bool{true, false}) {
+		scene_clear(&scene)
+		scene.camera = {position = {0, 6, 0.01}, target = {0, 0, 0}, orthographic = true, height = 4, near = 0.1, far = 20}
+		append(&scene.lights, Light{kind = .Directional, color = 1, intensity = 1, position = {3, 5, 0}, cast_shadow = casting})
+		floor := MATERIAL_DEFAULT
+		floor.shader, floor.flags = id, {.Receive_Shadow}
+		append(&scene.draws, Draw{plane(&g, 4, 4), compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+		caster := MATERIAL_DEFAULT
+		caster.flags = {.Cast_Shadow, .Basic}
+		append(&scene.draws, Draw{box(&g, 1, 0.2, 1), compose({1, 2, 0}), caster})
+		px := software_render(&s, &scene, &g, &shaders, W, W)
+		// The sun slants from +x: the box's shadow falls on x -0.7 .. 0.3,
+		// beside it (seen from above at x 0.5 .. 1.5).
+		under := px[(W / 2 * W + 13) * 4]
+		open := px[(W / 2 * W + 4) * 4]
+		if casting {
+			testing.expectf(t, under < 20 && open > 240, "shadowed under the box (%d), lit beside it (%d)", under, open)
+		} else {
+			testing.expectf(t, under > 240 && open > 240, "no light casts: lit (%d, %d)", under, open)
+		}
+	}
 }
 
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's

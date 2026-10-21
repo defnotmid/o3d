@@ -62,6 +62,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"vertex_colors", 240, 180, build_vertex_colors},
 	{"far_layers", 240, 180, build_far_layers},
 	{"triplanar", 240, 180, build_triplanar},
+	{"custom_shadow", 240, 180, build_custom_shadow},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -1010,6 +1011,72 @@ build_triplanar :: proc(a: ^Parity_Assets) -> string {
 	floor := o3d.MATERIAL_DEFAULT
 	floor.color, floor.roughness, floor.flags = {0.5, 0.5, 0.55}, 0.9, {.Receive_Shadow}
 	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	return ""
+}
+
+@(private = "file")
+LIT_VERT :: `varying vec3 vWorld;
+varying vec3 vNormal;
+varying vec2 vUv;
+void main() {
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vWorld = w.xyz;
+  vNormal = normalize(mat3(modelMatrix) * normal);
+  vUv = uv;
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`
+
+// A ShaderMaterial lit by a uniform sun and shadowed by o3d's shadowAt,
+// its own texture beside the shadow map.
+@(private = "file")
+LIT_FRAG :: `uniform sampler2D grime;
+uniform vec3 sunDir;
+varying vec3 vWorld;
+varying vec3 vNormal;
+varying vec2 vUv;
+void main() {
+  vec3 n = normalize(vNormal);
+  float lit = max(dot(n, normalize(sunDir)), 0.0) * shadowAt(vWorld, n);
+  vec3 base = texture2D(grime, vUv * 3.0).rgb;
+  gl_FragColor = vec4(base * (0.25 + 0.75 * lit), 1.0);
+}`
+
+// ShaderMaterials receiving shadows (shadowAt): a floor and a sphere under
+// a standard box and torus, the sun from a directional light, the floor's
+// texture read by name beside the shadow map.
+@(private = "file")
+build_custom_shadow :: proc(a: ^Parity_Assets) -> string {
+	T :: 16
+	px: [T * T * 4]u8
+	for i in 0 ..< T * T {
+		v := u8(200 if (i % T / 4 + i / T / 4) % 2 == 0 else 150)
+		px[i * 4], px[i * 4 + 1], px[i * 4 + 2], px[i * 4 + 3] = v, v, u8(int(v) * 9 / 10), 255
+	}
+	grime := o3d.texture_add(&a.textures, px[:], T, T)
+	id, errors := o3d.shader(&a.shaders, LIT_VERT, LIT_FRAG)
+	if errors != "" {
+		return errors
+	}
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {2.5, 2.4, 4}, target = {0, 0.4, 0}, fov = 45, near = 0.1, far = 50}
+	sun := o3d.Vec3{2, 5, 1.5}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = sun, cast_shadow = true})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
+	m := o3d.MATERIAL_DEFAULT
+	m.shader, m.flags = id, {.Receive_Shadow}
+	m.uniforms = o3d.scene_uniforms(s, {"sunDir", {sun.x, sun.y, sun.z}})
+	ch := o3d.shader_map(&a.shaders, id, "grime")
+	if ch < 0 {
+		return "no grime sampler"
+	}
+	m.shader_maps[ch] = grime
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 5, 5), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), m})
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.45, 32, 16), o3d.compose({0.9, 0.45, 0.6}), m})
+	caster := o3d.MATERIAL_DEFAULT
+	caster.color, caster.flags = {0.8, 0.4, 0.3}, {.Cast_Shadow}
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.6, 0.6, 0.6), o3d.compose({-0.4, 1.1, 0}, {0.3, 0.5, 0}), caster})
+	append(&s.draws, o3d.Draw{o3d.torus(&a.geos, 0.3, 0.08, 12, 32), o3d.compose({0.75, 1.4, 0.4}, {1.2, 0, 0}), caster})
 	return ""
 }
 

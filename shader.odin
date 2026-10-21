@@ -41,23 +41,81 @@ Builtin :: enum u8 {
 	// 0-based index.
 	Instance_Color,
 	Instance_Id,
+	// `shadowAt`'s (declared when the fragment shader calls it): the first
+	// shadow-casting light's view-projection, and its map's size, bias,
+	// normal bias and 1 (0: no light casts).
+	Shadow_Matrix,
+	Shadow_Params,
 }
 
 @(rodata)
 BUILTINS := [Builtin]struct {
 	name, type: string,
 	fragment:   bool,
+	shadow:     bool,
 } {
-	.Model_Matrix      = {"modelMatrix", "mat4", false},
-	.Model_View_Matrix = {"modelViewMatrix", "mat4", false},
-	.Projection_Matrix = {"projectionMatrix", "mat4", false},
-	.View_Matrix       = {"viewMatrix", "mat4", true},
-	.Normal_Matrix     = {"normalMatrix", "mat3", false},
-	.Camera_Position   = {"cameraPosition", "vec3", true},
-	.Is_Orthographic   = {"isOrthographic", "bool", true},
-	.Instance_Color    = {"instanceColor", "vec3", true},
-	.Instance_Id       = {"instanceId", "float", true},
+	.Model_Matrix      = {"modelMatrix", "mat4", false, false},
+	.Model_View_Matrix = {"modelViewMatrix", "mat4", false, false},
+	.Projection_Matrix = {"projectionMatrix", "mat4", false, false},
+	.View_Matrix       = {"viewMatrix", "mat4", true, false},
+	.Normal_Matrix     = {"normalMatrix", "mat3", false, false},
+	.Camera_Position   = {"cameraPosition", "vec3", true, false},
+	.Is_Orthographic   = {"isOrthographic", "bool", true, false},
+	.Instance_Color    = {"instanceColor", "vec3", true, false},
+	.Instance_Id       = {"instanceId", "float", true, false},
+	.Shadow_Matrix     = {"o3dShadowMatrix", "mat4", true, true},
+	.Shadow_Params     = {"o3dShadowParams", "vec4", true, true},
 }
+
+// The shadow map's sampler `shadowAt` reads (a channel of its own).
+SHADOW_SAMPLER :: "o3dShadowMap"
+
+// A fragment shader that calls `shadowAt(worldPosition, worldNormal)` gets
+// it: how lit the point is by the first shadow-casting light, 0 to 1, as
+// the standard material's shadows (shadow_factor: the normal bias, the
+// bias, three.js's PCF over 4 x 4 texels), so a ShaderMaterial receives
+// shadows (three.js's getShadow with lights: true). Its map takes the
+// first sampler channel; `shader_map` finds the shader's own by name.
+@(private = "file")
+SHADOW_PRELUDE :: `uniform sampler2D o3dShadowMap;
+float shadowAt(vec3 worldPosition, vec3 worldNormal) {
+	if (o3dShadowParams.w == 0.0) {
+		return 1.0;
+	}
+	vec4 c = o3dShadowMatrix * vec4(worldPosition + normalize(worldNormal) * o3dShadowParams.z, 1.0);
+	if (c.w <= 0.0) {
+		return 1.0;
+	}
+	float u = c.x / c.w * 0.5 + 0.5;
+	float v = 0.5 - c.y / c.w * 0.5;
+	float z = c.z / c.w - o3dShadowParams.y;
+	if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0 || z < 0.0 || z > 1.0) {
+		return 1.0;
+	}
+	float size = o3dShadowParams.x;
+	float s = u * size - 0.5;
+	float t = v * size - 0.5;
+	float x0 = floor(s);
+	float y0 = floor(t);
+	float fx = s - x0;
+	float fy = t - y0;
+	float lit = 0.0;
+	for (int j = 0; j < 4; j++) {
+		float row = clamp(y0 - 1.0 + float(j), 0.0, size - 1.0);
+		float wy = j == 0 ? 1.0 - fy : (j == 3 ? fy : 1.0);
+		float acc = 0.0;
+		for (int i = 0; i < 4; i++) {
+			float col = clamp(x0 - 1.0 + float(i), 0.0, size - 1.0);
+			float wx = i == 0 ? 1.0 - fx : (i == 3 ? fx : 1.0);
+			// The texel's centre, rows from the top (the macro flips v).
+			float d = textureLod(o3dShadowMap, vec2((col + 0.5) / size, 1.0 - (row + 0.5) / size), 0.0).r;
+			acc += wx * (z >= d ? 1.0 : 0.0);
+		}
+		lit += wy * acc;
+	}
+	return lit / 9.0;
+}
+`
 
 // The vertex attributes a shader may read, where they are in a `Vertex`.
 Vertex_Attribute :: enum u8 {
@@ -99,6 +157,8 @@ Shader :: struct {
 	varying_floats: int,
 	flat:           [MAX_VARYING_FLOATS]u8,
 	flat_count:     int,
+	// `shadowAt`'s map's channel (-1: the shader does not call it).
+	shadow_channel: i32,
 }
 
 Shaders :: struct {
@@ -172,7 +232,8 @@ shader_module :: proc "contextless" (sh: ^Shader, stage: Shader_Stage) -> ^oksl.
 
 @(private = "file")
 make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
-	p, errors, ok := oksl.compile_pipeline({vertex = vertex, fragment = fragment, vertex_prelude = prelude(.Vertex, glsl3), fragment_prelude = prelude(.Fragment, glsl3)})
+	shadows := strings.contains(fragment, "shadowAt")
+	p, errors, ok := oksl.compile_pipeline({vertex = vertex, fragment = fragment, vertex_prelude = prelude(.Vertex, glsl3, false), fragment_prelude = prelude(.Fragment, glsl3, shadows)})
 	fail :: proc(sh: ^Shader, p: ^oksl.Pipeline, text: string) {
 		oksl.destroy_pipeline(p)
 		sh.pipeline = nil
@@ -184,6 +245,12 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 	}
 	sh.pipeline = p
 	sh.attributes = {.Position = -1, .Normal = -1, .Uv = -1}
+	sh.shadow_channel = -1
+	for n, i in p.fragment.channel_names {
+		if n == SHADOW_SAMPLER {
+			sh.shadow_channel = i32(i)
+		}
+	}
 	for &offsets, stage in sh.builtins {
 		m := shader_module(&sh, stage)
 		if stage == .Vertex && m.num_samplers > 0 {
@@ -227,7 +294,7 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 
 // three.js's prefix for a ShaderMaterial stage.
 @(private = "file")
-prelude :: proc(stage: Shader_Stage, glsl3: bool) -> string {
+prelude :: proc(stage: Shader_Stage, glsl3, shadows: bool) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "precision highp float;\nprecision highp int;\n")
 	if stage == .Vertex {
@@ -247,9 +314,12 @@ prelude :: proc(stage: Shader_Stage, glsl3: bool) -> string {
 		strings.write_string(&b, "#define texelFetch(s, p, l) texelFetch(s, ivec2((p).x, textureSize(s, l).y - 1 - (p).y), l)\n")
 	}
 	for row in BUILTINS {
-		if stage == .Vertex || row.fragment {
+		if (stage == .Vertex || row.fragment) && (!row.shadow || shadows) {
 			fmt.sbprintf(&b, "uniform %s %s;\n", row.type, row.name)
 		}
+	}
+	if shadows {
+		strings.write_string(&b, SHADOW_PRELUDE)
 	}
 	if stage == .Vertex {
 		for row in VERTEX_ATTRIBUTES {
@@ -280,9 +350,10 @@ shader_blocks_destroy :: proc(b: ^Shader_Blocks) {
 	b^ = {}
 }
 
-// Fills every custom draw's blocks: the built-ins its stages read, then the
-// material's uniforms by name.
-shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, out: ^Shader_Blocks) {
+// Fills every custom draw's blocks: the built-ins its stages read (the
+// first of the frame's `shadows` for `shadowAt`), then the material's
+// uniforms by name.
+shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadows: []Shadow, out: ^Shader_Blocks) {
 	n := len(scene.draws)
 	clear(&out.bytes)
 	table_grow_non_zero(&out.at, n)
@@ -332,6 +403,14 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, out: ^
 					put(dst, m.color)
 				case .Instance_Id:
 					put(dst, f32(scene.draw_instance_ids[i] if i < len(scene.draw_instance_ids) else 0))
+				case .Shadow_Matrix:
+					put(dst, shadows[0].view_proj if len(shadows) > 0 else Mat4{})
+				case .Shadow_Params:
+					if len(shadows) > 0 {
+						put(dst, [4]f32{f32(shadows[0].size), shadows[0].bias, shadows[0].normal_bias, 1})
+					} else {
+						put(dst, [4]f32{})
+					}
 				}
 			}
 			for u in scene.uniforms[m.uniforms.first:][:m.uniforms.count] {

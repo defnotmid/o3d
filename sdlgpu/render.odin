@@ -471,8 +471,8 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	nl := o3d.shading_lights(active.lights[:], &lights)
 	o3d.shading_materials(o3d.scene_materials(active), &job.materials, textures)
 	o3d.sprite_materials(active, geos, &job.expanded, job.materials[:])
-	o3d.shader_blocks(active, shaders, view, proj, &job.blocks)
 	ns := o3d.frame_shadows(active, &job.shadows)
+	o3d.shader_blocks(active, shaders, view, proj, job.shadows[:ns], &job.blocks)
 	for si in 0 ..< ns {
 		if !ensure_shadow(g, job, si, u32(job.shadows[si].size)) {
 			return .Out_Of_Memory
@@ -649,6 +649,10 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 				maps: [o3d.SHADER_MAPS]sdl.GPUTextureSamplerBinding
 				for id, c in m.shader_maps {
 					maps[c] = tex_binding(g, id)
+				}
+				// shadowAt's: the first shadow map (unshadowed without one).
+				if c := o3d.shader_get(shaders, m.shader).shadow_channel; c >= 0 {
+					maps[c] = {texture = shadow_maps[0], sampler = g.shadow_sampler}
 				}
 				sdl.BindGPUFragmentSamplers(pass, 0, &maps[0], u32(min(n, len(maps))))
 			}

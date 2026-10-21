@@ -127,6 +127,10 @@ test_far_layers_match_software :: proc(t: ^testing.T) {expect_parity(t, "far_lay
 @(test)
 test_triplanar_match_software :: proc(t: ^testing.T) {expect_parity(t, "triplanar")}
 
+// ShaderMaterials receiving shadows through shadowAt.
+@(test)
+test_custom_shadow_match_software :: proc(t: ^testing.T) {expect_parity(t, "custom_shadow")}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)

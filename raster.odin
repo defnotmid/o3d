@@ -669,10 +669,15 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		helpers      = q.helpers[:],
 		varyings     = q.values[:],
 	}
-	maps := Shader_Maps{s = s, textures = job.textures, ids = s.materials[draw].shader_maps}
+	maps := Shader_Maps{s = s, textures = job.textures, ids = s.materials[draw].shader_maps, shadow_channel = int(sh.shadow_channel)}
+	if job.shadow_count > 0 {
+		maps.shadow, maps.shadow_size = s.shadow_maps[0], job.shadows[0].size
+	}
 	sizes: [SHADER_MAPS][2]i32
 	for id, c in maps.ids {
-		if ext, bound := bound_external(s, job.textures, id); bound {
+		if c == maps.shadow_channel {
+			sizes[c] = {i32(maps.shadow_size), i32(maps.shadow_size)}
+		} else if ext, bound := bound_external(s, job.textures, id); bound {
 			sizes[c] = {i32(ext.width), i32(ext.height)}
 		} else if tex, ok := texture_get(job.textures, id); ok && !tex.external {
 			sizes[c] = {i32(tex.width), i32(tex.height)}
@@ -692,12 +697,16 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 	return taken
 }
 
-// A ShaderMaterial draw's textures, for its sampler.
+// A ShaderMaterial draw's textures, for its sampler, and `shadowAt`'s
+// shadow map (its channel; -1: none).
 @(private = "file")
 Shader_Maps :: struct {
-	s:        ^Software,
-	textures: ^Textures,
-	ids:      [SHADER_MAPS]Texture_Id,
+	s:              ^Software,
+	textures:       ^Textures,
+	ids:            [SHADER_MAPS]Texture_Id,
+	shadow_channel: int,
+	shadow:         []f32,
+	shadow_size:    int,
 }
 
 // oksl's sampler: a channel's texture at uv (running down the image, as
@@ -708,6 +717,16 @@ sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32) -> [
 	maps := (^Shader_Maps)(user)
 	if channel < 0 || channel >= SHADER_MAPS {
 		return 1
+	}
+	if channel == maps.shadow_channel {
+		// The texel, rows from the top, nearest (the GPU's shadow sampler).
+		size := maps.shadow_size
+		if size == 0 || len(maps.shadow) < size * size {
+			return 0
+		}
+		x := clamp(int(math.floor(uv.x * f32(size))), 0, size - 1)
+		y := clamp(int(math.floor(uv.y * f32(size))), 0, size - 1)
+		return maps.shadow[y * size + x]
 	}
 	if _, ok := texture_get(maps.textures, maps.ids[channel]); !ok {
 		return 1

@@ -84,7 +84,12 @@ What is known about three.js carries over:
   own). Casters draw their other side (three.js's default shadowSide) and
   morphed/skinned geometry, discarding shadow texels below `alpha_cutoff` when
   `.Alpha_Mask` is set (cut-out shadows); ShaderMaterials cast (including
-  morphed and skinned meshes) but do not receive.
+  morphed and skinned meshes) and receive by calling
+  `shadowAt(worldPosition, worldNormal)` in their fragment shader: how lit
+  the point is by the first shadow-casting light, 0 to 1, as the standard
+  material's (normal bias, bias, the same PCF; three.js's getShadow). Its
+  map takes the shader's first sampler channel (`shader_map` finds the
+  shader's own by name).
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
   (radiusTop 0 is a cone), `torus`, `capsule(radius, height, capSegments,
@@ -240,6 +245,7 @@ w := o3d.MATERIAL_DEFAULT
 w.shader = wave
 w.uniforms = o3d.scene_uniforms(&scene, {"uTime", {t}}, {"uColor", {0.3, 0.8, 0.4}})
 w.shader_maps[o3d.shader_map(&shaders, wave, "map")] = earth   // its `uniform sampler2D map`
+// shadows in it: `float lit = max(dot(n, sunDir), 0.0) * shadowAt(vWorld, n);` (the first shadow light's)
 append(&scene.draws, o3d.Draw{o3d.sphere(&geos, 1), o3d.compose(), w})
 
 // GPU (o3d/sdlgpu): borrows the host's SDL_GPU device, or makes a headless one

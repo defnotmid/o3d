@@ -227,7 +227,9 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	nl := shading_lights(active.lights[:], &lights)
 	shading_materials(scene_materials(active), &s.materials, textures)
 	sprite_materials(active, geos, &s.expanded, s.materials[:])
-	shader_blocks(active, shaders, view, proj, &s.blocks)
+	shadows: [MAX_SHADOWS]Shadow
+	ns := frame_shadows(active, &shadows)
+	shader_blocks(active, shaders, view, proj, shadows[:ns], &s.blocks)
 	table_grow_non_zero(&s.frames, len(active.draws))
 	for m, i in s.materials[:len(active.draws)] {
 		if .Triplanar in m.flags {
@@ -244,8 +246,6 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	}
 	env := shading_environment(active, textures)
 	bg_tex, bg_intensity, bg_lod := shading_background(active, textures)
-	shadows: [MAX_SHADOWS]Shadow
-	ns := frame_shadows(active, &shadows)
 	job := Frame_Job {
 		s             = s,
 		scene         = active,
