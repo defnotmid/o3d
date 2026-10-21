@@ -60,7 +60,7 @@ OBJ_ERROR_TEXT := [Obj_Error]string {
 	.No_Geometry    = "OBJ contains no valid triangle faces",
 }
 
-// Dispatches by file extension (`.glb`, `.gltf`, `.3mf`, `.obj`, case-insensitive)
+// Dispatches by file extension (`.glb`, `.gltf`, `.3mf`, `.obj`, `.usdz`, `.usdc`, case-insensitive)
 // and loads the model into flat `Model`, `Geometries`, and `Textures` tables.
 model_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -> (m: Model, ok: bool) {
 	dot := strings.last_index_byte(path, '.')
@@ -81,6 +81,11 @@ model_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -
 	if strings.equal_fold(ext, ".obj") {
 		err: Obj_Error
 		m, err = obj_load(path, geos, textures)
+		return m, err == .None
+	}
+	if strings.equal_fold(ext, ".usdz") || strings.equal_fold(ext, ".usdc") {
+		err: Usd_Error
+		m, err = usd_load(path, geos, textures)
 		return m, err == .None
 	}
 	return {}, false

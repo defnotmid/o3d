@@ -150,10 +150,11 @@ m.color, m.roughness, m.color_map = {1, 0.35, 0.3}, 0.4, albedo
 m.flags = {.Cast_Shadow, .Receive_Shadow}
 append(&scene.draws, o3d.Draw{o3d.box(&geos, 1, 1, 1), o3d.compose({0, 0.5, 0}, {0, t, 0}), m})
 
-// glTF 2.0 / GLB, 3MF and OBJ (model_load picks by extension): loaded once into flat tables, drawn per frame at time t
+// glTF 2.0 / GLB, USDZ / USDC, 3MF and OBJ (model_load picks by extension): loaded once into flat tables, drawn per frame at time t
 duck, err := o3d.gltf_load("duck.glb", &geos, &textures)   // err: .None, or why (GLTF_ERROR_TEXT[err])
 part, _ := o3d.threemf_load("part.3mf", &geos, &textures)  // err: .None, or why (THREEMF_ERROR_TEXT[err])
 mesh, _ := o3d.obj_load("mesh.obj", &geos, &textures)      // err: .None, or why (OBJ_ERROR_TEXT[err])
+dock, _ := o3d.usd_load("dock.usdz", &geos, &textures)     // err: .None, or why (USD_ERROR_TEXT[err])
 o3d.gltf_draw(&scene, &duck, o3d.compose({-1.5, 0, 0}), anim = 0, time = t)
 o3d.gltf_draw(&scene, &part, o3d.compose({1.5, 0, 0}))
 // Morph target overrides by target name or 0-based index (applied after animation):
@@ -356,8 +357,34 @@ includes ovg's `shaders/curves.slang` from there too.
   `mtllib` `.mtl` (`Kd`, `Ke`, `Ks`/`Ns` or `Pr`/`Pm`, `d`/`Tr`, and the
   `map_Kd`, `map_Ke`, `map_Bump`, `map_Pr`/`map_Ns`, `map_Pm`, `map_d`
   textures) relative to the file, into the same tables. Faces without `vn`
-  get the 60° crease-angle normals. `model_load` picks glTF, 3MF or OBJ by
-  extension.
+  get the 60° crease-angle normals. `model_load` picks glTF, USD, 3MF or OBJ
+  by extension.
+- **USD (`usd_read.odin`, `usd.odin`):** `usd_load` and `usd_parse` read a
+  `.usdz` (its first `.usdc` layer, its textures from the archive) or a
+  binary `.usdc` (text `.usda` is not read). `usd_read_layer` reads the
+  Crate file's tables as OpenUSD's `crateFile.cpp` lays them out (version
+  0.4.0 on: tokens, strings, fields, field sets, paths and specs, LZ4 and
+  USD's integer coding, its own LZ4 block decoder) into flat arrays by
+  index, values read on demand by typed getters into the caller's buffers.
+  `usd_parse` composes the layer as USD does within one layer: a prim's
+  sources are its own specs then, weaker, what it references internally
+  (each reference expanded in turn); children merge by name; attributes
+  take the strongest opinion (a default, else the first time sample). From
+  the composed prims: Xform/Scope nodes with their `xformOpOrder` ops;
+  Meshes fanned into triangles with `normals` / `primvars:normals` and the
+  materials' UV primvar by their interpolation and `:indices`, smooth
+  normals where there are none, `orientation`, `doubleSided`, and a
+  primitive per `materialBind` GeomSubset; inherited `material:binding` to
+  UsdPreviewSurface materials (values or UsdUVTexture inputs through
+  UsdTransform2d, a channel other than the one o3d's slot reads copied
+  once into a grey texture; `opacity` textures as `alpha_map`,
+  `opacityThreshold` as `.Alpha_Mask`); `primvars:displayColor`; and the
+  stage's `metersPerUnit` and `upAxis` as a root node to meters, Y up.
+  Instances' meshes are built once and share geometry. References to other
+  files, UsdSkel, lights, cameras and other prim types are not read, each
+  named in `Model.warnings`; the `Limits` table bounds it as glTF's. Checked
+  against OpenUSD (pxr) on 115 files: every composed mesh's triangles,
+  world bounds and materials.
 - **Shapes (`shape.odin`):** three.js's code ported: earcut (mapbox/earcut
   as three.js carries it, nodes in a pool linked by index),
   ShapePath.toShapes' containment (largest first, an interior point tested
