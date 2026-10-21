@@ -693,6 +693,37 @@ find_token :: proc(b: ^Usd_Builder, s: string) -> i32 {
 	return b.token_of[s] or_else -1
 }
 
+// A primvar whose count does not fit its interpolation (normals said to be
+// one a face but one a face corner, say) is read by the one its count fits,
+// as Blender reads it: face corners, points, faces, or one; with none, not
+// read.
+@(private = "file")
+fit_interpolation :: proc(b: ^Usd_Builder, pv: ^Usd_Primvar, what: string, faces, points, corners: int) {
+	if !pv.ok || pv.components == 0 {
+		return
+	}
+	n := len(pv.indices) if len(pv.indices) > 0 else len(pv.values) / pv.components
+	want := [Usd_Interpolation]int {
+		.Constant     = 1,
+		.Uniform      = faces,
+		.Vertex       = points,
+		.Face_Varying = corners,
+	}
+	if n == want[pv.interpolation] {
+		return
+	}
+	names := [Usd_Interpolation]string{.Constant = "constant", .Uniform = "uniform", .Vertex = "vertex", .Face_Varying = "faceVarying"}
+	for interp in ([]Usd_Interpolation{.Face_Varying, .Vertex, .Uniform, .Constant}) {
+		if n == want[interp] {
+			warn(b, fmt.tprintf("a USD mesh's %s say %s but their count is %s's: read as %s", what, names[pv.interpolation], names[interp], names[interp]))
+			pv.interpolation = interp
+			return
+		}
+	}
+	warn(b, fmt.tprintf("a USD mesh's %s fit no interpolation (%d for %d faces, %d points, %d corners): not read", what, n, faces, points, corners))
+	pv.ok = false
+}
+
 // A primvar's value for face `face`, corner `corner` (index `corner` of
 // all corners), point `point`.
 @(private = "file")
@@ -842,6 +873,8 @@ build_mesh :: proc(b: ^Usd_Builder, p: Usd_Prim, binding: i32) -> i32 {
 		normals = primvar(b, p, "normals", .Vertex)
 	}
 	st := primvar(b, p, st_name, .Face_Varying)
+	fit_interpolation(b, &normals, "normals", len(counts), len(points), len(corners))
+	fit_interpolation(b, &st, "texture coordinates", len(counts), len(points), len(corners))
 
 	// Faces: each its first corner; a face whose corners run past the
 	// indices, or name a point that is not there, is left out.

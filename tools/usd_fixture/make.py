@@ -8,7 +8,8 @@
 # triangle with face-varying indexed st and a materialBind subset; a 5x5
 # grid (int arrays long enough to be compressed) and a 32-float array;
 # a textured UsdPreviewSurface whose opacity is a texture's red channel
-# through a UsdTransform2d.
+# through a UsdTransform2d; a mesh whose normals' count does not fit their
+# interpolation.
 import os, struct, zlib, tempfile
 from pxr import Usd, UsdGeom, UsdShade, Sdf, Gf, UsdUtils
 
@@ -96,6 +97,15 @@ grid.CreateFaceVertexCountsAttr([4] * 25)
 grid.CreateFaceVertexIndicesAttr([i for y in range(5) for x in range(5) for i in (y * 6 + x, y * 6 + x + 1, (y + 1) * 6 + x + 1, (y + 1) * 6 + x)])
 grid.CreateDisplayColorAttr([(0, 0.5, 0)])
 grid.GetPrim().CreateAttribute("weights", Sdf.ValueTypeNames.FloatArray).Set([i * 0.5 for i in range(32)])
+# Normals said to be one a face but one a face corner (as the dry dock's
+# hull has them): read by their count, per corner. Its corners run 2, 1, 0
+# so per point would differ.
+odd = UsdGeom.Mesh.Define(stage, "/World/Mislabeled")
+odd.CreatePointsAttr([(1, 1, 0), (2, 1, 0), (1, 2, 0)])
+odd.CreateFaceVertexCountsAttr([3])
+odd.CreateFaceVertexIndicesAttr([2, 1, 0])
+odd.CreateNormalsAttr([(1, 0, 0), (0, 1, 0), (0, 0, 1)])
+odd.SetNormalsInterpolation(UsdGeom.Tokens.uniform)
 stage.GetRootLayer().Save()
 
 if os.path.exists(out):

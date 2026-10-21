@@ -73,7 +73,7 @@ test_usd_parse :: proc(t: ^testing.T) {
 	m, err := usd_parse(USD_PARTS, &geos, &textures)
 	defer model_destroy(&m)
 	testing.expect_value(t, err, Usd_Error.None)
-	testing.expect_value(t, len(m.warnings), 0)
+	testing.expect(t, len(m.warnings) == 1 && m.warnings[0] == "a USD mesh's normals say uniform but their count is faceVarying's: read as faceVarying", "the mislabeled normals are named")
 
 	a, b := model_node(&m, "A"), model_node(&m, "B")
 	testing.expect(t, a != 0 && b != 0, "instances by name")
@@ -132,6 +132,14 @@ test_usd_parse :: proc(t: ^testing.T) {
 	top := textures.texels[mask.mips[0]]
 	bottom := textures.texels[mask.mips[0] + 2]
 	testing.expect(t, top.g == 255 && bottom.g == 0, "the red channel, read where o3d reads alpha (green)")
+
+	// Normals said uniform, one a corner: read per corner (corners 2, 1, 0
+	// take (1, 0, 0), (0, 1, 0), (0, 0, 1) in that order; the fan keeps it).
+	odd := model_node(&m, "Mislabeled")
+	og, _ := geometry_get(&geos, m.primitives[m.meshes[m.nodes.mesh[odd - 1]].first_primitive].geometry)
+	ov := geos.vertices[og.first_vertex:][:og.vertex_count]
+	testing.expect(t, len(ov) == 3 && ov[0].normal == {1, 0, 0} && ov[1].normal == {0, 1, 0} && ov[2].normal == {0, 0, 1}, "normals per corner")
+	testing.expect(t, ov[0].position == {1, 2, 0}, "corner 0 is point 2")
 
 	// The grid: no material, its display colour.
 	grid := model_node(&m, "Grid")
