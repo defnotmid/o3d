@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 182 "o3d.slang"
+#line 185 "o3d.slang"
 struct VS_Out_0
 {
     float4 position_0;
@@ -11,13 +11,14 @@ struct VS_Out_0
     float3 normal_0;
     float2 uv_0;
     float2 uv1_0;
+    float4 color_0;
 };
 
 
-#line 76
+#line 77
 struct Material_0
 {
-    float4 color_0;
+    float4 color_1;
     float4 emissive_0;
     float metalness_0;
     float roughness_0;
@@ -31,7 +32,7 @@ struct Material_0
 };
 
 
-#line 76
+#line 77
 struct KernelContext_0
 {
     Material_0 constant* material_0;
@@ -42,167 +43,171 @@ struct KernelContext_0
 };
 
 
-#line 692
+#line 712
 float shadow_depth_0(const VS_Out_0 thread* i_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 693
+#line 713
     if(((kernelContext_0->material_0->flags_0) & 2048U) != 0U)
     {
 
-#line 693
+#line 713
         uint mask_slot_0;
 
 
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
-#line 696
+#line 716
             mask_slot_0 = 0U;
 
-#line 696
+#line 716
         }
         else
         {
 
-#line 696
+#line 716
             mask_slot_0 = 6U;
 
-#line 696
+#line 716
         }
 
-#line 696
+#line 716
         float2 raw_0;
         if((((kernelContext_0->material_0->uv_sets_0) >> mask_slot_0) & 1U) != 0U)
         {
 
-#line 697
+#line 717
             raw_0 = i_0->uv1_0;
 
-#line 697
+#line 717
         }
         else
         {
 
-#line 697
+#line 717
             raw_0 = i_0->uv_0;
 
-#line 697
+#line 717
         }
-        float a_0 = kernelContext_0->material_0->color_0.w;
+        float a_0 = kernelContext_0->material_0->color_1.w;
 
-#line 698
+#line 718
         float a_1;
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
             float3 _S1 = float3(raw_0, 1.0f);
 
-#line 702
+#line 722
             a_1 = a_0 * ((kernelContext_0->colorMap_texture_0).sample((kernelContext_0->colorMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[0U].xyz, _S1), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[1U].xyz, _S1))), level((0.0f)))).w;
 
-#line 699
+#line 719
         }
         else
         {
 
-#line 699
+#line 719
             a_1 = a_0;
 
-#line 699
+#line 719
         }
 
-#line 705
+#line 725
         if(((kernelContext_0->material_0->flags_0) & 16384U) != 0U)
         {
 
             float3 _S2 = float3(raw_0, 1.0f);
 
-#line 708
+#line 728
             a_1 = a_1 * ((kernelContext_0->shadowAlphaMap_texture_0).sample((kernelContext_0->shadowAlphaMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[12U].xyz, _S2), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[13U].xyz, _S2))), level((0.0f)))).y;
 
-#line 705
+#line 725
         }
 
-#line 711
+#line 731
         if(a_1 < (kernelContext_0->material_0->alpha_cutoff_0))
         {
 
-#line 712
+#line 732
             discard_fragment();
 
-#line 711
+#line 731
         }
 
-#line 693
+#line 713
     }
 
-#line 715
+#line 735
     return i_0->position_0.z;
 }
 
 
-#line 715
+#line 735
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 715
+#line 735
 struct pixelInput_0
 {
     float3 world_1 [[user(TEXCOORD)]];
     float3 normal_1 [[user(TEXCOORD_1)]];
     float2 uv_1 [[user(TEXCOORD_2)]];
     float2 uv1_1 [[user(TEXCOORD_3)]];
+    float4 color_2 [[user(TEXCOORD_4)]];
 };
 
 
-#line 719
+#line 739
 [[fragment]] pixelOutput_0 fs_shadow(pixelInput_0 _S3 [[stage_in]], float4 position_1 [[position]], Material_0 constant* material_1 [[buffer(0)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> shadowAlphaMap_texture_1 [[texture(1)]], sampler shadowAlphaMap_sampler_1 [[sampler(1)]])
 {
 
-#line 719
+#line 739
     thread KernelContext_0 kernelContext_1;
 
-#line 719
+#line 739
     (&kernelContext_1)->material_0 = material_1;
 
-#line 719
+#line 739
     (&kernelContext_1)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 719
+#line 739
     (&kernelContext_1)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 719
+#line 739
     (&kernelContext_1)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
 
-#line 719
+#line 739
     (&kernelContext_1)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
 
-#line 719
+#line 739
     thread VS_Out_0 _S4;
 
-#line 719
+#line 739
     (&_S4)->position_0 = position_1;
 
-#line 719
+#line 739
     (&_S4)->world_0 = _S3.world_1;
 
-#line 719
+#line 739
     (&_S4)->normal_0 = _S3.normal_1;
 
-#line 719
+#line 739
     (&_S4)->uv_0 = _S3.uv_1;
 
-#line 719
+#line 739
     (&_S4)->uv1_0 = _S3.uv1_1;
 
-#line 719
+#line 739
+    (&_S4)->color_0 = _S3.color_2;
+
+#line 739
     float _S5 = shadow_depth_0(&_S4, &kernelContext_1);
 
-#line 719
+#line 739
     pixelOutput_0 _S6 = { _S5 };
     return _S6;
 }

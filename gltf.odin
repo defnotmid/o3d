@@ -751,13 +751,16 @@ build_model :: proc(doc: ^Gltf_Document, geos: ^Geometries, textures: ^Textures,
 				continue
 			}
 			max_targets = max(max_targets, int(gp.targets.count))
-			geo_id, has_normals, has_skin := build_primitive(doc, geos, &gp, &scratch)
+			geo_id, has_normals, has_skin, has_color := build_primitive(doc, geos, &gp, &scratch)
 			if geo_id == 0 {
 				continue
 			}
 			material := convert_material(doc, gp.material, img_ids)
 			if !has_normals {
 				material.flags += {.Flat_Shading}
+			}
+			if has_color {
+				material.flags += {.Vertex_Colors}
 			}
 			append(&m.primitives, Model_Primitive{geometry = geo_id, material = material, material_id = Model_Material_Id(gp.material + 1), skinned = has_skin})
 		}
@@ -932,11 +935,13 @@ unpack_floats_to :: proc(doc: ^Gltf_Document, acc: i32, out: ^[dynamic]f32, n: i
 	slice.zero(out[wrote:n])
 }
 
-// A triangle primitive into `geos` (0: none), and whether it had normals and skinning.
+// A triangle primitive into `geos` (0: none), and whether it had normals,
+// skinning and vertex colours (COLOR_0, which glTF multiplies the base
+// colour by).
 @(private = "file")
-build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Primitive, s: ^Build_Scratch) -> (id: Geometry_Id, has_normals, has_skin: bool) {
+build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Primitive, s: ^Build_Scratch) -> (id: Geometry_Id, has_normals, has_skin, has_color: bool) {
 	if prim.position < 0 || doc.accessors[prim.position].count == 0 {
-		return 0, false, false
+		return 0, false, false, false
 	}
 	vcount := doc.accessors[prim.position].count
 	count_of :: proc(doc: ^Gltf_Document, acc: i32, vcount: int) -> bool {
@@ -946,14 +951,16 @@ build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Prim
 	has_uv := count_of(doc, prim.texcoord[0], vcount)
 	has_uv1 := count_of(doc, prim.texcoord[1], vcount)
 	has_skin = count_of(doc, prim.joints, vcount) && count_of(doc, prim.weights, vcount)
+	color_comps := type_components(doc.accessors[prim.color].type) if prim.color >= 0 else 0
+	has_color = count_of(doc, prim.color, vcount) && (color_comps == 3 || color_comps == 4)
 	targets := doc.targets[prim.targets.first:][:prim.targets.count]
 	icount := doc.accessors[prim.indices].count if prim.indices >= 0 else 0
 
 	// What this primitive unpacks, counted before any of it is (counts come
 	// from the file, so in i128).
-	per_vertex := 3 + (3 if has_normals else 0) + (2 if has_uv else 0) + (2 if has_uv1 else 0) + (8 if has_skin else 0) + 14 * len(targets)
+	per_vertex := 3 + (3 if has_normals else 0) + (2 if has_uv else 0) + (2 if has_uv1 else 0) + (color_comps if has_color else 0) + (8 if has_skin else 0) + 14 * len(targets)
 	if !budget_take_wide(&doc.budget, .Gltf_Values, i128(vcount) * i128(per_vertex) + i128(icount)) {
-		return 0, false, false
+		return 0, false, false, false
 	}
 
 	verts, floats := &s.verts, &s.floats
@@ -964,6 +971,7 @@ build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Prim
 		verts[i].normal = {0, 1, 0}
 		verts[i].uv = {}
 		verts[i].uv1 = {}
+		verts[i].color = {}
 	}
 
 	if has_normals {
@@ -986,6 +994,15 @@ build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Prim
 		unpack_floats_to(doc, prim.texcoord[1], floats, vcount * 2)
 		for i in 0 ..< vcount {
 			verts[i].uv1 = {floats[i * 2], 1 - floats[i * 2 + 1]}
+		}
+	}
+
+	if has_color {
+		// Linear (glTF's), kept in sRGB as o3d's colours are.
+		unpack_floats_to(doc, prim.color, floats, vcount * color_comps)
+		for i in 0 ..< vcount {
+			c := floats[i * color_comps:][:color_comps]
+			verts[i].color = vertex_color({linear_to_srgb(c[0]), linear_to_srgb(c[1]), linear_to_srgb(c[2]), c[3] if color_comps == 4 else 1})
 		}
 	}
 
@@ -1047,7 +1064,7 @@ build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Prim
 		// vertices by them unchecked.
 		for i in indices^ {
 			if int(i) >= vcount {
-				return 0, false, false
+				return 0, false, false, false
 			}
 		}
 	} else {
@@ -1075,7 +1092,7 @@ build_primitive :: proc(doc: ^Gltf_Document, geos: ^Geometries, prim: ^Gltf_Prim
 		}
 	}
 
-	return geometry_add(geos, verts[:], indices[:], s.skin[:vcount] if has_skin else nil, s.morphs[:] if has_morphs else nil), has_normals, has_skin
+	return geometry_add(geos, verts[:], indices[:], s.skin[:vcount] if has_skin else nil, s.morphs[:] if has_morphs else nil), has_normals, has_skin, has_color
 }
 
 @(private = "file")

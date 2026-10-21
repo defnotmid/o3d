@@ -184,7 +184,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 		draw_shadow_only(job, ref, t, m, y0, y1, area)
 		return
 	}
-	if m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite}) != {} {
+	if m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite, .Vertex_Colors}) != {} {
 		draw_standard_textured(job, ref, t, m, y0, y1, area, blend, receive)
 		return
 	}
@@ -275,15 +275,21 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 @(private = "file")
 draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32, blend, receive: bool) {
 	s := job.s
-	vs := s.chunks[ref.chunk].values[t.values:][:3 * STANDARD_FLOATS]
+	coloured := .Vertex_Colors in m.flags
+	nf := STANDARD_FLOATS + (COLOR_FLOATS if coloured else 0)
+	vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
 	world, normal: [3]Vec3
 	uv, uv1: [3]Vec2
+	vcolor: [3]Vec4
 	for k in 0 ..< 3 {
-		base := k * STANDARD_FLOATS
+		base := k * nf
 		world[k] = (^Vec3)(&vs[base])^
 		normal[k] = (^Vec3)(&vs[base + 3])^
 		uv[k] = (^Vec2)(&vs[base + 6])^
 		uv1[k] = (^Vec2)(&vs[base + 8])^
+		if coloured {
+			vcolor[k] = (^Vec4)(&vs[base + STANDARD_FLOATS])^
+		}
 	}
 	flat_n: Vec3
 	if .Flat_Shading in m.flags {
@@ -315,6 +321,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 			}
 			worlds, norms: [4]Vec3 = ---, ---
 			uvs, uv1s: [4]Vec2 = ---, ---
+			colors: [4]Vec4 = ---
 			for l in 0 ..< 4 {
 				c := Vec2{f32(qx + l & 1) + 0.5, f32(qy + l >> 1) + 0.5}
 				b0 := edge(t.p[1].xy, t.p[2].xy, c) * inv_area
@@ -324,6 +331,9 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				worlds[l] = (world[0] * b0 + world[1] * b1 + world[2] * b2) * inv_iw
 				uvs[l] = (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) * inv_iw
 				uv1s[l] = (uv1[0] * b0 + uv1[1] * b1 + uv1[2] * b2) * inv_iw
+				if coloured {
+					colors[l] = (vcolor[0] * b0 + vcolor[1] * b1 + vcolor[2] * b2) * inv_iw
+				}
 				if l not_in helpers && .Flat_Shading not_in m.flags {
 					norms[l] = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) * inv_iw)
 				}
@@ -338,6 +348,12 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				pm := m^
 				emissive := m.emissive
 				opacity := m.opacity
+				if coloured {
+					pm.base *= colors[l].rgb
+					if blend || .Alpha_Mask in m.flags {
+						opacity *= colors[l].a
+					}
+				}
 				if .Color_Map in m.flags {
 					c_uv, c_dx, c_dy := slot_uv(m, .Color, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
 					tex := sample_map(job, m.color_map, c_uv, c_dx, c_dy)

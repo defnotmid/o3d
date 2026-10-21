@@ -115,6 +115,10 @@ test_additive_match_software :: proc(t: ^testing.T) {expect_parity(t, "additive"
 @(test)
 test_flare_match_software :: proc(t: ^testing.T) {expect_parity(t, "flare")}
 
+// Vertex colours on a lit mesh, a fading panel, lines and points.
+@(test)
+test_vertex_colors_match_software :: proc(t: ^testing.T) {expect_parity(t, "vertex_colors")}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)

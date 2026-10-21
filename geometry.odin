@@ -26,6 +26,15 @@ Vertex :: struct {
 	normal:   Vec3,
 	uv:       Vec2,
 	uv1:      Vec2,
+	// Its colour (sRGB) and alpha, read by a `.Vertex_Colors` material
+	// (three.js's `color` attribute, glTF's COLOR_0; `vertex_color` makes
+	// one); zero (black, clear) where none was given.
+	color:    [4]u8,
+}
+
+// A vertex colour from an sRGB colour and alpha (0..1).
+vertex_color :: proc "contextless" (c: Vec4) -> [4]u8 {
+	return {u8(math.round(clamp(c.r, 0, 1) * 255)), u8(math.round(clamp(c.g, 0, 1) * 255)), u8(math.round(clamp(c.b, 0, 1) * 255)), u8(math.round(clamp(c.a, 0, 1) * 255))}
 }
 
 // A skinned vertex's four joint indices (into the draw's joint matrices) and
@@ -459,7 +468,7 @@ build_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 				p[w] = depth / 2
 				n: Vec3
 				n[w] = 1 if depth > 0 else -1
-				append(verts, Vertex{p, n, {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}, {}})
+				append(verts, Vertex{position = p, normal = n, uv = {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}})
 			}
 		}
 		for iy in 0 ..< gy {
@@ -490,7 +499,7 @@ build_sphere :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32
 			// three.js: x = -cos(phi) sin(theta), y = cos(theta), z = sin(phi) sin(theta).
 			phi, theta := u * 2 * math.PI, v * math.PI
 			n := Vec3{-math.cos(phi) * math.sin(theta), math.cos(theta), math.sin(phi) * math.sin(theta)}
-			append(verts, Vertex{n * r, n, {u, 1 - v}, {}})
+			append(verts, Vertex{position = n * r, normal = n, uv = {u, 1 - v}})
 		}
 	}
 	for iy in 0 ..< hs {
@@ -516,7 +525,7 @@ build_plane :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 		y := f32(iy) * h / f32(gy) - h / 2
 		for ix in 0 ..= gx {
 			x := f32(ix) * w / f32(gx) - w / 2
-			append(verts, Vertex{{x, -y, 0}, {0, 0, 1}, {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}, {}})
+			append(verts, Vertex{position = {x, -y, 0}, normal = {0, 0, 1}, uv = {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}})
 		}
 	}
 	for iy in 0 ..< gy {
@@ -543,7 +552,7 @@ build_cylinder :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u
 			theta := u * 2 * math.PI
 			s, c := math.sin(theta), math.cos(theta)
 			n := linalg.normalize(Vec3{s, slope, c})
-			append(verts, Vertex{{r * s, -v * h + h / 2, r * c}, n, {u, 1 - v}, {}})
+			append(verts, Vertex{position = {r * s, -v * h + h / 2, r * c}, normal = n, uv = {u, 1 - v}})
 		}
 	}
 	for ix in 0 ..< rs {
@@ -564,11 +573,11 @@ build_cylinder :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u
 		}
 		sign: f32 = 1 if top else -1
 		centre := u32(len(verts))
-		append(verts, Vertex{{0, h / 2 * sign, 0}, {0, sign, 0}, {0.5, 0.5}, {}})
+		append(verts, Vertex{position = {0, h / 2 * sign, 0}, normal = {0, sign, 0}, uv = {0.5, 0.5}})
 		for ix in 0 ..= rs {
 			theta := f32(ix) / f32(rs) * 2 * math.PI
 			s, c := math.sin(theta), math.cos(theta)
-			append(verts, Vertex{{r * s, h / 2 * sign, r * c}, {0, sign, 0}, {c * 0.5 + 0.5, s * 0.5 * sign + 0.5}, {}})
+			append(verts, Vertex{position = {r * s, h / 2 * sign, r * c}, normal = {0, sign, 0}, uv = {c * 0.5 + 0.5, s * 0.5 * sign + 0.5}})
 		}
 		for ix in 0 ..< rs {
 			i := centre + 1 + u32(ix)
@@ -592,7 +601,7 @@ build_torus :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 			v := f32(j) / f32(rs) * 2 * math.PI
 			pos := Vec3{(R + r * math.cos(v)) * math.cos(u), (R + r * math.cos(v)) * math.sin(u), r * math.sin(v)}
 			centre := Vec3{R * math.cos(u), R * math.sin(u), 0}
-			append(verts, Vertex{pos, linalg.normalize(pos - centre), {f32(i) / f32(ts), f32(j) / f32(rs)}, {}})
+			append(verts, Vertex{position = pos, normal = linalg.normalize(pos - centre), uv = {f32(i) / f32(ts), f32(j) / f32(rs)}})
 		}
 	}
 	for j in 1 ..= rs {

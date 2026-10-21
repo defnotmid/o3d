@@ -40,9 +40,11 @@ CHUNK_TRIS :: 8192
 // Quads shaded by one oksl call (a run of one draw's triangles).
 QUAD_BATCH :: 256
 // The standard material's corner floats: world position, normal, and uv + uv1 when textured
-// (or an exact shape's: uv1 is its shape coordinate).
+// (or an exact shape's: uv1 is its shape coordinate), then its vertex colour (linear) and alpha
+// with `.Vertex_Colors`.
 UNTEX_FLOATS :: 6
 STANDARD_FLOATS :: 10
+COLOR_FLOATS :: 4
 // The shadow map's corner floats: the alpha mask's colour map uv, then an
 // exact shape's coordinate, each when there is one.
 SHADOW_MASK_FLOATS :: 2
@@ -398,8 +400,9 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	}
 	count := int(hi - lo) + 1
 	sh := shader_get(job.shaders, m.shader) if !job.depth_only else nil
-	textured := m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite}) != {}
-	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS if textured else UNTEX_FLOATS)
+	textured := m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite, .Vertex_Colors}) != {}
+	coloured := .Vertex_Colors in m.flags
+	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS + (COLOR_FLOATS if coloured else 0) if textured else UNTEX_FLOATS)
 	masked, curved: bool
 	if job.depth_only {
 		if .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} == {} && m.opacity < m.alpha_cutoff {
@@ -453,6 +456,10 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 			if textured {
 				(^Vec2)(&w.values[base + 6])^ = v.uv
 				(^Vec2)(&w.values[base + 8])^ = v.uv1
+			}
+			if coloured {
+				c := v.color
+				(^Vec4)(&w.values[base + STANDARD_FLOATS])^ = {srgb_to_linear(f32(c.r) / 255), srgb_to_linear(f32(c.g) / 255), srgb_to_linear(f32(c.b) / 255), f32(c.a) / 255}
 			}
 		}
 	} else {

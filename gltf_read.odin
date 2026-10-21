@@ -99,6 +99,7 @@ Gltf_Primitive :: struct {
 	// The attributes o3d reads.
 	position, normal, joints, weights: i32,
 	texcoord:                    [2]i32,
+	color:                       i32, // COLOR_0
 }
 
 // A morph target: its attributes, and the POSITION and NORMAL deltas.
@@ -1006,6 +1007,7 @@ parse_mesh :: proc(r: ^Gltf_Reader, o: json.Object, mesh: ^Gltf_Mesh) {
 		p.position = attribute(r, attrs, "POSITION")
 		p.normal = attribute(r, attrs, "NORMAL")
 		p.texcoord = {attribute(r, attrs, "TEXCOORD_0"), attribute(r, attrs, "TEXCOORD_1")}
+		p.color = attribute(r, attrs, "COLOR_0")
 		p.joints = attribute(r, attrs, "JOINTS_0")
 		p.weights = attribute(r, attrs, "WEIGHTS_0")
 		targets := get_array(r, po, "targets")

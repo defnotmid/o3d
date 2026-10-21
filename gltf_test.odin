@@ -792,6 +792,62 @@ test_gltf_extensions_and_materials :: proc(t: ^testing.T) {
 	testing.expect(t, mat.color_transform.offset == {0.25, 0.5} && mat.color_transform.scale == {2, 3} && mat.color_transform.tex_coord == 1, "KHR_texture_transform")
 }
 
+// COLOR_0 (normalized u8 with alpha, float without; linear in the file)
+// into the vertices' sRGB colours, its material reading them; a primitive
+// without it does not.
+@(test)
+test_gltf_vertex_colors :: proc(t: ^testing.T) {
+	Bin :: struct #packed {
+		pos:  [3][3]f32,
+		col8: [3][4]u8,
+		colf: [3][3]f32,
+	}
+	b := Bin {
+		pos  = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}},
+		col8 = {{255, 0, 0, 128}, {0, 255, 0, 255}, {0, 0, 255, 0}},
+		colf = {{0.2158605, 0.2158605, 0.2158605}, {1, 1, 1}, {0, 0, 0}}, // sRGB 128 / 255
+	}
+	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	src := fmt.tprintf(
+		`{{
+  "asset": {{"version": "2.0"}},
+  "buffers": [{{"uri": "data:application/octet-stream;base64,%s", "byteLength": %d}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": 36}},
+    {{"buffer": 0, "byteOffset": 36, "byteLength": 12}},
+    {{"buffer": 0, "byteOffset": 48, "byteLength": 36}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]}},
+    {{"bufferView": 1, "componentType": 5121, "count": 3, "type": "VEC4", "normalized": true}},
+    {{"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC3"}}
+  ],
+  "meshes": [{{"primitives": [
+    {{"attributes": {{"POSITION": 0, "COLOR_0": 1}}}},
+    {{"attributes": {{"POSITION": 0, "COLOR_0": 2}}}},
+    {{"attributes": {{"POSITION": 0}}}}
+  ]}}],
+  "nodes": [{{"mesh": 0}}],
+  "scenes": [{{"nodes": [0]}}],
+  "scene": 0
+}}`,
+		b64,
+		size_of(Bin),
+	)
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	model, err := gltf_parse(transmute([]u8)src, &geos)
+	defer model_destroy(&model)
+	testing.expect_value(t, err, Gltf_Error.None)
+	testing.expect_value(t, len(model.primitives), 3)
+	v8, _, _ := geometry_mesh(&geos, model.primitives[0].geometry)
+	testing.expect(t, v8[0].color == {255, 0, 0, 128} && v8[1].color == {0, 255, 0, 255} && v8[2].color == {0, 0, 255, 0}, "normalized u8 with alpha")
+	vf, _, _ := geometry_mesh(&geos, model.primitives[1].geometry)
+	testing.expectf(t, vf[0].color == {128, 128, 128, 255} && vf[1].color == {255, 255, 255, 255}, "linear floats as sRGB, alpha 1: %v", vf[0].color)
+	testing.expect(t, .Vertex_Colors in model.primitives[0].material.flags && .Vertex_Colors in model.primitives[1].material.flags, "read by their materials")
+	testing.expect(t, .Vertex_Colors not_in model.primitives[2].material.flags, "not without COLOR_0")
+}
+
 @(test)
 test_gltf_unsupported_extensions :: proc(t: ^testing.T) {
 	geos: Geometries

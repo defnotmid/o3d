@@ -789,10 +789,10 @@ test_alpha_mask_ao_and_uv_transform :: proc(t: ^testing.T) {
 
 	// Custom quad where uv is constant {0, 0} (so UV0 would always read AO=0), while uv1 spans [0, 1] horizontally.
 	q_verts := [4]Vertex {
-		{{-1, -1, 0}, {0, 0, 1}, {0, 0}, {0, 0}},
-		{{ 1, -1, 0}, {0, 0, 1}, {0, 0}, {1, 0}},
-		{{ 1,  1, 0}, {0, 0, 1}, {0, 0}, {1, 1}},
-		{{-1,  1, 0}, {0, 0, 1}, {0, 0}, {0, 1}},
+		{{-1, -1, 0}, {0, 0, 1}, {0, 0}, {0, 0}, {}},
+		{{ 1, -1, 0}, {0, 0, 1}, {0, 0}, {1, 0}, {}},
+		{{ 1,  1, 0}, {0, 0, 1}, {0, 0}, {1, 1}, {}},
+		{{-1,  1, 0}, {0, 0, 1}, {0, 0}, {0, 1}, {}},
 	}
 	q_idx := [6]u32{0, 1, 2, 0, 2, 3}
 	quad_id := geometry_add(&g, q_verts[:], q_idx[:])
@@ -1612,6 +1612,89 @@ test_particle_occlusion :: proc(t: ^testing.T) {
 	testing.expectf(t, frame(&scene, &g, &s, 100, off, radius = 0) > 0.95, "its quad on the frame (not probed: drawn)")
 	off.position.x, off.offset.x = 0.1, -0.4
 	testing.expectf(t, frame(&scene, &g, &s, 100, off) > 0.95, "its point on the frame: whole")
+}
+
+// Vertex colours (`.Vertex_Colors`): a triangle's corners' colours
+// interpolated in linear light, their alpha fading a blended panel over a
+// plane behind, a polyline's gradient along it and points' own colours;
+// without the flag the material's colour.
+@(test)
+test_vertex_colors :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 64
+	s: Software
+	defer software_destroy(&s)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	near :: proc(a, b: [4]u8, tol: int) -> bool {
+		for k in 0 ..< 4 {
+			if abs(int(a[k]) - int(b[k])) > tol {
+				return false
+			}
+		}
+		return true
+	}
+	ortho :: proc(scene: ^Scene) {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, orthographic = true, height = 2, near = 0.1, far = 20}
+	}
+	// A quad, its left corners red and opaque, its right blue and clear.
+	quad := [4]Vertex{
+		{position = {-1, -1, 0}, normal = {0, 0, 1}, color = {255, 0, 0, 255}},
+		{position = {1, -1, 0}, normal = {0, 0, 1}, color = {0, 0, 255, 0}},
+		{position = {1, 1, 0}, normal = {0, 0, 1}, color = {0, 0, 255, 0}},
+		{position = {-1, 1, 0}, normal = {0, 0, 1}, color = {255, 0, 0, 255}},
+	}
+	idx := [6]u32{0, 1, 2, 0, 2, 3}
+	q := geometry_add(&g, quad[:], idx[:])
+	ortho(&scene)
+	m := MATERIAL_DEFAULT
+	m.flags = {.Basic, .Vertex_Colors}
+	append(&scene.draws, Draw{q, compose({0, 0, 0}), m})
+	px := software_render(&s, &scene, &g, nil, W, W)
+	testing.expectf(t, near(at(px, 0, W / 2), {255, 0, 0, 255}, 24), "the left edge red: %v", at(px, 0, W / 2))
+	testing.expectf(t, near(at(px, W - 1, W / 2), {0, 0, 255, 255}, 24), "the right edge blue (opaque: alpha not read): %v", at(px, W - 1, W / 2))
+	// Halfway, in linear light: each channel half its linear value.
+	mid := u8(math.round(linear_to_srgb(0.5) * 255))
+	testing.expectf(t, near(at(px, W / 2, W / 2), {mid, 0, mid, 255}, 3), "the middle: %v, want %v", at(px, W / 2, W / 2), mid)
+	// Blended over a white plane behind: clear at the right edge.
+	ortho(&scene)
+	white := MATERIAL_DEFAULT
+	white.flags = {.Basic}
+	append(&scene.draws, Draw{plane(&g, 4, 4), compose({0, 0, -1}), white})
+	m.flags += {.Transparent}
+	append(&scene.draws, Draw{q, compose({0, 0, 0}), m})
+	px = software_render(&s, &scene, &g, nil, W, W)
+	testing.expectf(t, near(at(px, 0, W / 2), {255, 0, 0, 255}, 24), "opaque at the left: %v", at(px, 0, W / 2))
+	testing.expectf(t, near(at(px, W - 1, W / 2), {255, 255, 255, 255}, 24), "clear at the right: %v", at(px, W - 1, W / 2))
+	// Without the flag: the material's colour.
+	ortho(&scene)
+	m.flags = {.Basic}
+	m.color = {0, 1, 0}
+	append(&scene.draws, Draw{q, compose({0, 0, 0}), m})
+	px = software_render(&s, &scene, &g, nil, W, W)
+	testing.expectf(t, at(px, 0, W / 2) == {0, 255, 0, 255}, "the material's colour: %v", at(px, 0, W / 2))
+	// A polyline red to blue, and points of their own colours.
+	ortho(&scene)
+	line_pts := [2]Vec3{{-1.2, 0.5, 0}, {1.2, 0.5, 0}}
+	line_c := [2]Vec4{{1, 0, 0, 1}, {0, 0, 1, 1}}
+	pt_pts := [2]Vec3{{-0.5, -0.5, 0}, {0.5, -0.5, 0}}
+	pt_c := [2]Vec4{{0, 1, 0, 1}, {1, 1, 0, 1}}
+	thick := MATERIAL_DEFAULT
+	thick.size, thick.flags = 6, {.Basic, .Vertex_Colors, .No_Size_Attenuation}
+	append(&scene.draws, Draw{scene_polyline(&scene, line_pts[:], colors = line_c[:]), compose({0, 0, 0}), thick})
+	append(&scene.draws, Draw{scene_points(&scene, pt_pts[:], pt_c[:]), compose({0, 0, 0}), thick})
+	px = software_render(&s, &scene, &g, nil, W, W)
+	y := W / 4
+	testing.expectf(t, at(px, 2, y).r > 200 && at(px, 2, y).b < 120, "the line red at its start: %v", at(px, 2, y))
+	testing.expectf(t, at(px, W - 3, y).b > 200 && at(px, W - 3, y).r < 120, "blue at its end: %v", at(px, W - 3, y))
+	testing.expectf(t, at(px, W / 4, 3 * W / 4) == {0, 255, 0, 255}, "a green point: %v", at(px, W / 4, 3 * W / 4))
+	testing.expectf(t, at(px, 3 * W / 4, 3 * W / 4) == {255, 255, 0, 255}, "a yellow point: %v", at(px, 3 * W / 4, 3 * W / 4))
 }
 
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's

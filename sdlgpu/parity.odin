@@ -58,6 +58,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"labels", 240, 180, build_labels},
 	{"additive", 240, 180, build_additive},
 	{"flare", 240, 180, build_flare},
+	{"vertex_colors", 240, 180, build_vertex_colors},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -479,10 +480,10 @@ build_textures :: proc(a: ^Parity_Assets) -> string {
 
 	// A quad with distinct UV0 and UV1 using AO on UV1 (tex_coord = 1).
 	q_verts := [4]o3d.Vertex {
-		{{-0.7, -0.5, 0}, {0, 0, 1}, {0, 0}, {0, 1}},
-		{{ 0.7, -0.5, 0}, {0, 0, 1}, {1, 0}, {1, 0}},
-		{{ 0.7,  0.5, 0}, {0, 0, 1}, {1, 1}, {0, 0}},
-		{{-0.7,  0.5, 0}, {0, 0, 1}, {0, 1}, {1, 1}},
+		{{-0.7, -0.5, 0}, {0, 0, 1}, {0, 0}, {0, 1}, {}},
+		{{ 0.7, -0.5, 0}, {0, 0, 1}, {1, 0}, {1, 0}, {}},
+		{{ 0.7,  0.5, 0}, {0, 0, 1}, {1, 1}, {0, 0}, {}},
+		{{-0.7,  0.5, 0}, {0, 0, 1}, {0, 1}, {1, 1}, {}},
 	}
 	q_idx := [6]u32{0, 1, 2, 0, 2, 3}
 	uv1_mat := o3d.MATERIAL_DEFAULT
@@ -834,6 +835,79 @@ build_flare :: proc(a: ^Parity_Assets) -> string {
 	m.color_map, m.flags = glow, {.Additive, .No_Size_Attenuation}
 	m.depth_offset, m.occlusion_radius = 1e6, 10
 	append(&s.draws, o3d.Draw{o3d.scene_particles(s, flare[:]), o3d.compose({0, 0, 0}), m})
+	return ""
+}
+
+// Vertex colours (three.js's vertexColors): a lit sphere banded by height,
+// a panel fading by its vertices' alpha, a polyline's gradient, segments
+// of their own colours and points of three brightnesses (a starfield).
+@(private = "file")
+build_vertex_colors :: proc(a: ^Parity_Assets) -> string {
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0.5, 1.2, 4.5}, target = {0, 0.4, 0}, fov = 45, near = 0.1, far = 30}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {2, 3, 2}})
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.3})
+	// A sphere's vertices coloured by height: red at the bottom to cyan.
+	ball := o3d.sphere(&a.geos, 0.6, 32, 16)
+	sv, si, _ := o3d.geometry_mesh(&a.geos, ball)
+	verts := make([]o3d.Vertex, len(sv), context.temp_allocator)
+	indices := make([]u32, len(si), context.temp_allocator)
+	copy(verts, sv)
+	copy(indices, si)
+	for &v in verts {
+		h := v.position.y / 1.2 + 0.5
+		v.color = o3d.vertex_color({1 - h, h, h, 1})
+	}
+	lit := o3d.MATERIAL_DEFAULT
+	lit.roughness, lit.flags = 0.5, {.Vertex_Colors}
+	append(&s.draws, o3d.Draw{o3d.geometry_add(&a.geos, verts, indices), o3d.compose({-0.8, 0.6, 0}), lit})
+	// A panel opaque at its left edge, clear at its right, yellow to magenta.
+	pv := [4]o3d.Vertex{
+		{position = {-0.6, -0.4, 0}, normal = {0, 0, 1}, color = o3d.vertex_color({1, 1, 0, 1})},
+		{position = {0.6, -0.4, 0}, normal = {0, 0, 1}, color = o3d.vertex_color({1, 0, 1, 0})},
+		{position = {0.6, 0.4, 0}, normal = {0, 0, 1}, color = o3d.vertex_color({1, 0, 1, 0})},
+		{position = {-0.6, 0.4, 0}, normal = {0, 0, 1}, color = o3d.vertex_color({1, 1, 0, 1})},
+	}
+	pi := [6]u32{0, 1, 2, 0, 2, 3}
+	fade := o3d.MATERIAL_DEFAULT
+	fade.flags, fade.side = {.Basic, .Vertex_Colors, .Transparent}, .Double
+	append(&s.draws, o3d.Draw{o3d.geometry_add(&a.geos, pv[:], pi[:]), o3d.compose({0.9, 0.9, 0.3}, {0, -0.3, 0}), fade})
+	// A spiral, blue to orange along it.
+	N :: 40
+	spiral: [N]o3d.Vec3
+	spiral_c: [N]o3d.Vec4
+	for i in 0 ..< N {
+		t := f32(i) / (N - 1)
+		spiral[i] = {0.5 * math.cos(t * 9), t * 1.4 - 0.2, 0.5 * math.sin(t * 9)}
+		spiral_c[i] = {t, 0.4 + 0.2 * t, 1 - t, 1}
+	}
+	line := o3d.MATERIAL_DEFAULT
+	line.size, line.flags = 4, {.Basic, .Vertex_Colors, .No_Size_Attenuation}
+	append(&s.draws, o3d.Draw{o3d.scene_polyline(s, spiral[:], colors = spiral_c[:]), o3d.compose({0.9, 0, -0.3}), line})
+	// Segments, each its own colour at each end.
+	segs := [6]o3d.Vec3{{-1.6, -0.1, 0.6}, {-0.4, -0.1, 1}, {-1.6, 0, 0.9}, {-1.2, 0.5, 0.9}, {0.2, -0.2, 1}, {1.4, -0.2, 0.8}}
+	seg_c := [6]o3d.Vec4{{1, 0, 0, 1}, {1, 1, 0, 1}, {0, 1, 0, 1}, {0, 1, 0, 1}, {1, 1, 1, 1}, {0, 0, 1, 1}}
+	thin := o3d.MATERIAL_DEFAULT
+	thin.size, thin.flags = 0.04, {.Basic, .Vertex_Colors}
+	append(&s.draws, o3d.Draw{o3d.scene_line_segments(s, segs[:], seg_c[:]), o3d.compose({0, 0, 0}), thin})
+	// Stars: three brightnesses over a field behind.
+	seed: u32 = 777
+	rnd :: proc(seed: ^u32) -> f32 {
+		seed^ = seed^ * 1664525 + 1013904223
+		return f32(seed^ >> 8) / f32(1 << 24)
+	}
+	stars: [90]o3d.Vec3
+	star_c: [90]o3d.Vec4
+	for i in 0 ..< len(stars) {
+		stars[i] = {(rnd(&seed) - 0.5) * 9, rnd(&seed) * 5 - 1.5, -4 - rnd(&seed) * 2}
+		levels := [3]f32{0.35, 0.65, 1}
+		b := levels[i % 3]
+		star_c[i] = {b, b, b * 0.9 + 0.1, 1}
+	}
+	star := o3d.MATERIAL_DEFAULT
+	star.size, star.flags = 3, {.Basic, .Vertex_Colors, .No_Size_Attenuation}
+	append(&s.draws, o3d.Draw{o3d.scene_points(s, stars[:], star_c[:]), o3d.compose({0, 0, 0}), star})
 	return ""
 }
 

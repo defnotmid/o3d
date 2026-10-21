@@ -109,6 +109,10 @@ Material_Flag :: enum u8 {
 	// a GPU-rendered image's): divided by it after filtering, both
 	// renderers alike.
 	Premultiplied_Color_Map,
+	// Its geometry's vertex colours (`Vertex.color`) times its colour and
+	// their alpha times its opacity (three.js's vertexColors; glTF's
+	// COLOR_0): interpolated in linear light, lines and points too.
+	Vertex_Colors,
 }
 
 Material_Flags :: bit_set[Material_Flag; u16]
@@ -317,8 +321,10 @@ scene_clear :: proc(s: ^Scene) {
 	clear(&s.path_indices)
 }
 
-// Per-frame LineSegments geometry in `s` from pairs of endpoints `(positions[2*i], positions[2*i+1])`.
-scene_line_segments :: proc(s: ^Scene, positions: []Vec3) -> Geometry_Id {
+// Per-frame LineSegments geometry in `s` from pairs of endpoints
+// `(positions[2*i], positions[2*i+1])`, and their colours (sRGB and alpha,
+// one a position; for a `.Vertex_Colors` material) when given.
+scene_line_segments :: proc(s: ^Scene, positions: []Vec3, colors: []Vec4 = nil) -> Geometry_Id {
 	n := (len(positions) / 2) * 2
 	if n < 2 {
 		return 0
@@ -330,7 +336,7 @@ scene_line_segments :: proc(s: ^Scene, positions: []Vec3) -> Geometry_Id {
 	r: f32
 	for i in 0 ..< n {
 		p := positions[i]
-		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}}
+		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}, color = vertex_color(colors[i]) if i < len(colors) else {}}
 		s.path_indices[int(first_i) + i] = u32(i)
 		r = max(r, linalg.length(p))
 	}
@@ -346,8 +352,10 @@ scene_line_segments :: proc(s: ^Scene, positions: []Vec3) -> Geometry_Id {
 	return id
 }
 
-// Per-frame connected polyline geometry in `s` as LineSegments.
-scene_polyline :: proc(s: ^Scene, positions: []Vec3, closed := false) -> Geometry_Id {
+// Per-frame connected polyline geometry in `s` as LineSegments, and its
+// points' colours (sRGB and alpha; for a `.Vertex_Colors` material: a
+// gradient along it) when given.
+scene_polyline :: proc(s: ^Scene, positions: []Vec3, closed := false, colors: []Vec4 = nil) -> Geometry_Id {
 	n := len(positions)
 	if n < 2 {
 		return 0
@@ -359,7 +367,7 @@ scene_polyline :: proc(s: ^Scene, positions: []Vec3, closed := false) -> Geometr
 	table_grow_non_zero(&s.path_indices, int(first_i) + segs * 2)
 	r: f32
 	for p, i in positions {
-		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}}
+		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}, color = vertex_color(colors[i]) if i < len(colors) else {}}
 		r = max(r, linalg.length(p))
 	}
 	for i in 0 ..< segs {
@@ -491,8 +499,10 @@ scene_particles :: proc(s: ^Scene, particles: []Particle) -> Geometry_Id {
 	return id
 }
 
-// Per-frame Points geometry in `s` from 3D positions.
-scene_points :: proc(s: ^Scene, positions: []Vec3) -> Geometry_Id {
+// Per-frame Points geometry in `s` from 3D positions, and their colours
+// (sRGB and alpha; for a `.Vertex_Colors` material) when given. Points of
+// their own sizes are particles (`scene_particles`).
+scene_points :: proc(s: ^Scene, positions: []Vec3, colors: []Vec4 = nil) -> Geometry_Id {
 	n := len(positions)
 	if n == 0 {
 		return 0
@@ -503,7 +513,7 @@ scene_points :: proc(s: ^Scene, positions: []Vec3) -> Geometry_Id {
 	table_grow_non_zero(&s.path_indices, int(first_i) + n)
 	r: f32
 	for p, i in positions {
-		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}}
+		s.path_vertices[int(first_v) + i] = {position = p, normal = {0, 0, 1}, color = vertex_color(colors[i]) if i < len(colors) else {}}
 		s.path_indices[int(first_i) + i] = u32(i)
 		r = max(r, linalg.length(p))
 	}
@@ -815,7 +825,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 				}
 			}
 			base := u32(len(exp.vertices)) - first_v
-			append(&exp.vertices, Vertex{corners[0], cam_back, {0, 0}, {}}, Vertex{corners[1], cam_back, {1, 0}, {}}, Vertex{corners[2], cam_back, {1, 1}, {}}, Vertex{corners[3], cam_back, {0, 1}, {}})
+			append(&exp.vertices, Vertex{position = corners[0], normal = cam_back, uv = {0, 0}}, Vertex{position = corners[1], normal = cam_back, uv = {1, 0}}, Vertex{position = corners[2], normal = cam_back, uv = {1, 1}}, Vertex{position = corners[3], normal = cam_back, uv = {0, 1}})
 			append(&exp.indices, base, base + 1, base + 2, base, base + 2, base + 3)
 			row := Sprite_Row{color = p.color}
 			if probe_radius > 0 {
@@ -836,6 +846,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 		mat := d.material
 		mat.mode = .Sprites
 		mat.flags += {.Basic, .Transparent}
+		mat.flags -= {.Vertex_Colors}
 		if len(insts) > 0 && (inst.has_color || inst.color != {}) {
 			mat.color = linear_to_srgb_vec3(linear(mat.color) * linear(inst.color))
 		}
@@ -1081,6 +1092,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 				raw_s := d.material.size if d.material.size > 0 else (4.0 if px_space else 0.08)
 				for v in src_verts {
 					p := (M * Vec4{v.position.x, v.position.y, v.position.z, 1}).xyz
+					c := v.color
 					half: f32
 					if px_space {
 						w_clip := (view_proj * Vec4{p.x, p.y, p.z, 1}).w if !scene.camera.orthographic else 1
@@ -1097,17 +1109,17 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 					base_u := u32(len(exp.vertices)) - first_v
 					append(
 						&exp.vertices,
-						Vertex{q0, cam_back, {0, 0}, {}},
-						Vertex{q1, cam_back, {1, 0}, {}},
-						Vertex{q2, cam_back, {1, 1}, {}},
-						Vertex{q3, cam_back, {0, 1}, {}},
+						Vertex{q0, cam_back, {0, 0}, {}, c},
+						Vertex{q1, cam_back, {1, 0}, {}, c},
+						Vertex{q2, cam_back, {1, 1}, {}, c},
+						Vertex{q3, cam_back, {0, 1}, {}, c},
 					)
 					append(&exp.indices, base_u + 0, base_u + 1, base_u + 2, base_u + 0, base_u + 2, base_u + 3)
 					r_max = max(r_max, linalg.length(p) + half * 1.5)
 				}
 			} else {
 				raw_w := d.material.size if d.material.size > 0 else (2.0 if px_space else 0.03)
-				emit_seg :: proc(exp: ^Expanded_Draws, first_v: u32, p0, p1, cam_back, cam_up, cam_right: Vec3, view_proj: Mat4, ortho, px_space: bool, raw_w, m_scale, scale_px: f32, r_max: ^f32) {
+				emit_seg :: proc(exp: ^Expanded_Draws, first_v: u32, p0, p1: Vec3, c0, c1: [4]u8, cam_back, cam_up, cam_right: Vec3, view_proj: Mat4, ortho, px_space: bool, raw_w, m_scale, scale_px: f32, r_max: ^f32) {
 					seg := p1 - p0
 					seg_len := linalg.length(seg)
 					if seg_len < 1e-7 {
@@ -1140,10 +1152,10 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 					base_u := u32(len(exp.vertices)) - first_v
 					append(
 						&exp.vertices,
-						Vertex{q0, n, {0, 0}, {}},
-						Vertex{q1, n, {1, 0}, {}},
-						Vertex{q2, n, {1, 1}, {}},
-						Vertex{q3, n, {0, 1}, {}},
+						Vertex{q0, n, {0, 0}, {}, c0},
+						Vertex{q1, n, {1, 0}, {}, c0},
+						Vertex{q2, n, {1, 1}, {}, c1},
+						Vertex{q3, n, {0, 1}, {}, c1},
 					)
 					append(&exp.indices, base_u + 0, base_u + 1, base_u + 2, base_u + 0, base_u + 2, base_u + 3)
 					r_max^ = max(r_max^, linalg.length(p0) + h0, linalg.length(p1) + h1)
@@ -1156,7 +1168,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 						}
 						p0 := (M * Vec4{src_verts[ia].position.x, src_verts[ia].position.y, src_verts[ia].position.z, 1}).xyz
 						p1 := (M * Vec4{src_verts[ib].position.x, src_verts[ib].position.y, src_verts[ib].position.z, 1}).xyz
-						emit_seg(exp, first_v, p0, p1, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+						emit_seg(exp, first_v, p0, p1, src_verts[ia].color, src_verts[ib].color, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
 					}
 				} else {
 					for t := 0; t + 2 < len(raw_idx); t += 3 {
@@ -1167,9 +1179,9 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 						p0 := (M * Vec4{src_verts[i0].position.x, src_verts[i0].position.y, src_verts[i0].position.z, 1}).xyz
 						p1 := (M * Vec4{src_verts[i1].position.x, src_verts[i1].position.y, src_verts[i1].position.z, 1}).xyz
 						p2 := (M * Vec4{src_verts[i2].position.x, src_verts[i2].position.y, src_verts[i2].position.z, 1}).xyz
-						emit_seg(exp, first_v, p0, p1, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
-						emit_seg(exp, first_v, p1, p2, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
-						emit_seg(exp, first_v, p2, p0, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+						emit_seg(exp, first_v, p0, p1, src_verts[i0].color, src_verts[i1].color, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+						emit_seg(exp, first_v, p1, p2, src_verts[i1].color, src_verts[i2].color, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
+						emit_seg(exp, first_v, p2, p0, src_verts[i2].color, src_verts[i0].color, cam_back, cam_up, cam_right, view_proj, scene.camera.orthographic, px_space, raw_w, m_scale, scale_px, &r_max)
 					}
 				}
 			}
@@ -1379,10 +1391,10 @@ sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32
 }
 
 // Blended over what is behind: transparent, with opacity under 1 or alpha
-// from elsewhere (a colour map's, a ShaderMaterial's, an exact shape's
-// coverage), as three.js blends any transparent material.
+// from elsewhere (a colour map's, its vertices', a ShaderMaterial's, an
+// exact shape's coverage), as three.js blends any transparent material.
 blended :: proc "contextless" (m: Material) -> bool {
-	return .Shadow_Only in m.flags || .Additive in m.flags || .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || m.shader != 0 || m.mode == .Curves || m.mode == .Sprites)
+	return .Shadow_Only in m.flags || .Additive in m.flags || .Transparent in m.flags && (m.opacity < 1 || m.color_map != 0 || m.alpha_map != 0 || .Vertex_Colors in m.flags || m.shader != 0 || m.mode == .Curves || m.mode == .Sprites)
 }
 
 // How a draw's colour meets what is drawn before it: replacing it (its
@@ -1546,6 +1558,7 @@ Shading_Flag :: enum u8 {
 	Additive,
 	// The colour map's colour is premultiplied by its alpha.
 	Premultiplied,
+	Vertex_Colors,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1613,6 +1626,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 				f += {.Premultiplied}
 			}
 		}
+		if .Vertex_Colors in m.flags && m.shader == 0 {
+			f += {.Vertex_Colors}
+		}
 		if has_tex(textures, m.normal_map) && .Basic not_in m.flags {
 			f += {.Normal_Map}
 		}
@@ -1653,7 +1669,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			f += {.Additive}
 		}
 		if .Shadow_Only in m.flags && m.shader == 0 {
-			f = (f - TEXTURE_FLAGS - {.Basic, .Toon, .Alpha_Mask, .Curves}) + {.Shadow_Only, .Receive_Shadow}
+			f = (f - TEXTURE_FLAGS - {.Basic, .Toon, .Alpha_Mask, .Curves, .Vertex_Colors}) + {.Shadow_Only, .Receive_Shadow}
 		}
 		out[i] = {
 			base          = linear(m.color),

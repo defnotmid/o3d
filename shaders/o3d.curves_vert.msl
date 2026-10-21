@@ -3,7 +3,51 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 166 "o3d.slang"
+#line 6 "common.slang"
+float srgb_to_linear_0(float c_0)
+{
+
+#line 6
+    float _S1;
+    if(c_0 <= 0.04044999927282333f)
+    {
+
+#line 7
+        _S1 = c_0 / 12.92000007629394531f;
+
+#line 7
+    }
+    else
+    {
+
+#line 7
+        _S1 = pow((c_0 + 0.05499999970197678f) / 1.0549999475479126f, 2.40000009536743164f);
+
+#line 7
+    }
+
+#line 7
+    return _S1;
+}
+
+float3 linear_rgb_0(float3 c_1)
+{
+
+#line 11
+    return float3(srgb_to_linear_0(c_1.x), srgb_to_linear_0(c_1.y), srgb_to_linear_0(c_1.z));
+}
+
+
+#line 195 "o3d.slang"
+float4 vertex_color_0(float4 c_2)
+{
+
+#line 196
+    return float4(linear_rgb_0(c_2.xyz), c_2.w);
+}
+
+
+#line 167
 struct vs_curves_Result_0
 {
     float4 position_0 [[position]];
@@ -12,27 +56,29 @@ struct vs_curves_Result_0
     float2 uv_0 [[user(TEXCOORD_2)]];
     float2 uv1_0 [[user(TEXCOORD_3)]];
     uint quad_0 [[user(TEXCOORD_4)]];
+    float4 color_0 [[user(TEXCOORD_5)]];
 };
 
 
-#line 166
+#line 167
 struct vertexInput_0
 {
     float3 position_1 [[attribute(0)]];
     float3 normal_1 [[attribute(1)]];
     float2 uv_1 [[attribute(2)]];
     float2 uv1_1 [[attribute(3)]];
+    float4 color_1 [[attribute(4)]];
 };
 
 
-#line 166
+#line 167
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 63
+#line 64
 struct Draw_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 mvp_0;
@@ -44,7 +90,7 @@ struct Draw_VS_natural_0
 };
 
 
-#line 213
+#line 223
 struct VS_Curves_Out_0
 {
     float4 position_2;
@@ -53,47 +99,52 @@ struct VS_Curves_Out_0
     float2 uv_2;
     float2 uv1_2;
     [[flat]] uint quad_1;
+    float4 color_2;
 };
 
 
-#line 213
-[[vertex]] vs_curves_Result_0 vs_curves(vertexInput_0 _S1 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_0 [[buffer(0)]])
+#line 223
+[[vertex]] vs_curves_Result_0 vs_curves(vertexInput_0 _S2 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_0 [[buffer(0)]])
 {
 
-#line 234
+#line 246
     thread VS_Curves_Out_0 o_0;
-    float4 _S2 = float4(_S1.position_1, 1.0f);
+    float4 _S3 = float4(_S2.position_1, 1.0f);
 
-#line 235
-    (&o_0)->position_2 = (((_S2) * (matrix<float,int(4),int(4)> (draw_0->mvp_0.data_0[int(0)][int(0)], draw_0->mvp_0.data_0[int(1)][int(0)], draw_0->mvp_0.data_0[int(2)][int(0)], draw_0->mvp_0.data_0[int(3)][int(0)], draw_0->mvp_0.data_0[int(0)][int(1)], draw_0->mvp_0.data_0[int(1)][int(1)], draw_0->mvp_0.data_0[int(2)][int(1)], draw_0->mvp_0.data_0[int(3)][int(1)], draw_0->mvp_0.data_0[int(0)][int(2)], draw_0->mvp_0.data_0[int(1)][int(2)], draw_0->mvp_0.data_0[int(2)][int(2)], draw_0->mvp_0.data_0[int(3)][int(2)], draw_0->mvp_0.data_0[int(0)][int(3)], draw_0->mvp_0.data_0[int(1)][int(3)], draw_0->mvp_0.data_0[int(2)][int(3)], draw_0->mvp_0.data_0[int(3)][int(3)]))));
-    (&o_0)->world_1 = (((_S2) * (matrix<float,int(4),int(4)> (draw_0->model_0.data_0[int(0)][int(0)], draw_0->model_0.data_0[int(1)][int(0)], draw_0->model_0.data_0[int(2)][int(0)], draw_0->model_0.data_0[int(3)][int(0)], draw_0->model_0.data_0[int(0)][int(1)], draw_0->model_0.data_0[int(1)][int(1)], draw_0->model_0.data_0[int(2)][int(1)], draw_0->model_0.data_0[int(3)][int(1)], draw_0->model_0.data_0[int(0)][int(2)], draw_0->model_0.data_0[int(1)][int(2)], draw_0->model_0.data_0[int(2)][int(2)], draw_0->model_0.data_0[int(3)][int(2)], draw_0->model_0.data_0[int(0)][int(3)], draw_0->model_0.data_0[int(1)][int(3)], draw_0->model_0.data_0[int(2)][int(3)], draw_0->model_0.data_0[int(3)][int(3)])))).xyz;
-    (&o_0)->normal_3 = (((float4(_S1.normal_1, 0.0f)) * (matrix<float,int(4),int(4)> (draw_0->normal_2.data_0[int(0)][int(0)], draw_0->normal_2.data_0[int(1)][int(0)], draw_0->normal_2.data_0[int(2)][int(0)], draw_0->normal_2.data_0[int(3)][int(0)], draw_0->normal_2.data_0[int(0)][int(1)], draw_0->normal_2.data_0[int(1)][int(1)], draw_0->normal_2.data_0[int(2)][int(1)], draw_0->normal_2.data_0[int(3)][int(1)], draw_0->normal_2.data_0[int(0)][int(2)], draw_0->normal_2.data_0[int(1)][int(2)], draw_0->normal_2.data_0[int(2)][int(2)], draw_0->normal_2.data_0[int(3)][int(2)], draw_0->normal_2.data_0[int(0)][int(3)], draw_0->normal_2.data_0[int(1)][int(3)], draw_0->normal_2.data_0[int(2)][int(3)], draw_0->normal_2.data_0[int(3)][int(3)])))).xyz;
-    (&o_0)->uv_2 = _S1.uv_1;
-    (&o_0)->uv1_2 = _S1.uv1_1;
+#line 247
+    (&o_0)->position_2 = (((_S3) * (matrix<float,int(4),int(4)> (draw_0->mvp_0.data_0[int(0)][int(0)], draw_0->mvp_0.data_0[int(1)][int(0)], draw_0->mvp_0.data_0[int(2)][int(0)], draw_0->mvp_0.data_0[int(3)][int(0)], draw_0->mvp_0.data_0[int(0)][int(1)], draw_0->mvp_0.data_0[int(1)][int(1)], draw_0->mvp_0.data_0[int(2)][int(1)], draw_0->mvp_0.data_0[int(3)][int(1)], draw_0->mvp_0.data_0[int(0)][int(2)], draw_0->mvp_0.data_0[int(1)][int(2)], draw_0->mvp_0.data_0[int(2)][int(2)], draw_0->mvp_0.data_0[int(3)][int(2)], draw_0->mvp_0.data_0[int(0)][int(3)], draw_0->mvp_0.data_0[int(1)][int(3)], draw_0->mvp_0.data_0[int(2)][int(3)], draw_0->mvp_0.data_0[int(3)][int(3)]))));
+    (&o_0)->world_1 = (((_S3) * (matrix<float,int(4),int(4)> (draw_0->model_0.data_0[int(0)][int(0)], draw_0->model_0.data_0[int(1)][int(0)], draw_0->model_0.data_0[int(2)][int(0)], draw_0->model_0.data_0[int(3)][int(0)], draw_0->model_0.data_0[int(0)][int(1)], draw_0->model_0.data_0[int(1)][int(1)], draw_0->model_0.data_0[int(2)][int(1)], draw_0->model_0.data_0[int(3)][int(1)], draw_0->model_0.data_0[int(0)][int(2)], draw_0->model_0.data_0[int(1)][int(2)], draw_0->model_0.data_0[int(2)][int(2)], draw_0->model_0.data_0[int(3)][int(2)], draw_0->model_0.data_0[int(0)][int(3)], draw_0->model_0.data_0[int(1)][int(3)], draw_0->model_0.data_0[int(2)][int(3)], draw_0->model_0.data_0[int(3)][int(3)])))).xyz;
+    (&o_0)->normal_3 = (((float4(_S2.normal_1, 0.0f)) * (matrix<float,int(4),int(4)> (draw_0->normal_2.data_0[int(0)][int(0)], draw_0->normal_2.data_0[int(1)][int(0)], draw_0->normal_2.data_0[int(2)][int(0)], draw_0->normal_2.data_0[int(3)][int(0)], draw_0->normal_2.data_0[int(0)][int(1)], draw_0->normal_2.data_0[int(1)][int(1)], draw_0->normal_2.data_0[int(2)][int(1)], draw_0->normal_2.data_0[int(3)][int(1)], draw_0->normal_2.data_0[int(0)][int(2)], draw_0->normal_2.data_0[int(1)][int(2)], draw_0->normal_2.data_0[int(2)][int(2)], draw_0->normal_2.data_0[int(3)][int(2)], draw_0->normal_2.data_0[int(0)][int(3)], draw_0->normal_2.data_0[int(1)][int(3)], draw_0->normal_2.data_0[int(2)][int(3)], draw_0->normal_2.data_0[int(3)][int(3)])))).xyz;
+    (&o_0)->uv_2 = _S2.uv_1;
+    (&o_0)->uv1_2 = _S2.uv1_1;
+    (&o_0)->color_2 = vertex_color_0(_S2.color_1);
     (&o_0)->quad_1 = vid_0 / 4U;
 
-#line 240
-    thread vs_curves_Result_0 _S3;
+#line 253
+    thread vs_curves_Result_0 _S4;
 
-#line 240
-    (&_S3)->position_0 = o_0.position_2;
+#line 253
+    (&_S4)->position_0 = o_0.position_2;
 
-#line 240
-    (&_S3)->world_0 = o_0.world_1;
+#line 253
+    (&_S4)->world_0 = o_0.world_1;
 
-#line 240
-    (&_S3)->normal_0 = o_0.normal_3;
+#line 253
+    (&_S4)->normal_0 = o_0.normal_3;
 
-#line 240
-    (&_S3)->uv_0 = o_0.uv_2;
+#line 253
+    (&_S4)->uv_0 = o_0.uv_2;
 
-#line 240
-    (&_S3)->uv1_0 = o_0.uv1_2;
+#line 253
+    (&_S4)->uv1_0 = o_0.uv1_2;
 
-#line 240
-    (&_S3)->quad_0 = o_0.quad_1;
+#line 253
+    (&_S4)->quad_0 = o_0.quad_1;
 
-#line 240
-    return _S3;
+#line 253
+    (&_S4)->color_0 = o_0.color_2;
+
+#line 253
+    return _S4;
 }
 

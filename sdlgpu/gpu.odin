@@ -443,23 +443,26 @@ depth_image_target :: proc(g: ^GPU, width, height: u32) -> ^sdl.GPUTexture {
 	return sdl.CreateGPUTexture(g.device, {type = .D2, format = DEPTH_IMAGE_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 }
 
-// The standard material's vertex shader reads every attribute.
+// The standard material's vertex shader reads every attribute (locations
+// in VS_In's order, as slang numbers them).
 @(private = "file", rodata)
-STANDARD_ATTRIBUTES := [4]sdl.GPUVertexAttribute {
+STANDARD_ATTRIBUTES := [5]sdl.GPUVertexAttribute {
 	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = 0},
 	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = 12},
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
 	{location = 3, buffer_slot = 0, format = .FLOAT2, offset = 32},
+	{location = 4, buffer_slot = 0, format = .UBYTE4_NORM, offset = 40},
 }
 
 @(private = "file", rodata)
-SKINNED_ATTRIBUTES := [6]sdl.GPUVertexAttribute {
+SKINNED_ATTRIBUTES := [7]sdl.GPUVertexAttribute {
 	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = 0},
 	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = 12},
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = 24},
 	{location = 3, buffer_slot = 0, format = .FLOAT2, offset = 32},
 	{location = 4, buffer_slot = 1, format = .USHORT4, offset = 0},
 	{location = 5, buffer_slot = 1, format = .FLOAT4, offset = 8},
+	{location = 6, buffer_slot = 0, format = .UBYTE4_NORM, offset = 40},
 }
 
 // A pipeline drawing `Vertex`es (slot 0, plus `Skin_Vertex`es in slot 1 when

@@ -46,6 +46,7 @@ static const uint FLAG_SHADOW_ONLY = 32768;
 static const uint FLAG_SPRITE = 65536;
 static const uint FLAG_ADDITIVE = 131072;
 static const uint FLAG_PREMULTIPLIED = 262144;
+static const uint FLAG_VERTEX_COLORS = 524288;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -168,6 +169,7 @@ struct VS_In {
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float2 uv1 : TEXCOORD3;
+    float4 color : TEXCOORD4; // sRGB and alpha (o3d.Vertex.color)
 };
 
 struct VS_Skinned_In {
@@ -177,6 +179,7 @@ struct VS_Skinned_In {
     float2 uv1 : TEXCOORD3;
     uint4 joints : TEXCOORD4;
     float4 weights : TEXCOORD5;
+    float4 color : TEXCOORD6;
 };
 
 struct VS_Out {
@@ -185,7 +188,13 @@ struct VS_Out {
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float2 uv1 : TEXCOORD3;
+    float4 color : TEXCOORD4; // linear, interpolated so
 };
+
+// A vertex colour in linear light, as it is interpolated.
+float4 vertex_color(float4 c) {
+    return float4(linear_rgb(c.rgb), c.a);
+}
 
 [shader("vertex")]
 VS_Out vs_main(VS_In i, uint vid : SV_VertexID) {
@@ -204,6 +213,7 @@ VS_Out vs_main(VS_In i, uint vid : SV_VertexID) {
     o.normal = mul(draw.normal, float4(norm, 0)).xyz;
     o.uv = i.uv;
     o.uv1 = i.uv1;
+    o.color = vertex_color(i.color);
     return o;
 }
 
@@ -217,6 +227,7 @@ struct VS_Curves_Out {
     float2 uv : TEXCOORD2;
     float2 uv1 : TEXCOORD3;
     nointerpolation uint quad : TEXCOORD4;
+    float4 color : TEXCOORD5;
 };
 
 VS_Out curves_surface_in(VS_Curves_Out i) {
@@ -226,6 +237,7 @@ VS_Out curves_surface_in(VS_Curves_Out i) {
     o.normal = i.normal;
     o.uv = i.uv;
     o.uv1 = i.uv1;
+    o.color = i.color;
     return o;
 }
 
@@ -237,6 +249,7 @@ VS_Curves_Out vs_curves(VS_In i, uint vid : SV_VertexID) {
     o.normal = mul(draw.normal, float4(i.normal, 0)).xyz;
     o.uv = i.uv;
     o.uv1 = i.uv1;
+    o.color = vertex_color(i.color);
     o.quad = vid / 4;
     return o;
 }
@@ -264,6 +277,7 @@ VS_Out vs_skinned(VS_Skinned_In i, uint vid : SV_VertexID) {
     o.normal = mul(draw.normal, float4(norm, 0)).xyz;
     o.uv = i.uv;
     o.uv1 = i.uv1;
+    o.color = vertex_color(i.color);
     return o;
 }
 
@@ -449,6 +463,12 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
     float2 d0y = ddy(i.uv);
     float2 d1x = ddx(i.uv1);
     float2 d1y = ddy(i.uv1);
+    if ((flags & FLAG_VERTEX_COLORS) != 0) {
+        base *= i.color.rgb;
+        if ((flags & (FLAG_BLENDED | FLAG_ALPHA_MASK)) != 0) {
+            a *= i.color.a;
+        }
+    }
     if ((flags & FLAG_COLOR_MAP) != 0) {
         float2 uv, dx, dy;
         slot_uv(SLOT_COLOR, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);

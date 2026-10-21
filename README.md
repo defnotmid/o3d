@@ -192,7 +192,14 @@ puffs := o3d.scene_particles(&scene, smoke_rows)                    // []o3d.Par
 smoke := o3d.MATERIAL_DEFAULT
 smoke.color_map, smoke.softness = puff_sprite, 0.3                   // the sprite; fade 0.3 before what they meet
 append(&scene.draws, o3d.Draw{puffs, o3d.compose(), smoke})          // drawn unlit, farthest first
-// sparks: the same with flags = {.Additive}
+// sparks: the same with flags = {.Additive}; .Additive works on any material (a back-face atmosphere shell, a halo shader, glowing lines)
+// A lens flare: additive rows at the sun's position (ghosts moved by offset), drawn over everything and faded by how much
+// of a 10 px disc about the sun the frame's depth leaves unhidden (in the render, no read back)
+flare.flags, flare.depth_offset, flare.occlusion_radius = {.Additive, .No_Size_Attenuation}, 1e6, 10
+// Vertex colours (three.js's vertexColors, glTF's COLOR_0): Vertex.color (sRGB + alpha bytes, o3d.vertex_color({r, g, b, a})),
+// read by materials with flags += {.Vertex_Colors}; per-frame paths take them too
+stars := o3d.scene_points(&scene, positions, colors)                 // colors: []Vec4, sRGB + alpha, one a point
+trail := o3d.scene_polyline(&scene, positions, colors = colors)      // a gradient along it; scene_line_segments(&scene, pairs, colors)
 // Labels: pixel-sized rows the panel's width x height with offset = {0, 0.5} (the bottom edge's middle on the point), the
 // material's depth_offset bringing them in front of what they are pinned to; a canvas's
 // premultiplied image as color_map with flags += {.Premultiplied_Color_Map}
@@ -285,7 +292,8 @@ includes ovg's `shaders/curves.slang` from there too.
   matrix, material, plus optional joint, morph-weight, and instance ranges)
   refilled each frame, the draws a structure of arrays (`#soa`) since the
   per-frame passes read a column or two; geometry is the only retained state:
-  one array of interleaved position / normal / uv / uv1 vertices (40 bytes),
+  one array of interleaved position / normal / uv / uv1 / colour vertices
+  (44 bytes; the colour sRGB and alpha bytes, read with `.Vertex_Colors`),
   one of 32-bit indices, a separate array of `Skin_Vertex` (4 joint indices
   and normalized weights) for skinned meshes, and a separate array of
   `Morph_Delta` (position and normal deltas, 32 bytes) for morphed meshes so
@@ -494,7 +502,27 @@ includes ovg's `shaders/curves.slang` from there too.
   draws in front of it and still behind what is nearer. Particles test
   the frame's depth as everything blended does: an alpha-masked net hides
   them behind its wires, not its gaps. The emitter (where particles are,
-  frame by frame) is the host's.
+  frame by frame) is the host's. A material's `occlusion_radius` (pixels)
+  fades each particle by the share of a disc that size about its position
+  that the frame's depth leaves unhidden (16 points on a Vogel spiral,
+  `OCCLUSION_TAPS`; off the frame hidden), in the render on both renderers
+  (three.js's Lensflare): with a `depth_offset` past the camera the quads
+  draw over everything (at the near plane) yet are probed where the sun is,
+  so a flare and its ghosts fade as a hull passes in front of it.
+- **Blending:** `blend_of(material)` is a draw's `Blend`: `.Opaque`
+  (depth written), `.Over` (blended: transparent with some alpha) or `.Add`
+  (`.Additive`, three.js's AdditiveBlending: the colour times its opacity
+  added, for any material: meshes, ShaderMaterials (SRC_ALPHA, ONE), shapes,
+  lines, particles). Blended and added draws come after the opaque ones,
+  depth tested, not written; the GPU's pipelines are indexed by it.
+- **Vertex colours:** `.Vertex_Colors` multiplies the material's colour by
+  its vertices' (`Vertex.color`, sRGB bytes made linear per vertex and
+  interpolated so, as three.js does) and its opacity by their alpha (a
+  transparent material then blends). glTF's COLOR_0 sets it; `scene_points`,
+  `scene_line_segments` and `scene_polyline` take colours, which lines and
+  points carry onto their quads (a segment's ends' colours along it).
+  ShaderMaterials do not read them yet. Points of their own sizes are
+  particles.
 - **Premultiplied colour maps:** `.Premultiplied_Color_Map` says the
   `color_map`'s colour is already multiplied by its alpha (a canvas's, an
   image rendered on the GPU): both renderers divide it out after
