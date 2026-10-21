@@ -589,7 +589,7 @@ build_shadow_only :: proc(a: ^Parity_Assets) -> string {
 
 // Particles: a soft smoke column (blended, rotated, farthest first, fading
 // where it cuts the floor and the box) and additive sparks, both a radial
-// sprite, over a lit floor and box.
+// sprite, over a lit floor and box and a bright sky.
 @(private = "file")
 build_particles :: proc(a: ^Parity_Assets) -> string {
 	T :: 32
@@ -604,8 +604,19 @@ build_particles :: proc(a: ^Parity_Assets) -> string {
 		}
 	}
 	puff := o3d.texture_add(&a.textures, puff_px[:], T, T)
+	// A bright sky behind: additive sparks add onto it, not onto black.
+	SW, SH :: 32, 16
+	sky_px: [SW * SH * 4]u8
+	for y in 0 ..< SH {
+		for x in 0 ..< SW {
+			i := (y * SW + x) * 4
+			sky_px[i], sky_px[i + 1], sky_px[i + 2], sky_px[i + 3] = u8(120 + y * 6), u8(150 + y * 4), 230, 255
+		}
+	}
+	sky := o3d.texture_add(&a.textures, sky_px[:], SW, SH)
 	s := &a.scene
 	o3d.scene_clear(s)
+	s.background = sky
 	s.camera = {position = {2.4, 1.6, 3.6}, target = {0, 0.8, 0}, fov = 45, near = 0.1, far = 30}
 	append(&s.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.85, 1}, ground = {0.3, 0.25, 0.2}, intensity = 1.2})
 	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.9}, intensity = 2, position = {3, 5, 2}})

@@ -1503,3 +1503,35 @@ test_particle_opacity_clamped :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Additive particles over a background, as the GPU draws them: the
+// background under them at full strength (not dimmed by their alpha) and
+// the sum clamped at 255 (it wrapped: red to 0, green/blue specks).
+@(test)
+test_additive_over_background :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	sky_px := [4]u8{100, 50, 25, 255}
+	sky := texture_add(&textures, sky_px[:], 1, 1)
+	W :: 16
+	s: Software
+	defer software_destroy(&s)
+	for n in 1 ..= 2 {
+		scene_clear(&scene)
+		scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+		scene.background = sky
+		m := MATERIAL_DEFAULT
+		m.color, m.flags = {200.0 / 255, 200.0 / 255, 200.0 / 255}, {.Additive}
+		rows := [2]Particle{{position = {0, 0, 0}, size = 3, color = 1}, {position = {0, 0, 0.1}, size = 3, color = 1}}
+		append(&scene.draws, Draw{scene_particles(&scene, rows[:n]), compose({0, 0, 0}), m})
+		px := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
+		i := (W / 2 * W + W / 2) * 4
+		c := [4]u8{px[i], px[i + 1], px[i + 2], px[i + 3]}
+		want := [4]u8{255, 250, 225, 255} if n == 1 else {255, 255, 255, 255}
+		testing.expectf(t, c == want, "%d added over the sky: %v, want %v", n, c, want)
+	}
+}

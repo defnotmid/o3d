@@ -10,8 +10,8 @@ import "deps:ovg/curves"
 // Phase 3 of the software renderer: each band clears its rows, rasterizes its
 // triangles in drawing order (per pixel when untextured, in 2x2 quads when
 // textured, an exact shape's, or running an oksl ShaderMaterial), and resolves 4x MSAA samples
-// into premultiplied RGBA8 pixels (compositing the equirectangular background
-// on uncovered or partially transparent pixels).
+// into premultiplied RGBA8 pixels. The equirectangular background is laid
+// into the samples first, as the GPU draws it first.
 
 @(private)
 draw_band :: proc(data: rawptr, band, wi: int) {
@@ -19,19 +19,12 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	s := job.s
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, s.height)
-	slice.zero(s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES])
 	slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 1)
-	refs := s.band_tris[s.band_start[band]:s.band_start[band + 1]]
-	for r := 0; r < len(refs); {
-		t := s.chunks[refs[r].chunk].tris[refs[r].tri] // gathered from the columns once
-		if s.materials[t.draw].shader != 0 {
-			r += draw_custom(job, &s.workers[wi], refs[r:], y0, y1)
-			continue
-		}
-		draw_standard(job, refs[r], t, y0, y1)
-		r += 1
-	}
-	if job.bg_tex != 0 {
+	if job.bg_tex == 0 {
+		slice.zero(s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES])
+	} else {
+		// The background first, as the GPU draws it: what is drawn then
+		// blends over it or adds to it.
 		inv_w := 2.0 / f32(s.width)
 		inv_h := 2.0 / f32(s.height)
 		for y in y0 ..< y1 {
@@ -42,39 +35,32 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 			p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
 			ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
 			ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
-			row_base := y * s.width
 			for x in 0 ..< s.width {
-				i := row_base + x
-				acc: [4]u32
-				for k in 0 ..< SAMPLES {
-					c := s.color[i * SAMPLES + k]
-					acc += {c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, c >> 24}
-				}
-				rem := u32(SAMPLES * 255) - acc[3]
-				if rem > 0 {
-					dir := linalg.normalize(ray0 + f32(x) * ray_step)
-					c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
-					c = tone_map(c, job.tone_mapping, job.tone_exposure)
-					bg := pack(c, 1)
-					bg_rgb := [3]u32{bg & 0xff, (bg >> 8) & 0xff, (bg >> 16) & 0xff}
-					acc.rgb += (bg_rgb * rem + 127) / 255
-					acc[3] = SAMPLES * 255
-				}
-				for ch in 0 ..< 4 {
-					s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
-				}
+				dir := linalg.normalize(ray0 + f32(x) * ray_step)
+				c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
+				bg := pack(tone_map(c, job.tone_mapping, job.tone_exposure), 1)
+				slice.fill(s.color[(y * s.width + x) * SAMPLES:][:SAMPLES], bg)
 			}
 		}
-	} else {
-		for i in y0 * s.width ..< y1 * s.width {
-			acc: [4]u32
-			for k in 0 ..< SAMPLES {
-				c := s.color[i * SAMPLES + k]
-				acc += {c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, c >> 24}
-			}
-			for ch in 0 ..< 4 {
-				s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
-			}
+	}
+	refs := s.band_tris[s.band_start[band]:s.band_start[band + 1]]
+	for r := 0; r < len(refs); {
+		t := s.chunks[refs[r].chunk].tris[refs[r].tri] // gathered from the columns once
+		if s.materials[t.draw].shader != 0 {
+			r += draw_custom(job, &s.workers[wi], refs[r:], y0, y1)
+			continue
+		}
+		draw_standard(job, refs[r], t, y0, y1)
+		r += 1
+	}
+	for i in y0 * s.width ..< y1 * s.width {
+		acc: [4]u32
+		for k in 0 ..< SAMPLES {
+			c := s.color[i * SAMPLES + k]
+			acc += {c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, c >> 24}
+		}
+		for ch in 0 ..< 4 {
+			s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
 		}
 	}
 }
@@ -701,11 +687,11 @@ inside :: #force_inline proc "contextless" (t: Tri, p: Vec2, area: f32) -> bool 
 pack :: proc "contextless" (c: Vec3, alpha: f32) -> u32 {
 	// Clamped as the GPU's 8-bit target clamps: out of range, a channel
 	// would spill into the next.
-	alpha := clamp(alpha, 0, 1)
-	r := u32(math.round(linear_to_srgb(c.r) * alpha * 255))
-	g := u32(math.round(linear_to_srgb(c.g) * alpha * 255))
-	b := u32(math.round(linear_to_srgb(c.b) * alpha * 255))
-	a := u32(math.round(alpha * 255))
+	k := clamp(alpha, 0, 1)
+	r := u32(math.round(linear_to_srgb(c.r) * k * 255))
+	g := u32(math.round(linear_to_srgb(c.g) * k * 255))
+	b := u32(math.round(linear_to_srgb(c.b) * k * 255))
+	a := u32(math.round(k * 255))
 	return r | g << 8 | b << 16 | a << 24
 }
 
