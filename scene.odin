@@ -442,8 +442,8 @@ scene_tube :: proc(s: ^Scene, points: []Vec3, radius: f32 = 0.08, radial_segment
 
 // A particle: a camera-facing quad `size` across (world units, or pixels
 // with `.No_Size_Attenuation`) turned `rotation` radians in the view plane,
-// its colour (sRGB) and opacity times its material's (and its
-// `color_map`'s, the sprite).
+// its colour (sRGB) and opacity (clamped to 0..1) times its material's (and
+// its `color_map`'s, the sprite).
 Particle :: struct {
 	position: Vec3,
 	size:     f32,

@@ -1474,3 +1474,32 @@ test_point_hidden :: proc(t: ^testing.T) {
 	testing.expect(t, point_hidden(scene.camera, depths, W, H, {0, 0.5, 6}), "behind the camera")
 	testing.expect(t, point_hidden(scene.camera, depths, W, H, {40, 0, 0}), "off the frame")
 }
+
+// A particle's opacity outside 0..1 (an emitter's fade overshooting) is
+// clamped as the GPU's 8-bit target clamps it: no channel spills into
+// another (the software renderer drew green and blue specks).
+@(test)
+test_particle_opacity_clamped :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 16
+	s: Software
+	defer software_destroy(&s)
+	for flags in ([]Material_Flags{{.Additive}, {}}) {
+		for a in ([]f32{-0.2, 1.7}) {
+			scene_clear(&scene)
+			scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+			m := MATERIAL_DEFAULT
+			m.color, m.flags = {1, 0.5, 0.25}, flags
+			one := [1]Particle{{position = {0, 0, 0}, size = 3, color = {1, 1, 1, a}}}
+			append(&scene.draws, Draw{scene_particles(&scene, one[:]), compose({0, 0, 0}), m})
+			px := software_render(&s, &scene, &g, nil, W, W)
+			i := (W / 2 * W + W / 2) * 4
+			c := [4]u8{px[i], px[i + 1], px[i + 2], px[i + 3]}
+			want := [4]u8{} if a < 0 else {255, 128, 64, 255}
+			testing.expectf(t, c == want, "%v, opacity %v: %v, want %v", flags, a, c, want)
+		}
+	}
+}

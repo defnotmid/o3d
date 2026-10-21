@@ -362,7 +362,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				}
 				if sprite {
 					pm.base *= linear(row.rgb)
-					opacity *= row.a
+					opacity *= clamp(row.a, 0, 1)
 					if soft {
 						// Faded by how far in front of the frame's depth it is.
 						clip := job.view_proj * Vec4{worlds[l].x, worlds[l].y, worlds[l].z, 1}
@@ -699,6 +699,9 @@ inside :: #force_inline proc "contextless" (t: Tri, p: Vec2, area: f32) -> bool 
 // Linear colour to sRGB premultiplied RGBA8.
 @(private = "file")
 pack :: proc "contextless" (c: Vec3, alpha: f32) -> u32 {
+	// Clamped as the GPU's 8-bit target clamps: out of range, a channel
+	// would spill into the next.
+	alpha := clamp(alpha, 0, 1)
 	r := u32(math.round(linear_to_srgb(c.r) * alpha * 255))
 	g := u32(math.round(linear_to_srgb(c.g) * alpha * 255))
 	b := u32(math.round(linear_to_srgb(c.b) * alpha * 255))

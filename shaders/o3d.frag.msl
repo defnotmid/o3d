@@ -1155,7 +1155,7 @@ float4 surface_0(const VS_Out_0 thread* i_1, bool front_0, float4 tint_0, Kernel
 #line 436
     uint flags_2 = kernelContext_4->material_0->flags_0;
     float3 base_1 = kernelContext_4->material_0->color_0.xyz * linear_rgb_0(tint_0.xyz);
-    float a_0 = kernelContext_4->material_0->color_0.w * tint_0.w;
+    float a_0 = kernelContext_4->material_0->color_0.w * saturate(tint_0.w);
 
 #line 438
     float3 _S58 = i_1->world_2;

@@ -435,7 +435,7 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
 float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
-    float a = material.color.a * tint.a;
+    float a = material.color.a * saturate(tint.a);
     float3 dp_dx = ddx(i.world);
     float3 dp_dy = ddy(i.world);
     float2 d0x = ddx(i.uv);
