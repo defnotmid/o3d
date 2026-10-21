@@ -176,3 +176,18 @@ test_usd_errors :: proc(t: ^testing.T) {
 	limits[.Gltf_Values] = 64
 	testing.expect_value(t, parse(USD_PARTS, &geos, &limits), Usd_Error.Limit)
 }
+
+// model_bounds: the fixture's rest-pose box, from its nodes' transforms,
+// the stage's centimeters and Z up (stage x 0..10, y 0..51 (B at y 50),
+// z 0 -> o3d x 0..0.1, y 0, z -0.51..0).
+@(test)
+test_usd_model_bounds :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	m, err := usd_parse(USD_PARTS, &geos)
+	defer model_destroy(&m)
+	testing.expect_value(t, err, Usd_Error.None)
+	lo, hi, ok := model_bounds(&m, &geos)
+	testing.expect(t, ok, "it has geometry")
+	testing.expectf(t, linalg.length(lo - Vec3{0, 0, -0.51}) < 1e-5 && linalg.length(hi - Vec3{0.1, 0, 0}) < 1e-5, "box %v .. %v", lo, hi)
+}

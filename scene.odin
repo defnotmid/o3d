@@ -1027,6 +1027,22 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 	return
 }
 
+// Where world point `p` falls on a `width x height` frame of camera `c`, as
+// both renderers map it: `pixel` from the top left (pixel centres at .5),
+// `depth` the depth they test (0 at near, 1 at far), and whether it is in
+// front of the camera (behind it, `pixel` means nothing). Whether something
+// nearer hides it is the frame's depth's to say.
+camera_project :: proc "contextless" (c: Camera, width, height: int, p: Vec3) -> (pixel: Vec2, depth: f32, in_front: bool) {
+	view, proj := camera_matrices(c, width, height)
+	clip := proj * view * Vec4{p.x, p.y, p.z, 1}
+	if clip.w <= 0 {
+		return {}, 0, false
+	}
+	iw := 1 / clip.w
+	pixel = {(clip.x * iw * 0.5 + 0.5) * f32(width), (0.5 - clip.y * iw * 0.5) * f32(height)}
+	return pixel, clip.z * iw, true
+}
+
 // The order to draw in: the draws that can be seen (with geometry, and a
 // compiled shader if they ask for one, the bounding sphere at least partly
 // in the view), the opaque ones as listed, then the blended ones farthest

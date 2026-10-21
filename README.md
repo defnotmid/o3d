@@ -183,6 +183,10 @@ parts.materials[net - 1].hidden = true                               // every pr
 parts.transforms[wheel - 1] = {set = {.Rotation}, rotation = spin}   // the wheel's own rotation; its children follow
 o3d.gltf_draw(&scene, &rover, flags = {.Cast_Shadow}, parts = &parts)
 hub := o3d.model_node_world(&rover, wheel)                           // where the wheel went, to attach other draws
+lo, hi, _ := o3d.model_bounds(&rover, &geos)                         // its rest-pose box, for placing and framing
+
+// Where a world point lands on the frame (a lens flare, a label): pixel, depth, in front
+px, depth, in_front := o3d.camera_project(scene.camera, 1920, 1080, sun_position)
 
 // Text and logos: outlines (flattened to points) grouped into shapes, extruded once, drawn per frame
 shapes := o3d.shapes_from_contours(glyph_contours)          // ShapePath.toShapes; holes found by containment

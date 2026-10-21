@@ -280,6 +280,40 @@ model_material :: proc "contextless" (m: ^Model, name: string) -> Model_Material
 	return 0
 }
 
+// The model's box in its rest pose and its own space (its nodes'
+// transforms, no animation, skins and morphs at rest): its size for
+// placing and framing. `ok` false: it has no geometry.
+model_bounds :: proc(m: ^Model, geos: ^Geometries) -> (lo, hi: Vec3, ok: bool) {
+	n := len(m.nodes)
+	world := make([]Mat4, n, context.temp_allocator)
+	lo, hi = {max(f32), max(f32), max(f32)}, {min(f32), min(f32), min(f32)}
+	for i in 0 ..< n {
+		parent := m.nodes.parent[i]
+		world[i] = world[parent] * m.nodes.local[i] if parent >= 0 else m.nodes.local[i]
+		mi := m.nodes.mesh[i]
+		if mi < 0 || int(mi) >= len(m.meshes) {
+			continue
+		}
+		mesh := m.meshes[mi]
+		for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
+			g := geometry_get(geos, prim.geometry) or_continue
+			if g.vertex_count == 0 {
+				continue
+			}
+			for k in 0 ..< 8 {
+				corner := Vec3{g.box_max.x if k & 1 != 0 else g.box_min.x, g.box_max.y if k & 2 != 0 else g.box_min.y, g.box_max.z if k & 4 != 0 else g.box_min.z}
+				q := (world[i] * Vec4{corner.x, corner.y, corner.z, 1}).xyz
+				lo, hi = linalg.min(lo, q), linalg.max(hi, q)
+			}
+			ok = true
+		}
+	}
+	if !ok {
+		return {}, {}, false
+	}
+	return
+}
+
 // Where `node` was in the world at the last `gltf_draw` with `pose` (nil:
 // the model's own), to attach other draws to it.
 model_node_world :: proc "contextless" (m: ^Model, node: Model_Node_Id, pose: ^Model_Pose = nil) -> Mat4 {

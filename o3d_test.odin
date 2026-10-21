@@ -1316,3 +1316,36 @@ test_shadow_only :: proc(t: ^testing.T) {
 	shade := at(px, X, SHADOW_Y)
 	testing.expectf(t, shade.b > 120 && shade.r > 100 && shade.r < 220, "shadowed: blue at half over red, got %v", shade)
 }
+
+// camera_project puts a point where the renderers draw it: a small sphere's
+// centre projects onto its pixels; a point behind the camera is not in
+// front; nearer points have smaller depths.
+@(test)
+test_camera_project :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W, H :: 96, 64
+	cameras := [2]Camera{{position = {3, 2, 5}, target = {0, 0.5, 0}, fov = 45, near = 0.1, far = 50}, {position = {0, 6, 6}, target = {0, 0, 0}, orthographic = true, height = 8, near = 0.1, far = 50}}
+	for cam in cameras {
+		scene_clear(&scene)
+		scene.camera = cam
+		dot := MATERIAL_DEFAULT
+		dot.color, dot.flags = {1, 0, 0}, {.Basic}
+		at := Vec3{1.2, 0.8, -0.7}
+		append(&scene.draws, Draw{sphere(&g, 0.08, 12, 8), compose(at), dot})
+		s: Software
+		px := software_render(&s, &scene, &g, nil, W, H)
+		pixel, depth, in_front := camera_project(cam, W, H, at)
+		testing.expect(t, in_front && depth > 0 && depth < 1, "in front, depth in 0..1")
+		x, y := int(pixel.x), int(pixel.y)
+		i := (y * W + x) * 4
+		testing.expectf(t, x >= 0 && x < W && y >= 0 && y < H && px[i] > 200 && px[i + 1] < 40, "the sphere is drawn at %v: %v", pixel, px[i:][:4])
+		software_destroy(&s)
+		_, near_depth, _ := camera_project(cam, W, H, linalg.lerp(cam.position, at, 0.5))
+		testing.expect(t, near_depth < depth, "a nearer point has a smaller depth")
+	}
+	_, _, in_front := camera_project(cameras[0], W, H, cameras[0].position * 2 - cameras[0].target)
+	testing.expect(t, !in_front, "behind the camera")
+}

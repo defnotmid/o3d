@@ -149,6 +149,8 @@ Geometry :: struct {
 	// Distance from the origin to the farthest vertex (culling, sorting),
 	// and the largest morph position delta length across targets.
 	radius, morph_radius:       f32,
+	// The vertices' box (unmorphed, unskinned).
+	box_min, box_max:           Vec3,
 }
 
 // 0 is no geometry; ids with SCENE_GEO_BIT refer to per-frame line/point
@@ -256,8 +258,13 @@ geometries_made :: proc "contextless" (g: ^Geometries) -> int {
 geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: []Skin_Vertex = nil, morph_deltas: []Morph_Delta = nil, mode: Draw_Mode = .Triangles) -> Geometry_Id {
 	generation_take(&g.generation)
 	r: f32
+	box_min, box_max: Vec3
+	if len(vertices) > 0 {
+		box_min, box_max = vertices[0].position, vertices[0].position
+	}
 	for v in vertices {
 		r = max(r, linalg.length(v.position))
+		box_min, box_max = linalg.min(box_min, v.position), linalg.max(box_max, v.position)
 	}
 	skinned := len(skin) == len(vertices) && len(skin) > 0
 	first_skin := u32(len(g.skin_vertices)) if skinned else 0
@@ -283,6 +290,8 @@ geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: [
 		mode          = mode,
 		radius        = r,
 		morph_radius  = morph_r,
+		box_min       = box_min,
+		box_max       = box_max,
 	})
 	append(&g.vertices, ..vertices)
 	if skinned {
