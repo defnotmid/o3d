@@ -147,7 +147,11 @@ What is known about three.js carries over:
   `geometries_made` lets a host check that it stops growing.
 
 The output is premultiplied RGBA, transparent where nothing was drawn, to
-composite over anything.
+composite over anything, unless `scene.background_color` (sRGB and alpha,
+three.js's `scene.background` as a Color) gives the frame a clear colour:
+with alpha 1 it is opaque everywhere, so what is added (a glow, a plume)
+lands on that colour rather than on nothing. A `scene.background` texture
+covers it.
 
 ## Use
 

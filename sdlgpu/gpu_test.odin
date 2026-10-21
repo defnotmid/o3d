@@ -135,6 +135,10 @@ test_custom_shadow_match_software :: proc(t: ^testing.T) {expect_parity(t, "cust
 @(test)
 test_custom_finish_match_software :: proc(t: ^testing.T) {expect_parity(t, "custom_finish")}
 
+// Additive draws over an opaque clear colour.
+@(test)
+test_background_color_match_software :: proc(t: ^testing.T) {expect_parity(t, "background_color")}
+
 // A baked Sky as the background and the environment.
 @(test)
 test_sky_match_software :: proc(t: ^testing.T) {expect_parity(t, "sky")}

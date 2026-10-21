@@ -63,6 +63,7 @@ Job :: struct {
 	env:                  o3d.Shading_Environment,
 	background:           o3d.Texture_Id,
 	// Intensity, mip level, tone mapping, exposure; whether the map is linear (HDR).
+	clear:                [4]f32, // o3d.background_clear
 	bg_params:            struct {
 		params: [4]f32,
 		flags:  [4]u32,
@@ -494,6 +495,8 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	exposure := active.tone_mapping_exposure if active.tone_mapping_exposure > 0 else 1
 	job.bg_params.params = {bg_intensity, bg_lod, f32(active.tone_mapping), exposure}
 	job.bg_params.flags = {u32(hdr_texture(textures, job.background)), 0, 0, 0}
+	clear := o3d.background_clear(scene)
+	job.clear = {f32(clear.r) / 255, f32(clear.g) / 255, f32(clear.b) / 255, f32(clear.a) / 255}
 	lu := &job.lighting
 	lu^ = {}
 	lu.eye = {active.camera.position.x, active.camera.position.y, active.camera.position.z, 0}
@@ -591,7 +594,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 
 	// Into the targets' top-left width x height (they may be larger), then
 	// copied to `out`.
-	color := sdl.GPUColorTargetInfo{texture = g.color, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE}
+	color := sdl.GPUColorTargetInfo{texture = g.color, clear_color = sdl.FColor(job.clear), load_op = .CLEAR, store_op = .STORE}
 	frame := g.color
 	if g.samples != ._1 {
 		color.store_op, color.resolve_texture = .RESOLVE, g.resolved

@@ -2131,3 +2131,42 @@ test_sky :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, sky_texture(&textures, sky, 1), Texture_Id(0))
 }
+
+// Scene.background_color: the frame's clear, premultiplied (transparent by
+// default); an additive draw adds to it; a background texture covers it.
+@(test)
+test_background_color :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 8
+	s: Software
+	defer software_destroy(&s)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	frame :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, textures: ^Textures, color: Vec4, glow: bool, bg: Texture_Id = 0) -> []u8 {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+		scene.background_color = color
+		scene.background = bg
+		if glow {
+			m := MATERIAL_DEFAULT
+			m.color, m.flags, m.opacity = {0.5, 0, 0}, {.Basic, .Additive}, 1
+			append(&scene.draws, Draw{plane(g, 2, 2), compose(), m})
+		}
+		return software_render(s, scene, g, nil, W, W, textures = textures)
+	}
+	testing.expect_value(t, at(frame(&s, &scene, &g, &textures, {}, false), 0, 0), [4]u8{0, 0, 0, 0})
+	testing.expect_value(t, at(frame(&s, &scene, &g, &textures, {0.2, 0.4, 0.6, 1}, false), 0, 0), [4]u8{51, 102, 153, 255})
+	testing.expect_value(t, at(frame(&s, &scene, &g, &textures, {0.2, 0.4, 0.6, 0.5}, false), 0, 0), [4]u8{26, 51, 77, 128})
+	px := frame(&s, &scene, &g, &textures, {0, 0, 0, 1}, true)
+	testing.expectf(t, at(px, W / 2, W / 2) == {128, 0, 0, 255} && at(px, 0, 0) == {0, 0, 0, 255}, "added onto an opaque black: %v, %v", at(px, W / 2, W / 2), at(px, 0, 0))
+	sky := sky_texture(&textures, SKY_DEFAULT, 16)
+	bg := at(frame(&s, &scene, &g, &textures, {1, 0, 0, 1}, false, sky), 0, 0)
+	testing.expectf(t, bg.a == 255 && bg.b > bg.r, "the texture covers the colour: %v", bg)
+}

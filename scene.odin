@@ -291,6 +291,13 @@ Scene :: struct {
 	background:            Texture_Id,
 	background_intensity:  f32, // 0 means 1
 	background_blurriness: f32, // 0..1
+	// What the frame is cleared to under everything (three.js's
+	// scene.background as a Color, or the renderer's clear colour): sRGB
+	// and alpha, written as is (not tone-mapped or fogged). The default,
+	// alpha 0, leaves the frame transparent where nothing is drawn, to
+	// composite over; alpha 1 makes it opaque. A `background` texture
+	// covers it.
+	background_color:      Vec4,
 	// Tone mapping (default .None) and exposure (0 means 1), plus scene fog.
 	tone_mapping:          Tone_Mapping,
 	tone_mapping_exposure: f32,
@@ -335,6 +342,7 @@ scene_clear :: proc(s: ^Scene) {
 	s.background = 0
 	s.background_intensity = 0
 	s.background_blurriness = 0
+	s.background_color = {}
 	s.tone_mapping = .None
 	s.tone_mapping_exposure = 0
 	s.fog = {}
@@ -928,6 +936,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	out.background = scene.background
 	out.background_intensity = scene.background_intensity
 	out.background_blurriness = scene.background_blurriness
+	out.background_color = scene.background_color
 	out.tone_mapping = scene.tone_mapping
 	out.tone_mapping_exposure = scene.tone_mapping_exposure
 	out.fog = scene.fog
@@ -1511,6 +1520,13 @@ shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int 
 		n += 1
 	}
 	return n
+}
+
+// The frame's clear (`Scene.background_color`) as both renderers write
+// it: premultiplied sRGB bytes.
+background_clear :: proc "contextless" (scene: ^Scene) -> [4]u8 {
+	c := linalg.clamp(scene.background_color, 0, 1)
+	return {u8(math.round(c.r * c.a * 255)), u8(math.round(c.g * c.a * 255)), u8(math.round(c.b * c.a * 255)), u8(math.round(c.a * 255))}
 }
 
 // The fog's near, far and density, defaults in place of unset ones.

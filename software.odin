@@ -257,6 +257,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		bg_tex        = bg_tex,
 		bg_intensity  = bg_intensity,
 		bg_lod        = bg_lod,
+		clear         = transmute(u32)background_clear(active),
 		eye           = active.camera.position,
 		shadows       = shadows,
 		shadow_count  = ns,
@@ -346,6 +347,7 @@ Frame_Job :: struct {
 	bg_tex:        Texture_Id,
 	bg_intensity:  f32,
 	bg_lod:        f32,
+	clear:         u32, // a colour sample: background_clear
 	inv_vp:        Mat4,
 	eye:           Vec3,
 	shadows:       [MAX_SHADOWS]Shadow,

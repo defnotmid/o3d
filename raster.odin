@@ -21,7 +21,9 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	y1 := min(y0 + BAND_ROWS, s.height)
 	slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 0)
 	if job.bg_tex == 0 {
-		slice.zero(s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES])
+		for &c in s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES] {
+			c = job.clear
+		}
 	} else {
 		// The background first, as the GPU draws it: what is drawn then
 		// blends over it or adds to it.

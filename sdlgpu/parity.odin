@@ -65,6 +65,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"custom_shadow", 240, 180, build_custom_shadow},
 	{"custom_finish", 240, 180, build_custom_finish},
 	{"sky", 240, 180, build_sky},
+	{"background_color", 240, 180, build_background_color},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -1152,6 +1153,17 @@ build_sky :: proc(a: ^Parity_Assets) -> string {
 		m.roughness = roughness
 		append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.45, 48, 24), o3d.compose({-1.1 + 1.1 * f32(k), 0.2, 0}), m})
 	}
+	return ""
+}
+
+// The additive scene over an opaque clear colour (Scene.background_color):
+// what adds lands on it, alpha 1 everywhere.
+@(private = "file")
+build_background_color :: proc(a: ^Parity_Assets) -> string {
+	if e := build_additive(a); e != "" {
+		return e
+	}
+	a.scene.background_color = {0.04, 0.05, 0.12, 1}
 	return ""
 }
 
