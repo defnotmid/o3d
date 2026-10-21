@@ -81,6 +81,8 @@ Software :: struct {
 	// The frame's depth per pixel (`Scene.depth`), drawn after them.
 	depth_map:     [dynamic]f32,
 	expanded:      Expanded_Draws,
+	// Per draw: its triplanar projection frame (set for `.Triplanar` ones).
+	frames:        [dynamic]Projection_Frame,
 	// The host's pixels for external textures (by id - 1), as the GPU's
 	// `texture_set_external` binds its textures: `software_set_external`.
 	externals:     [dynamic]Software_External,
@@ -116,6 +118,7 @@ software_destroy :: proc(s: ^Software) {
 		delete(sm)
 	}
 	delete(s.depth_map)
+	delete(s.frames)
 	expanded_draws_destroy(&s.expanded)
 	delete(s.externals)
 	s^ = {}
@@ -225,6 +228,12 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	shading_materials(scene_materials(active), &s.materials, textures)
 	sprite_materials(active, geos, &s.expanded, s.materials[:])
 	shader_blocks(active, shaders, view, proj, &s.blocks)
+	table_grow_non_zero(&s.frames, len(active.draws))
+	for m, i in s.materials[:len(active.draws)] {
+		if .Triplanar in m.flags {
+			s.frames[i] = projection_frame(active.draws[i].material.projection, active.draws[i].model)
+		}
+	}
 	threads := 0
 	if pool != nil {
 		sync.guard(&pool.mutex)

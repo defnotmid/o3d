@@ -61,6 +61,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"flare", 240, 180, build_flare},
 	{"vertex_colors", 240, 180, build_vertex_colors},
 	{"far_layers", 240, 180, build_far_layers},
+	{"triplanar", 240, 180, build_triplanar},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -937,6 +938,78 @@ build_far_layers :: proc(a: ^Parity_Assets) -> string {
 	earth := o3d.MATERIAL_DEFAULT
 	earth.color = {0.2, 0.4, 0.8}
 	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 3000, 48, 24), o3d.compose(dir * 20000 + o3d.Vec3{0, -2500, 0}), earth})
+	return ""
+}
+
+// Triplanar mapping on meshes without uvs (their uvs zeroed): a turned,
+// scaled torus and box with colour, roughness and normal maps projected in
+// their frames, and a sphere projected in the world's, a slot transform
+// turning its pattern; lit, shadowed, two-sided.
+@(private = "file")
+build_triplanar :: proc(a: ^Parity_Assets) -> string {
+	T :: 64
+	grime_px, rough_px, bump_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			i := (y * T + x) * 4
+			check := (x / 8 + y / 8) % 2 == 0
+			streak := f32((x * 7 + y * 13) % 23) / 23
+			c := [3]f32{0.75, 0.72, 0.68} if check else {0.35, 0.3, 0.28}
+			for k in 0 ..< 3 {
+				grime_px[i + k] = u8(clamp(c[k] * (0.8 + 0.2 * streak), 0, 1) * 255)
+			}
+			grime_px[i + 3] = 255
+			r := u8(60 + 150 * streak)
+			rough_px[i], rough_px[i + 1], rough_px[i + 2], rough_px[i + 3] = r, r, r, 255
+			// Round rivets every 16 texels: their slope as a normal.
+			q := [2]f32{f32(x % 16) - 7.5, f32(y % 16) - 7.5}
+			d := math.sqrt(q.x * q.x + q.y * q.y)
+			n := [3]f32{0, 0, 1}
+			if d < 5 {
+				h := q / 5 * 0.8
+				n = {h.x, -h.y, math.sqrt(max(1 - h.x * h.x - h.y * h.y, 0))}
+			}
+			for k in 0 ..< 3 {
+				bump_px[i + k] = u8(math.round((n[k] * 0.5 + 0.5) * 255))
+			}
+			bump_px[i + 3] = 255
+		}
+	}
+	grime := o3d.texture_add(&a.textures, grime_px[:], T, T)
+	rough := o3d.texture_add(&a.textures, rough_px[:], T, T)
+	bump := o3d.texture_add(&a.textures, bump_px[:], T, T)
+	no_uvs :: proc(geos: ^o3d.Geometries, id: o3d.Geometry_Id) -> o3d.Geometry_Id {
+		sv, si, _ := o3d.geometry_mesh(geos, id)
+		verts := make([]o3d.Vertex, len(sv), context.temp_allocator)
+		indices := make([]u32, len(si), context.temp_allocator)
+		copy(verts, sv)
+		copy(indices, si)
+		for &v in verts {
+			v.uv, v.uv1 = {}, {}
+		}
+		return o3d.geometry_add(geos, verts, indices)
+	}
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {2.2, 2, 4.2}, target = {0, 0.6, 0}, fov = 45, near = 0.1, far = 50}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.97, 0.92}, intensity = 2.8, position = {3, 5, 2}, cast_shadow = true})
+	append(&s.lights, o3d.Light{kind = .Hemisphere, color = {0.7, 0.8, 1}, ground = {0.3, 0.25, 0.2}, intensity = 0.8})
+	hull := o3d.MATERIAL_DEFAULT
+	hull.color, hull.metalness = {1, 1, 1}, 0.4
+	hull.color_map, hull.roughness_map, hull.normal_map = grime, rough, bump
+	hull.projection, hull.projection_scale, hull.projection_sharpness = .Object, 1.5, 6
+	hull.flags = {.Cast_Shadow, .Receive_Shadow}
+	append(&s.draws, o3d.Draw{no_uvs(&a.geos, o3d.torus(&a.geos, 0.55, 0.22, 24, 48)), o3d.compose({-0.8, 0.9, 0}, {0.9, 0.4, 0.2}, {1.2, 0.8, 1}), hull})
+	box := hull
+	box.side = .Double
+	append(&s.draws, o3d.Draw{no_uvs(&a.geos, o3d.box(&a.geos, 0.8, 0.8, 0.8)), o3d.compose({0.9, 0.4, -0.3}, {0, 0.7, 0.3}), box})
+	world := hull
+	world.projection, world.projection_scale = .World, 2
+	world.color_transform = {rotation = 0.5}
+	append(&s.draws, o3d.Draw{no_uvs(&a.geos, o3d.sphere(&a.geos, 0.45, 32, 16)), o3d.compose({0.5, 0.45, 1.1}), world})
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness, floor.flags = {0.5, 0.5, 0.55}, 0.9, {.Receive_Shadow}
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
 	return ""
 }
 

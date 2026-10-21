@@ -157,8 +157,12 @@ Material_Uniforms :: struct {
 	// Particles: fade distance before the frame's depth.
 	softness:                           f32,
 	uv_transforms:                      [2 * len(o3d.Texture_Slot)][4]f32,
+	// Triplanar: repeats per unit, the weights' power; the projection
+	// frame's world-to-local rows and normals-to-local rows.
+	triplanar:                          [4]f32,
+	to_local, normal_to_local:          [3][4]f32,
 }
-#assert(size_of(Material_Uniforms) == 288)
+#assert(size_of(Material_Uniforms) == 400)
 
 Light_Uniforms :: struct {
 	color, ground, vector: [4]f32,

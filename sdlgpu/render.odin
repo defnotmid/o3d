@@ -721,6 +721,14 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m, geo)
+		if .Triplanar in m.flags {
+			f := o3d.projection_frame(d.material.projection, d.model)
+			mu.triplanar = {m.projection_scale, m.projection_sharpness, 0, 0}
+			for r in 0 ..< 3 {
+				mu.to_local[r] = {f.to_local[r, 0], f.to_local[r, 1], f.to_local[r, 2], f.to_local[r, 3]}
+				mu.normal_to_local[r] = {f.normal_to_local[r, 0], f.normal_to_local[r, 1], f.normal_to_local[r, 2], 0}
+			}
+		}
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {
 			vbs := [2]sdl.GPUBufferBinding {

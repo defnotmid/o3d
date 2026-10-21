@@ -150,7 +150,12 @@ slot_uv :: #force_inline proc "contextless" (m: ^Shading_Material, slot: Texture
 	if ((m.uv_sets >> u32(slot)) & 1) != 0 {
 		raw, dx, dy = uv1, d1x, d1y
 	}
-	xf := m.uv_transforms[slot]
+	return transform_uv(m.uv_transforms[slot], raw, dx, dy)
+}
+
+// A uv and its derivatives through a slot's transform.
+@(private = "file")
+transform_uv :: #force_inline proc "contextless" (xf: [2]Vec3, raw, dx, dy: Vec2) -> (uv, ddx, ddy: Vec2) {
 	uv = {
 		xf[0].x * raw.x + xf[0].y * raw.y + xf[0].z,
 		xf[1].x * raw.x + xf[1].y * raw.y + xf[1].z,
@@ -303,6 +308,12 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 	if curved {
 		words, even_odd = curve_entry_words(job.geos, t.curve)
 	}
+	// Triplanar: its maps projected in its frame.
+	triplanar := .Triplanar in m.flags
+	frame: Projection_Frame = ---
+	if triplanar {
+		frame = s.frames[t.draw]
+	}
 	// A particle: its row's colour and opacity; soft against the frame's depth.
 	sprite := .Sprite in m.flags
 	row := s.expanded.sprite_rows[t.curve] if sprite && int(t.curve) < len(s.expanded.sprite_rows) else {color = 1}
@@ -323,6 +334,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 			worlds, norms: [4]Vec3 = ---, ---
 			uvs, uv1s: [4]Vec2 = ---, ---
 			colors: [4]Vec4 = ---
+			projected: [4]Vec3 = ---
 			for l in 0 ..< 4 {
 				c := Vec2{f32(qx + l & 1) + 0.5, f32(qy + l >> 1) + 0.5}
 				b0 := edge(t.p[1].xy, t.p[2].xy, c) * inv_area
@@ -335,6 +347,9 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				if coloured {
 					colors[l] = (vcolor[0] * b0 + vcolor[1] * b1 + vcolor[2] * b2) * inv_iw
 				}
+				if triplanar {
+					projected[l] = (frame.to_local * Vec4{worlds[l].x, worlds[l].y, worlds[l].z, 1}).xyz * m.projection_scale
+				}
 				if l not_in helpers && .Flat_Shading not_in m.flags {
 					norms[l] = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) * inv_iw)
 				}
@@ -346,6 +361,13 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 				x, y := qx + l & 1, qy + l >> 1
 				d0x, d0y := quad_deriv(uvs, l)
 				d1x, d1y := quad_deriv(uv1s, l)
+				// Triplanar: where the lane reads (nil: by uv).
+				lane: Triplanar_Lane = ---
+				tl: ^Triplanar_Lane
+				if triplanar {
+					project_lane(&lane, projected, l, frame.normal_to_local * (flat_n if .Flat_Shading in m.flags else norms[l]), m.projection_sharpness)
+					tl = &lane
+				}
 				pm := m^
 				emissive := m.emissive
 				opacity := m.opacity
@@ -356,8 +378,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					}
 				}
 				if .Color_Map in m.flags {
-					c_uv, c_dx, c_dy := slot_uv(m, .Color, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					tex := sample_map(job, m.color_map, c_uv, c_dx, c_dy)
+					tex := read_map(job, m, tl, .Color, m.color_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
 					if .Premultiplied in m.flags {
 						tex.rgb = linalg.clamp(tex.rgb / tex.a, 0, 1) if tex.a > 0 else 0
 					}
@@ -367,8 +388,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					}
 				}
 				if .Alpha_Map in m.flags {
-					a_uv, a_dx, a_dy := slot_uv(m, .Alpha, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					opacity *= sample_map(job, m.alpha_map, a_uv, a_dx, a_dy).g
+					opacity *= read_map(job, m, tl, .Alpha, m.alpha_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).g
 				}
 				if sprite {
 					pm.base *= linear(row.color.rgb)
@@ -404,21 +424,17 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					}
 				}
 				if .Roughness_Map in m.flags {
-					r_uv, r_dx, r_dy := slot_uv(m, .Roughness, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					pm.roughness *= sample_map(job, m.roughness_map, r_uv, r_dx, r_dy).g
+					pm.roughness *= read_map(job, m, tl, .Roughness, m.roughness_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).g
 				}
 				if .Metalness_Map in m.flags {
-					m_uv, m_dx, m_dy := slot_uv(m, .Metalness, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					pm.metalness *= sample_map(job, m.metalness_map, m_uv, m_dx, m_dy).b
+					pm.metalness *= read_map(job, m, tl, .Metalness, m.metalness_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).b
 				}
 				if .Emissive_Map in m.flags {
-					e_uv, e_dx, e_dy := slot_uv(m, .Emissive, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					emissive *= linear(sample_map(job, m.emissive_map, e_uv, e_dx, e_dy).rgb)
+					emissive *= linear(read_map(job, m, tl, .Emissive, m.emissive_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).rgb)
 				}
 				ao: f32 = 1
 				if .Ao_Map in m.flags {
-					a_uv, a_dx, a_dy := slot_uv(m, .Ao, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					ao = (sample_map(job, m.ao_map, a_uv, a_dx, a_dy).r - 1) * m.ao_intensity + 1
+					ao = (read_map(job, m, tl, .Ao, m.ao_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).r - 1) * m.ao_intensity + 1
 				}
 				n := flat_n if .Flat_Shading in m.flags else norms[l]
 				shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
@@ -432,10 +448,14 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 						n = -n
 					}
 					pm.flags -= {.Two_Sided}
-					dp_dx, dp_dy := quad_deriv(worlds, l)
-					n_uv, n_dx, n_dy := slot_uv(m, .Normal, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					map_n := sample_map(job, m.normal_map, n_uv, n_dx, n_dy).rgb * 2 - 1
-					n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
+					if triplanar {
+						n = triplanar_normal(job, m, tl, frame, n)
+					} else {
+						dp_dx, dp_dy := quad_deriv(worlds, l)
+						n_uv, n_dx, n_dy := slot_uv(m, .Normal, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+						map_n := sample_map(job, m.normal_map, n_uv, n_dx, n_dy).rgb * 2 - 1
+						n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
+					}
 				}
 				lit := shade(&pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
 				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
@@ -443,6 +463,78 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 			}
 		}
 	}
+}
+
+// Where a triplanar lane reads its maps: its position projected along x,
+// y and z (as (z, y), (x, z), (x, y)), their derivatives and weights.
+@(private = "file")
+Triplanar_Lane :: struct {
+	proj, proj_dx, proj_dy: [3]Vec2,
+	weights:                Vec3,
+}
+
+// A lane's triplanar projections from its quad's projected positions, the
+// weights from its normal in the projection's frame: |n| to the
+// sharpness, summing to 1 (shaders/o3d.slang's `project_lane`).
+@(private = "file")
+project_lane :: #force_inline proc "contextless" (at: ^Triplanar_Lane, projected: [4]Vec3, l: int, normal: Vec3, sharpness: f32) {
+	p := projected[l]
+	dx, dy := quad_deriv(projected, l)
+	at.proj = {p.zy, p.xz, p.xy}
+	at.proj_dx = {dx.zy, dx.xz, dx.xy}
+	at.proj_dy = {dy.zy, dy.xz, dy.xy}
+	n := linalg.normalize(normal)
+	w := Vec3{math.pow(abs(n.x), sharpness), math.pow(abs(n.y), sharpness), math.pow(abs(n.z), sharpness)}
+	at.weights = w / max(w.x + w.y + w.z, 1e-20)
+}
+
+// A material map at a lane: by its uv (`at` nil), or its three
+// projections' samples weighted (a projection weighing nothing is not read).
+@(private = "file")
+read_map :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, slot: Texture_Slot, id: Texture_Id, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec4 {
+	if at == nil {
+		uv, dx, dy := slot_uv(m, slot, uv0, uv1, d0x, d0y, d1x, d1y)
+		return sample_map(job, id, uv, dx, dy)
+	}
+	return read_triplanar(job, m, at, slot, id)
+}
+
+// Out of line: the uv path stays small where it is inlined.
+@(private = "file")
+read_triplanar :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, slot: Texture_Slot, id: Texture_Id) -> Vec4 {
+	acc: Vec4
+	for a in 0 ..< 3 {
+		if at.weights[a] > 0 {
+			acc += at.weights[a] * read_projection(job, m, at, slot, id, a)
+		}
+	}
+	return acc
+}
+
+@(private = "file")
+read_projection :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, slot: Texture_Slot, id: Texture_Id, axis: int) -> Vec4 {
+	uv, dx, dy := transform_uv(m.uv_transforms[slot], at.proj[axis], at.proj_dx[axis], at.proj_dy[axis])
+	return sample_map(job, id, uv, dx, dy)
+}
+
+// A triplanar normal map's normal: each projection's tangent normal laid
+// on the surface normal's axes and blended by the weights (a whiteout
+// blend), in the projection's frame, then back in the world's.
+@(private = "file")
+triplanar_normal :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, frame: Projection_Frame, n: Vec3) -> Vec3 {
+	nl := linalg.normalize(frame.normal_to_local * n)
+	tn: [3]Vec3
+	for a in 0 ..< 3 {
+		if at.weights[a] > 0 {
+			tn[a] = read_projection(job, m, at, .Normal, m.normal_map, a).rgb * 2 - 1
+		}
+	}
+	bx := Vec3{tn[0].x + nl.z, tn[0].y + nl.y, abs(tn[0].z) * nl.x}
+	by := Vec3{tn[1].x + nl.x, tn[1].y + nl.z, abs(tn[1].z) * nl.y}
+	bz := Vec3{tn[2].x + nl.x, tn[2].y + nl.y, abs(tn[2].z) * nl.z}
+	w := at.weights
+	blended := bx.zyx * w.x + by.xzy * w.y + bz * w.z
+	return linalg.normalize(frame.normal_to_world * linalg.normalize(blended))
 }
 
 // The area of the pixel at shape coordinate `rc` the shape covers, the

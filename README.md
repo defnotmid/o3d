@@ -509,6 +509,17 @@ includes ovg's `shaders/curves.slang` from there too.
   (three.js's Lensflare): with a `depth_offset` past the camera the quads
   draw over everything (at the near plane) yet are probed where the sun is,
   so a flare and its ghosts fade as a hull passes in front of it.
+- **Triplanar mapping:** `Material.projection` `.Object` or `.World` reads
+  every map (colour, normal, roughness, metalness, emissive, AO, alpha)
+  projected along the three axes of the object's frame (the pattern moves
+  with it) or the world's, instead of by uv: for meshes without uvs (a USD
+  hull) under a normal PBR material, with shadows, environment and tone
+  mapping. `projection_scale` is repeats per unit, `projection_sharpness`
+  the weights' power (|n| to it, summing to 1); each slot's transform still
+  applies. Normal maps blend by a whiteout blend in the projection's frame.
+  Alpha masks read this way do not cut shadows (the caster is whole).
+  Both renderers alike (`projection_frame`); a triplanar map reads three
+  times where it weighs anything.
 - **Reversed depth:** `perspective` and `orthographic` map near to depth 1
   and far to 0 (three.js's reversedDepthBuffer), for the camera and the
   lights' shadows alike: both renderers clear depth to 0 and keep the

@@ -47,6 +47,7 @@ static const uint FLAG_SPRITE = 65536;
 static const uint FLAG_ADDITIVE = 131072;
 static const uint FLAG_PREMULTIPLIED = 262144;
 static const uint FLAG_VERTEX_COLORS = 524288;
+static const uint FLAG_TRIPLANAR = 1048576;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -86,6 +87,13 @@ struct Material {
     uint curve_table; // an exact shape's or glyph run's quad table, or a particle draw's first row
     float softness;   // particles: fade distance before the frame's depth
     float4 uv_transforms[14];
+    // Triplanar (FLAG_TRIPLANAR): repeats per unit and the weights' power;
+    // world positions to the projection's frame (3x4 rows) and normals to
+    // it (rows of the model's transposed 3x3; back with to_local's
+    // transpose). o3d.Projection_Frame.
+    float4 triplanar;
+    float4 to_local[3];
+    float4 normal_to_local[3];
 };
 
 // Shading_Light: color, ground linear times intensity (or spot axis + cos_inner/outer);
@@ -286,6 +294,11 @@ void slot_uv(uint slot, float2 uv0, float2 uv1, float2 d0x, float2 d0y, float2 d
     float2 raw = use1 ? uv1 : uv0;
     float2 rdx = use1 ? d1x : d0x;
     float2 rdy = use1 ? d1y : d0y;
+    transform_uv(slot, raw, rdx, rdy, uv, dx, dy);
+}
+
+// A uv and its derivatives through a slot's transform.
+void transform_uv(uint slot, float2 raw, float2 rdx, float2 rdy, out float2 uv, out float2 dx, out float2 dy) {
     float3 r0 = material.uv_transforms[slot * 2 + 0].xyz;
     float3 r1 = material.uv_transforms[slot * 2 + 1].xyz;
     uv = float2(dot(r0, float3(raw, 1)), dot(r1, float3(raw, 1)));
@@ -453,6 +466,70 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
 // The standard material's colour at a fragment (premultiplied sRGB), as
 // fs_main writes it.
 // `tint` (sRGB colour, opacity) multiplies the material's: a particle's row.
+// Where a fragment reads its maps (o3d's Lane_Uv): its uvs and their
+// derivatives, or (triplanar) its position projected along x, y and z (as
+// (z, y), (x, z), (x, y)), their derivatives and weights.
+struct LaneUv {
+    float2 uv, uv1, d0x, d0y, d1x, d1y;
+    bool triplanar;
+    float2 proj[3], pdx[3], pdy[3];
+    float3 weights;
+};
+
+// A fragment's triplanar projections and weights: |n| in the projection's
+// frame to the sharpness, summing to 1 (o3d's project_lane).
+void project_lane(inout LaneUv at, float3 world, float3 normal) {
+    float3 p = float3(dot(material.to_local[0], float4(world, 1)), dot(material.to_local[1], float4(world, 1)), dot(material.to_local[2], float4(world, 1))) * material.triplanar.x;
+    float3 dx = ddx(p);
+    float3 dy = ddy(p);
+    at.triplanar = true;
+    at.proj[0] = p.zy; at.proj[1] = p.xz; at.proj[2] = p.xy;
+    at.pdx[0] = dx.zy; at.pdx[1] = dx.xz; at.pdx[2] = dx.xy;
+    at.pdy[0] = dy.zy; at.pdy[1] = dy.xz; at.pdy[2] = dy.xy;
+    float3 n = normalize(float3(dot(material.normal_to_local[0].xyz, normal), dot(material.normal_to_local[1].xyz, normal), dot(material.normal_to_local[2].xyz, normal)));
+    float3 w = pow(abs(n), material.triplanar.y);
+    at.weights = w / max(w.x + w.y + w.z, 1e-20);
+}
+
+float4 read_projection(Sampler2D<float4> tex, uint slot, LaneUv at, uint axis) {
+    float2 uv, dx, dy;
+    transform_uv(slot, at.proj[axis], at.pdx[axis], at.pdy[axis], uv, dx, dy);
+    return sample_map(tex, uv, dx, dy);
+}
+
+// A material map: by uv, or its projections' samples weighted.
+float4 read_map(Sampler2D<float4> tex, uint slot, LaneUv at) {
+    if (!at.triplanar) {
+        float2 uv, dx, dy;
+        slot_uv(slot, at.uv, at.uv1, at.d0x, at.d0y, at.d1x, at.d1y, uv, dx, dy);
+        return sample_map(tex, uv, dx, dy);
+    }
+    float4 acc = float4(0);
+    for (uint a = 0; a < 3; a++) {
+        if (at.weights[a] > 0) {
+            acc += at.weights[a] * read_projection(tex, slot, at, a);
+        }
+    }
+    return acc;
+}
+
+// A triplanar normal map's normal (o3d's triplanar_normal): a whiteout
+// blend in the projection's frame, then back in the world's.
+float3 triplanar_normal(LaneUv at, float3 n) {
+    float3 nl = normalize(float3(dot(material.normal_to_local[0].xyz, n), dot(material.normal_to_local[1].xyz, n), dot(material.normal_to_local[2].xyz, n)));
+    float3 tn[3] = { float3(0), float3(0), float3(0) };
+    for (uint a = 0; a < 3; a++) {
+        if (at.weights[a] > 0) {
+            tn[a] = read_projection(normalMap, SLOT_NORMAL, at, a).rgb * 2 - 1;
+        }
+    }
+    float3 bx = float3(tn[0].x + nl.z, tn[0].y + nl.y, abs(tn[0].z) * nl.x);
+    float3 by = float3(tn[1].x + nl.x, tn[1].y + nl.z, abs(tn[1].z) * nl.y);
+    float3 bz = float3(tn[2].x + nl.x, tn[2].y + nl.y, abs(tn[2].z) * nl.z);
+    float3 b = normalize(bx.zyx * at.weights.x + by.xzy * at.weights.y + bz * at.weights.z);
+    return normalize(material.to_local[0].xyz * b.x + material.to_local[1].xyz * b.y + material.to_local[2].xyz * b.z);
+}
+
 float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
@@ -463,6 +540,13 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
     float2 d0y = ddy(i.uv);
     float2 d1x = ddx(i.uv1);
     float2 d1y = ddy(i.uv1);
+    LaneUv at;
+    at.uv = i.uv; at.uv1 = i.uv1; at.d0x = d0x; at.d0y = d0y; at.d1x = d1x; at.d1y = d1y;
+    at.triplanar = false;
+    if ((flags & FLAG_TRIPLANAR) != 0) {
+        float3 tn = (flags & FLAG_FLAT_SHADING) != 0 ? cross(dp_dx, dp_dy) : i.normal;
+        project_lane(at, i.world, tn);
+    }
     if ((flags & FLAG_VERTEX_COLORS) != 0) {
         base *= i.color.rgb;
         if ((flags & (FLAG_BLENDED | FLAG_ALPHA_MASK)) != 0) {
@@ -470,9 +554,7 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
         }
     }
     if ((flags & FLAG_COLOR_MAP) != 0) {
-        float2 uv, dx, dy;
-        slot_uv(SLOT_COLOR, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-        float4 tex = sample_map(colorMap, uv, dx, dy);
+        float4 tex = read_map(colorMap, SLOT_COLOR, at);
         if ((flags & FLAG_PREMULTIPLIED) != 0) {
             tex.rgb = tex.a > 0 ? saturate(tex.rgb / tex.a) : float3(0);
         }
@@ -482,9 +564,7 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
         }
     }
     if ((flags & FLAG_ALPHA_MAP) != 0) {
-        float2 uv, dx, dy;
-        slot_uv(SLOT_ALPHA, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-        a *= sample_map(alphaMap, uv, dx, dy).g;
+        a *= read_map(alphaMap, SLOT_ALPHA, at).g;
     }
     if ((flags & FLAG_ALPHA_MASK) != 0) {
         if (a < material.alpha_cutoff) {
@@ -509,21 +589,15 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
     } else {
         float roughness = material.roughness;
         if ((flags & FLAG_ROUGHNESS_MAP) != 0) {
-            float2 uv, dx, dy;
-            slot_uv(SLOT_ROUGHNESS, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-            roughness *= sample_map(roughnessMap, uv, dx, dy).g;
+            roughness *= read_map(roughnessMap, SLOT_ROUGHNESS, at).g;
         }
         float metalness = material.metalness;
         if ((flags & FLAG_METALNESS_MAP) != 0) {
-            float2 uv, dx, dy;
-            slot_uv(SLOT_METALNESS, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-            metalness *= sample_map(metalnessMap, uv, dx, dy).b;
+            metalness *= read_map(metalnessMap, SLOT_METALNESS, at).b;
         }
         float ao = 1;
         if ((flags & FLAG_AO_MAP) != 0) {
-            float2 uv, dx, dy;
-            slot_uv(SLOT_AO, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-            ao = (sample_map(aoMap, uv, dx, dy).r - 1) * material.ao_intensity + 1;
+            ao = (read_map(aoMap, SLOT_AO, at).r - 1) * material.ao_intensity + 1;
         }
         float3 n = normalize(i.normal);
         if ((flags & FLAG_FLAT_SHADING) != 0) {
@@ -543,18 +617,20 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
             n = -n;
         }
         if ((flags & FLAG_NORMAL_MAP) != 0) {
-            float2 uv, dx, dy;
-            slot_uv(SLOT_NORMAL, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-            float3 map_n = sample_map(normalMap, uv, dx, dy).rgb * 2 - 1;
-            n = perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n);
+            if (at.triplanar) {
+                n = triplanar_normal(at, n);
+            } else {
+                float2 uv, dx, dy;
+                slot_uv(SLOT_NORMAL, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
+                float3 map_n = sample_map(normalMap, uv, dx, dy).rgb * 2 - 1;
+                n = perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n);
+            }
         }
         c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags);
     }
     float3 emissive = material.emissive.rgb;
     if ((flags & FLAG_EMISSIVE_MAP) != 0) {
-        float2 uv, dx, dy;
-        slot_uv(SLOT_EMISSIVE, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-        emissive *= linear_rgb(sample_map(emissiveMap, uv, dx, dy).rgb);
+        emissive *= linear_rgb(read_map(emissiveMap, SLOT_EMISSIVE, at).rgb);
     }
     c += emissive;
     c = tone_map(c, lighting.count.y, lighting.envParams.z);

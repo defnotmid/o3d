@@ -38,16 +38,16 @@ float3 linear_rgb_0(float3 c_1)
 }
 
 
-#line 195 "o3d.slang"
+#line 203 "o3d.slang"
 float4 vertex_color_0(float4 c_2)
 {
 
-#line 196
+#line 204
     return float4(linear_rgb_0(c_2.xyz), c_2.w);
 }
 
 
-#line 167
+#line 175
 struct vs_main_Result_0
 {
     float4 position_0 [[position]];
@@ -59,7 +59,7 @@ struct vs_main_Result_0
 };
 
 
-#line 167
+#line 175
 struct vertexInput_0
 {
     float3 position_1 [[attribute(0)]];
@@ -70,14 +70,14 @@ struct vertexInput_0
 };
 
 
-#line 167
+#line 175
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 64
+#line 65
 struct Draw_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 mvp_0;
@@ -89,7 +89,7 @@ struct Draw_VS_natural_0
 };
 
 
-#line 64
+#line 65
 struct Morph_Delta_natural_0
 {
     packed_float4 position_2;
@@ -97,7 +97,7 @@ struct Morph_Delta_natural_0
 };
 
 
-#line 185
+#line 193
 struct VS_Out_0
 {
     float4 position_3;
@@ -109,7 +109,7 @@ struct VS_Out_0
 };
 
 
-#line 129
+#line 137
 struct KernelContext_0
 {
     Draw_VS_natural_0 constant* draw_0;
@@ -117,80 +117,80 @@ struct KernelContext_0
 };
 
 
-#line 129
+#line 137
 [[vertex]] vs_main_Result_0 vs_main(vertexInput_0 _S2 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_1 [[buffer(0)]], Morph_Delta_natural_0 device* morphDeltas_1 [[buffer(1)]])
 {
 
-#line 129
+#line 137
     VS_Out_0 _S3;
 
-#line 129
+#line 137
     thread KernelContext_0 kernelContext_0;
 
-#line 129
+#line 137
     (&kernelContext_0)->draw_0 = draw_1;
 
-#line 129
+#line 137
     (&kernelContext_0)->morphDeltas_0 = morphDeltas_1;
 
-#line 129
+#line 137
     for(;;)
     {
 
-#line 129
+#line 137
         uint k_0 = 0U;
 
-#line 129
+#line 137
         float3 pos_0 = _S2.position_1;
 
-#line 129
+#line 137
         float3 norm_0 = _S2.normal_1;
 
-#line 203
+#line 211
         for(;;)
         {
 
-#line 203
+#line 211
             if(k_0 < ((&kernelContext_0)->draw_0->morph_info_0.x))
             {
             }
             else
             {
 
-#line 203
+#line 211
                 break;
             }
 
-#line 204
+#line 212
             uint _S4 = k_0 >> 2U;
 
-#line 204
+#line 212
             uint _S5 = k_0 & 3U;
 
             Morph_Delta_natural_0 d_0 = (&kernelContext_0)->morphDeltas_0[(&kernelContext_0)->draw_0->morph_bases_0[_S4][_S5] + vid_0];
 
-#line 206
+#line 214
             float3 _S6 = float3((&kernelContext_0)->draw_0->morph_weights_0[_S4][_S5]) ;
             float3 pos_1 = pos_0 + (float4(d_0.position_2) ).xyz * _S6;
             float3 norm_1 = norm_0 + (float4(d_0.normal_3) ).xyz * _S6;
 
-#line 203
+#line 211
             k_0 = k_0 + 1U;
 
-#line 203
+#line 211
             pos_0 = pos_1;
 
-#line 203
+#line 211
             norm_0 = norm_1;
 
-#line 203
+#line 211
         }
 
-#line 210
+#line 218
         thread VS_Out_0 o_0;
         float4 _S7 = float4(pos_0, 1.0f);
 
-#line 211
+#line 219
         (&o_0)->position_3 = (((_S7) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(3)]))));
         (&o_0)->world_1 = (((_S7) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(3)])))).xyz;
         (&o_0)->normal_4 = (((float4(norm_0, 0.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(3)])))).xyz;
@@ -198,33 +198,33 @@ struct KernelContext_0
         (&o_0)->uv1_2 = _S2.uv1_1;
         (&o_0)->color_2 = vertex_color_0(_S2.color_1);
 
-#line 216
+#line 224
         _S3 = o_0;
         break;
     }
 
-#line 217
+#line 225
     thread vs_main_Result_0 _S8;
 
-#line 217
+#line 225
     (&_S8)->position_0 = _S3.position_3;
 
-#line 217
+#line 225
     (&_S8)->world_0 = _S3.world_1;
 
-#line 217
+#line 225
     (&_S8)->normal_0 = _S3.normal_4;
 
-#line 217
+#line 225
     (&_S8)->uv_0 = _S3.uv_2;
 
-#line 217
+#line 225
     (&_S8)->uv1_0 = _S3.uv1_2;
 
-#line 217
+#line 225
     (&_S8)->color_0 = _S3.color_2;
 
-#line 217
+#line 225
     return _S8;
 }
 

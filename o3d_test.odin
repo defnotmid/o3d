@@ -1736,6 +1736,70 @@ test_depth_precision :: proc(t: ^testing.T) {
 	}
 }
 
+// Triplanar mapping on a mesh without uvs: projected in the object's
+// frame the pattern moves with it (the same pixels a quarter of a unit
+// along), in the world's it stays (the same pixels where it was); by uv
+// the mesh reads one texel, a flat colour.
+@(test)
+test_triplanar :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	// 4 x 4 cells of 4 texels: a quarter of a unit each.
+	checker: [16 * 16 * 4]u8
+	for i in 0 ..< 256 {
+		v := u8(230 if (i % 16 / 4 + i / 64) % 2 == 0 else 30)
+		checker[i * 4], checker[i * 4 + 1], checker[i * 4 + 2], checker[i * 4 + 3] = v, v, v, 255
+	}
+	tex := texture_add(&textures, checker[:], 16, 16)
+	sv, si, _ := geometry_mesh(&g, plane(&g, 1.5, 1.5))
+	verts := make([]Vertex, len(sv), context.temp_allocator)
+	copy(verts, sv)
+	for &v in verts {
+		v.uv = {}
+	}
+	quad := geometry_add(&g, verts, si)
+	W :: 64 // 32 pixels a unit
+	s: Software
+	defer software_destroy(&s)
+	frame :: proc(scene: ^Scene, g: ^Geometries, s: ^Software, textures: ^Textures, quad: Geometry_Id, tex: Texture_Id, projection: Map_Projection, x: f32) -> []u8 {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, orthographic = true, height = 2, near = 0.1, far = 20}
+		m := MATERIAL_DEFAULT
+		m.flags, m.color_map, m.projection = {.Basic}, tex, projection
+		append(&scene.draws, Draw{quad, compose({x, 0, 0}), m})
+		px := software_render(s, scene, g, nil, W, W, nil, textures)
+		out := make([]u8, len(px), context.temp_allocator)
+		copy(out, px)
+		return out
+	}
+	same :: proc(a, b: []u8, ax, bx, x0, x1: int) -> (worst: int) {
+		for y in 16 ..< 48 {
+			for x in x0 ..< x1 {
+				worst = max(worst, abs(int(a[(y * W + x + ax) * 4]) - int(b[(y * W + x + bx) * 4])))
+			}
+		}
+		return
+	}
+	a := frame(&scene, &g, &s, &textures, quad, tex, .Object, 0)
+	b := frame(&scene, &g, &s, &textures, quad, tex, .Object, 0.25)
+	contrast := 0
+	for x in 16 ..< 48 {
+		contrast = max(contrast, abs(int(a[(36 * W + x) * 4]) - int(a[(36 * W + 16) * 4])))
+	}
+	testing.expectf(t, contrast > 120, "the checker shows: %d", contrast)
+	testing.expectf(t, same(a, b, 0, 8, 16, 48) <= 2, "object: moved with it, %d", same(a, b, 0, 8, 16, 48))
+	testing.expectf(t, same(a, b, 0, 0, 16, 48) > 100, "object: not where it was")
+	a = frame(&scene, &g, &s, &textures, quad, tex, .World, 0)
+	b = frame(&scene, &g, &s, &textures, quad, tex, .World, 0.25)
+	testing.expectf(t, same(a, b, 0, 0, 16, 48) <= 2, "world: stays, %d", same(a, b, 0, 0, 16, 48))
+	a = frame(&scene, &g, &s, &textures, quad, tex, .Uv, 0)
+	testing.expectf(t, same(a, a, 0, 3, 16, 44) == 0, "by uv: one texel")
+}
+
 // Labels as particles: an anchor (`Particle.offset`) puts the quad's
 // bottom edge on its point (a wide one too), and `depth_offset` brings one inside a wall in
 // front of it, covering the same pixels.

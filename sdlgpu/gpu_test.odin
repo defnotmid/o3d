@@ -123,6 +123,10 @@ test_vertex_colors_match_software :: proc(t: ^testing.T) {expect_parity(t, "vert
 @(test)
 test_far_layers_match_software :: proc(t: ^testing.T) {expect_parity(t, "far_layers")}
 
+// Triplanar mapping in object and world frames on meshes without uvs.
+@(test)
+test_triplanar_match_software :: proc(t: ^testing.T) {expect_parity(t, "triplanar")}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)

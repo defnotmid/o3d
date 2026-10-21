@@ -186,12 +186,47 @@ Material :: struct {
 	metalness_transform: Texture_Transform,
 	ao_transform:        Texture_Transform,
 	alpha_transform:     Texture_Transform,
+	// Where the maps are read: by the vertices' uvs, or projected along the
+	// three axes and blended by the normal (triplanar mapping, for meshes
+	// without uvs) from the object's position (the pattern moves with it)
+	// or the world's. The slots' transforms apply to each projection.
+	projection:          Map_Projection,
+	// Triplanar: texture repeats per unit (0: 1), and how sharply the
+	// projections hand over as the normal turns (the weights' power; 0: 4).
+	projection_scale:    f32,
+	projection_sharpness: f32,
 	shader:              Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
 	uniforms:            Uniform_Range,
 	// The shader's `uniform sampler2D`s by channel (`shader_map` finds a
 	// sampler's by name): mipmapped, repeating; 0 samples white.
 	shader_maps:         [SHADER_MAPS]Texture_Id,
+}
+
+Map_Projection :: enum u8 {
+	Uv,
+	Object,
+	World,
+}
+
+// Where triplanar mapping reads a draw's positions and normals: its
+// object's frame (`Map_Projection.Object`), or the world's (identity).
+Projection_Frame :: struct {
+	to_local:        Mat4, // world positions to the projection's
+	normal_to_local: Mat3,
+	normal_to_world: Mat3,
+}
+
+PROJECTION_FRAME_WORLD :: Projection_Frame{linalg.MATRIX4F32_IDENTITY, linalg.MATRIX3F32_IDENTITY, linalg.MATRIX3F32_IDENTITY}
+
+// A draw's projection frame (both renderers).
+projection_frame :: proc "contextless" (projection: Map_Projection, model: Mat4) -> Projection_Frame {
+	if projection != .Object {
+		return PROJECTION_FRAME_WORLD
+	}
+	inv := linalg.inverse(model)
+	m3 := Mat3(model)
+	return {to_local = inv, normal_to_local = linalg.transpose(m3), normal_to_world = linalg.transpose(Mat3(inv))}
 }
 
 // A ShaderMaterial uniform, three.js's `uniforms: { name: { value } }`: its
@@ -1529,6 +1564,8 @@ Shading_Material :: struct {
 	alpha_map:     Texture_Id,
 	shader:        Shader_Id, // 0: the standard material
 	shader_maps:   [SHADER_MAPS]Texture_Id,
+	// Triplanar (`.Triplanar`): repeats per unit and the weights' power.
+	projection_scale, projection_sharpness: f32,
 }
 
 // Bit values are the shader's FLAG_* constants (o3d_test checks).
@@ -1559,16 +1596,19 @@ Shading_Flag :: enum u8 {
 	// The colour map's colour is premultiplied by its alpha.
 	Premultiplied,
 	Vertex_Colors,
+	// Maps projected along three axes (`Material.projection`).
+	Triplanar,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
 
 // Whether a material's shadow is cut by its alpha (a colour or alpha map
-// with .Alpha_Mask), and the uv set its mask reads: the colour slot's, or
-// the alpha slot's without a colour map (both renderers alike).
+// with .Alpha_Mask, read by uv: a triplanar one casts whole), and the uv
+// set its mask reads: the colour slot's, or the alpha slot's without a
+// colour map (both renderers alike).
 @(private)
 shadow_mask :: #force_inline proc "contextless" (m: ^Shading_Material) -> (masked, uv1: bool) {
-	masked = .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} != {}
+	masked = .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} != {} && .Triplanar not_in m.flags
 	slot := Texture_Slot.Color if .Color_Map in m.flags else .Alpha
 	return masked, (m.uv_sets >> u32(slot)) & 1 != 0
 }
@@ -1628,6 +1668,9 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		}
 		if .Vertex_Colors in m.flags && m.shader == 0 {
 			f += {.Vertex_Colors}
+		}
+		if m.projection != .Uv && m.shader == 0 {
+			f += {.Triplanar}
 		}
 		if has_tex(textures, m.normal_map) && .Basic not_in m.flags {
 			f += {.Normal_Map}
@@ -1692,6 +1735,8 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			alpha_map     = m.alpha_map,
 			shader        = m.shader,
 			shader_maps   = m.shader_maps,
+			projection_scale     = m.projection_scale if m.projection_scale > 0 else 1,
+			projection_sharpness = m.projection_sharpness if m.projection_sharpness > 0 else 4,
 		}
 	}
 }
