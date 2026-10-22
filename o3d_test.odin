@@ -236,7 +236,7 @@ test_shader_table :: proc(t: ^testing.T) {
 	_, _, before := shader_find(&shaders, WAVE_VERT, WAVE_FRAG)
 	testing.expect(t, !before, "not found before it is made")
 	id, errors := shader(&shaders, WAVE_VERT, WAVE_FRAG)
-	testing.expectf(t, id != 0 && errors == "", "errors: %s", errors)
+	testing.expectf(t, id != 0 && len(errors) == 0, "errors: %v", errors)
 	again, _ := shader(&shaders, WAVE_VERT, WAVE_FRAG)
 	testing.expect_value(t, again, id)
 	found_id, _, found := shader_find(&shaders, WAVE_VERT, WAVE_FRAG)
@@ -251,21 +251,34 @@ test_shader_table :: proc(t: ^testing.T) {
 	testing.expect(t, sh.attributes[.Position] >= 0 && sh.attributes[.Uv] >= 0)
 	testing.expect_value(t, sh.varying_floats, 5)
 
+	// Errors are values: a code, the stage and the operands (oksl's with
+	// their position), text only when asked.
 	cases := []struct {
-		vertex, fragment, want: string,
+		vertex, fragment: string,
+		want:             Shader_Error,
+		text:             string,
 	} {
-		{WAVE_VERT, "void main() { gl_FragColor = vec4(undefinedThing); }", "Fragment:1:"},
-		{"attribute vec3 color; void main() { gl_Position = vec4(color, 1.0); }", "void main() { gl_FragColor = vec4(1.0); }", "attribute color"},
-		{"uniform sampler2D map; void main() { gl_Position = texture2D(map, vec2(0.5)); }", "void main() { gl_FragColor = vec4(1.0); }", "fragment shaders only"},
+		{WAVE_VERT, "void main() { gl_FragColor = vec4(undefinedThing); }", {code = .Compile, stage = .Fragment, compile = {pos = {line = 1, src = .Fragment}, code = .Undeclared, name = "undefinedThing"}}, "Fragment:1:"},
+		{"attribute vec3 color; void main() { gl_Position = vec4(color, 1.0); }", "void main() { gl_FragColor = vec4(1.0); }", {code = .Unknown_Attribute, stage = .Vertex, name = "color"}, "Vertex: attribute color is not one o3d provides"},
+		{"uniform sampler2D map; void main() { gl_Position = texture2D(map, vec2(0.5)); }", "void main() { gl_FragColor = vec4(1.0); }", {code = .Vertex_Sampler, stage = .Vertex, name = "map"}, "Vertex: sampler map: o3d samples textures in fragment shaders only"},
 	}
 	for c in cases {
 		bad, errs := shader(&shaders, c.vertex, c.fragment)
-		testing.expectf(t, bad != 0 && shader_get(&shaders, bad) == nil && strings.contains(errs, c.want), "want %q in %q", c.want, errs)
+		testing.expect(t, bad != 0 && shader_get(&shaders, bad) == nil && len(errs) == 1, "refused with one error")
+		if len(errs) == 1 {
+			e := errs[0]
+			testing.expectf(t, e.code == c.want.code && e.stage == c.want.stage && e.name == c.want.name, "want %v, got %v", c.want, e)
+			if c.want.code == .Compile {
+				testing.expectf(t, e.compile.code == c.want.compile.code && e.compile.name == c.want.compile.name && e.compile.pos.line == 1 && e.compile.pos.src == .Fragment, "oksl's: %v", e.compile)
+			}
+		}
+		text := format_shader_errors(errs, context.temp_allocator)
+		testing.expectf(t, strings.has_prefix(text, c.text), "want %q at the start of %q", c.text, text)
 		// A failure is kept: asked again, the same errors without compiling.
 		_, errs2 := shader(&shaders, c.vertex, c.fragment)
-		testing.expect_value(t, errs2, errs)
+		testing.expect(t, raw_data(errs2) == raw_data(errs), "the same errors")
 		found_bad, found_errs, ok := shader_find(&shaders, c.vertex, c.fragment)
-		testing.expect(t, ok && found_bad == bad && found_errs == errs, "found with its errors")
+		testing.expect(t, ok && found_bad == bad && raw_data(found_errs) == raw_data(errs), "found with its errors")
 	}
 }
 
@@ -1145,7 +1158,7 @@ test_tube_and_instance_builtins :: proc(t: ^testing.T) {
 	append(&scene.draws, Draw{tube, compose(), MATERIAL_DEFAULT})
 
 	id, errs := shader(&shaders, "void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }", "void main() { gl_FragColor = vec4(instanceColor * (instanceId + 1.0), 1.0); }")
-	testing.expectf(t, id != 0 && errs == "", "errors: %s", errs)
+	testing.expectf(t, id != 0 && len(errs) == 0, "errors: %v", errs)
 	m := MATERIAL_DEFAULT
 	m.shader = id
 	append(&scene.draws, Draw{capsule(&g, 0.5, 1), compose(), m})
@@ -1195,12 +1208,12 @@ void main() {
   gl_FragColor = vec4(mix(a.rgb, b.rgb, uFetch) * texture2D(other, vec2(0.5)).rgb, 1.0);
 }`
 	id, errors := shader(&shaders, VERT, FRAG)
-	testing.expect_value(t, errors, "")
+	testing.expect_value(t, len(errors), 0)
 	testing.expect_value(t, shader_map(&shaders, id, "map"), 1)
 	testing.expect_value(t, shader_map(&shaders, id, "other"), 0)
 	testing.expect_value(t, shader_map(&shaders, id, "nope"), -1)
 	_, verrors := shader(&shaders, `uniform sampler2D map; void main() { gl_Position = texture2D(map, vec2(0.5)); }`, `void main() { gl_FragColor = vec4(1.0); }`)
-	testing.expect(t, verrors != "", "a vertex shader's sampler is refused")
+	testing.expect(t, len(verrors) == 1 && verrors[0].code == .Vertex_Sampler, "a vertex shader's sampler is refused")
 
 	// 2x2, rows from the top: red, green / blue, white.
 	px := [16]u8{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255}
@@ -1834,7 +1847,7 @@ void main() {
   gl_FragColor = vec4(vec3(shadowAt(vWorld, vNormal)) * texture2D(tint, vec2(0.5)).rgb, 1.0);
 }`
 	id, errors := shader(&shaders, VERT, FRAG)
-	testing.expectf(t, errors == "", "compiles: %s", errors)
+	testing.expectf(t, len(errors) == 0, "compiles: %v", errors)
 	sh := shader_get(&shaders, id)
 	testing.expect(t, sh != nil && sh.shadow_channel == 0 && shader_map(&shaders, id, "tint") == 1, "the shadow map first, the shader's own next")
 	W :: 32
@@ -1887,9 +1900,9 @@ void main() {
   gl_FragColor = linearToOutputTexel(vec4(fogged(toneMapping(color), vWorld), 1.0));
 }`
 	id, errors := shader(&shaders, VERT, FRAG)
-	testing.expectf(t, errors == "", "compiles: %s", errors)
+	testing.expectf(t, len(errors) == 0, "compiles: %v", errors)
 	plain, plain_errors := shader(&shaders, VERT, "void main() { gl_FragColor = vec4(1.0); }")
-	testing.expectf(t, plain_errors == "", "compiles: %s", plain_errors)
+	testing.expectf(t, len(plain_errors) == 0, "compiles: %v", plain_errors)
 	for b in Builtin {
 		if BUILTINS[b].functions != {} {
 			testing.expectf(t, shader_get(&shaders, plain).builtins[.Fragment][b] < 0, "%v is not declared", b)

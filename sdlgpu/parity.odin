@@ -241,8 +241,8 @@ build_custom_maps :: proc(a: ^Parity_Assets) -> string {
 	tint := o3d.texture_add(&a.textures, tint_px[:], 16, 16)
 	floor_id, e1 := o3d.shader(&a.shaders, MAPS_FLOOR_VERT, MAPS_FLOOR_FRAG, false)
 	box_id, e2 := o3d.shader(&a.shaders, MAPS_BOX_VERT, MAPS_BOX_FRAG, true)
-	if e1 != "" || e2 != "" {
-		return e1 if e1 != "" else e2
+	if len(e1) > 0 || len(e2) > 0 {
+		return o3d.format_shader_errors(e1 if len(e1) > 0 else e2, context.temp_allocator)
 	}
 	s := &a.scene
 	o3d.scene_clear(s)
@@ -342,8 +342,8 @@ build_custom :: proc(a: ^Parity_Assets) -> string {
 	ids: [4]o3d.Shader_Id
 	for src, i in sources {
 		id, errors := o3d.shader(&a.shaders, src.vertex, src.fragment, src.glsl3)
-		if errors != "" {
-			return errors
+		if len(errors) > 0 {
+			return o3d.format_shader_errors(errors, context.temp_allocator)
 		}
 		ids[i] = id
 	}
@@ -766,8 +766,8 @@ build_additive :: proc(a: ^Parity_Assets) -> string {
 	ring.color, ring.roughness, ring.flags = {0.8, 0.5, 0.3}, 0.5, {.Additive}
 	append(&s.draws, o3d.Draw{o3d.torus(&a.geos, 1.4, 0.06, 12, 64), o3d.compose({0, 0, 0}, {1.2, 0.3, 0}), ring})
 	halo, errors := o3d.shader(&a.shaders, RIM_VERT, HALO_FRAG)
-	if errors != "" {
-		return errors
+	if len(errors) > 0 {
+		return o3d.format_shader_errors(errors, context.temp_allocator)
 	}
 	glow := o3d.MATERIAL_DEFAULT
 	glow.shader, glow.flags, glow.side = halo, {.Additive}, .Double
@@ -1057,8 +1057,8 @@ build_custom_shadow :: proc(a: ^Parity_Assets) -> string {
 	}
 	grime := o3d.texture_add(&a.textures, px[:], T, T)
 	id, errors := o3d.shader(&a.shaders, LIT_VERT, LIT_FRAG)
-	if errors != "" {
-		return errors
+	if len(errors) > 0 {
+		return o3d.format_shader_errors(errors, context.temp_allocator)
 	}
 	s := &a.scene
 	o3d.scene_clear(s)
@@ -1104,8 +1104,8 @@ void main() {
 @(private = "file")
 build_custom_finish :: proc(a: ^Parity_Assets) -> string {
 	id, errors := o3d.shader(&a.shaders, LIT_VERT, FINISH_FRAG)
-	if errors != "" {
-		return errors
+	if len(errors) > 0 {
+		return o3d.format_shader_errors(errors, context.temp_allocator)
 	}
 	s := &a.scene
 	o3d.scene_clear(s)
@@ -1479,8 +1479,8 @@ build_shapes :: proc(a: ^Parity_Assets) -> string {
 	id, errors := o3d.shader(&a.shaders,
 		"varying vec3 vNormal; void main() { vNormal = normalMatrix * normal; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
 		"varying vec3 vNormal; void main() { float l = 0.4 + 0.6 * max(dot(normalize(vNormal), vec3(0.0, 0.0, 1.0)), 0.0); gl_FragColor = vec4(instanceColor * l * (0.5 + 0.25 * instanceId), 1.0); }")
-	if id == 0 || errors != "" {
-		return errors
+	if id == 0 || len(errors) > 0 {
+		return o3d.format_shader_errors(errors, context.temp_allocator)
 	}
 	sh_mat := o3d.MATERIAL_DEFAULT
 	sh_mat.shader = id

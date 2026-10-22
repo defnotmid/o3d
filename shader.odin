@@ -269,10 +269,69 @@ MAX_VARYING_FLOATS :: 64
 // channel (its `uniform sampler2D`s in declaration order).
 SHADER_MAPS :: oksl.CHANNEL_COUNT
 
+// Why a shader cannot draw: oksl's diagnostics, or what o3d does not
+// provide. Values (a code and its operands); text only at the edge
+// (`shader_error_message`, `format_shader_errors`).
+Shader_Error_Code :: enum u8 {
+	None,
+	// oksl's diagnostic (`compile`: its position, code and operands).
+	Compile,
+	// The vertex stage samples a texture (`name`: the sampler).
+	Vertex_Sampler,
+	// A vertex attribute o3d does not provide (`name`).
+	Unknown_Attribute,
+	// The fragment stage writes no colour.
+	No_Colour,
+	// `n` varying floats, more than `m` (MAX_VARYING_FLOATS).
+	Too_Many_Varyings,
+}
+
+Shader_Error :: struct {
+	code:    Shader_Error_Code,
+	stage:   Shader_Stage,
+	compile: oksl.Error,
+	name:    string,
+	n, m:    i64,
+}
+
+// A shader error's text, without its stage and position.
+shader_error_message :: proc(e: Shader_Error, allocator := context.allocator) -> string {
+	switch e.code {
+	case .None:
+		return ""
+	case .Compile:
+		return oksl.error_message(e.compile, allocator)
+	case .Vertex_Sampler:
+		return fmt.aprintf("sampler %s: o3d samples textures in fragment shaders only", e.name, allocator = allocator)
+	case .Unknown_Attribute:
+		return fmt.aprintf("attribute %s is not one o3d provides (position, normal, uv)", e.name, allocator = allocator)
+	case .No_Colour:
+		return fmt.aprintf("the shader writes no colour", allocator = allocator)
+	case .Too_Many_Varyings:
+		return fmt.aprintf("%d varying floats, more than o3d's %d", e.n, e.m, allocator = allocator)
+	}
+	return ""
+}
+
+// "Stage:line:col: message" lines (o3d's own: "Stage: message"), for printing.
+format_shader_errors :: proc(errors: []Shader_Error, allocator := context.allocator) -> string {
+	b := strings.builder_make(allocator)
+	for e in errors {
+		if e.code == .Compile {
+			strings.write_string(&b, oksl.format_errors({e.compile}, context.temp_allocator))
+			continue
+		}
+		fmt.sbprintf(&b, "%v: %s\n", e.stage, shader_error_message(e, context.temp_allocator))
+	}
+	return strings.to_string(b)
+}
+
 // A compiled shader and what its stages read, found once.
 Shader :: struct {
-	pipeline:       ^oksl.Pipeline, // nil: it failed to compile (`errors`)
-	errors:         string,
+	// Kept when it failed too: `errors`' operands are its strings.
+	pipeline:       ^oksl.Pipeline,
+	// Why it cannot draw (none: it can).
+	errors:         []Shader_Error,
 	// Per stage, each built-in's offset in its uniform block (-1: unused).
 	builtins:       [Shader_Stage][Builtin]i32,
 	// Each attribute's location (-1: unused).
@@ -309,10 +368,12 @@ shaders_destroy :: proc(s: ^Shaders) {
 // The shader for these sources (`glsl3`: written in GLSL 3, three.js's
 // `glslVersion: THREE.GLSL3`, declaring its own output), compiled the first
 // time it is asked for. When it does not compile or reads what o3d does not
-// provide, `errors` says why (`Vertex:3:7: ...`, kept with the shader) and
+// provide, `errors` says why (values kept with the shader: oksl's
+// diagnostics with their stage and position, or o3d's; text by
+// `format_shader_errors`) and
 // draws with it are left out, by both renderers; the id is the shader's
 // either way, so a broken one never stands in as the standard material.
-shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: string) {
+shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: []Shader_Error) {
 	key := shader_key(vertex, fragment, glsl3)
 	if found, ok := s.keys[key]; ok {
 		return found, s.list[found - 1].errors
@@ -327,10 +388,10 @@ shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Sh
 // The shader for these sources if `shader` has made it, compiled or not
 // (`errors` says why not), without making it: only reads `s`, so a host
 // may look up under a shared lock and make under an exclusive one.
-shader_find :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: string, found: bool) {
+shader_find :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: []Shader_Error, found: bool) {
 	id, found = s.keys[shader_key(vertex, fragment, glsl3)]
 	if !found {
-		return 0, "", false
+		return 0, nil, false
 	}
 	return id, s.list[id - 1].errors, true
 }
@@ -342,7 +403,7 @@ shader_key :: proc(vertex, fragment: string, glsl3: bool) -> string {
 
 // The compiled shader, or nil (no such id, or it failed).
 shader_get :: proc "contextless" (s: ^Shaders, id: Shader_Id) -> ^Shader {
-	if s == nil || id == 0 || int(id) > len(s.list) || s.list[id - 1].pipeline == nil {
+	if s == nil || id == 0 || int(id) > len(s.list) || len(s.list[id - 1].errors) > 0 {
 		return nil
 	}
 	return &s.list[id - 1]
@@ -381,16 +442,19 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 		}
 	}
 	p, errors, ok := oksl.compile_pipeline({vertex = vertex, fragment = fragment, vertex_prelude = prelude(.Vertex, glsl3, {}), fragment_prelude = prelude(.Fragment, glsl3, functions)})
-	fail :: proc(sh: ^Shader, p: ^oksl.Pipeline, text: string) {
-		oksl.destroy_pipeline(p)
-		sh.pipeline = nil
-		sh.errors = strings.clone(text)
+	sh.pipeline = p
+	fail :: proc(sh: ^Shader, e: Shader_Error) {
+		sh.errors = make([]Shader_Error, 1)
+		sh.errors[0] = e
 	}
 	if !ok {
-		fail(&sh, p, oksl.format_errors(errors, context.temp_allocator))
+		sh.errors = make([]Shader_Error, len(errors))
+		for e, i in errors {
+			stage := Shader_Stage.Vertex if e.pos.src == .Vertex || e.pos.src == .Vertex_Prelude else .Fragment
+			sh.errors[i] = {code = .Compile, stage = stage, compile = e}
+		}
 		return
 	}
-	sh.pipeline = p
 	sh.attributes = {.Position = -1, .Normal = -1, .Uv = -1}
 	sh.shadow_channel = -1
 	for n, i in p.fragment.channel_names {
@@ -401,7 +465,7 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 	for &offsets, stage in sh.builtins {
 		m := shader_module(&sh, stage)
 		if stage == .Vertex && m.num_samplers > 0 {
-			fail(&sh, p, "Vertex: o3d samples textures in fragment shaders only\n")
+			fail(&sh, {code = .Vertex_Sampler, stage = .Vertex, name = m.channel_names[0]})
 			return
 		}
 		for b in Builtin {
@@ -416,16 +480,16 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 				continue inputs
 			}
 		}
-		fail(&sh, p, fmt.tprintf("Vertex: attribute %s is not one o3d provides (position, normal, uv)\n", v.name))
+		fail(&sh, {code = .Unknown_Attribute, stage = .Vertex, name = v.name})
 		return
 	}
 	if len(p.fragment.stage_outputs) == 0 {
-		fail(&sh, p, "Fragment: the shader writes no colour\n")
+		fail(&sh, {code = .No_Colour, stage = .Fragment})
 		return
 	}
 	sh.varying_floats = p.vertex.varying_floats
 	if sh.varying_floats > MAX_VARYING_FLOATS {
-		fail(&sh, p, fmt.tprintf("Vertex: %d varying floats, more than o3d's %d\n", sh.varying_floats, MAX_VARYING_FLOATS))
+		fail(&sh, {code = .Too_Many_Varyings, stage = .Vertex, n = i64(sh.varying_floats), m = MAX_VARYING_FLOATS})
 		return
 	}
 	for v in p.vertex.stage_outputs {

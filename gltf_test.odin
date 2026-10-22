@@ -485,7 +485,7 @@ test_gltf_skinning :: proc(t: ^testing.T) {
 		`void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
 		`void main() { gl_FragColor = vec4(0.2, 0.9, 0.3, 1.0); }`,
 	)
-	testing.expect_value(t, sh_err, "")
+	testing.expect_value(t, len(sh_err), 0)
 	custom_mat := MATERIAL_DEFAULT
 	custom_mat.shader = sh_id
 	custom_mat.side = .Double

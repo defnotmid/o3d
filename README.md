@@ -253,7 +253,7 @@ append(&scene.draws, o3d.Draw{run, o3d.compose({0, 3, 0}), ink})
 
 // ShaderMaterial: compiled once (same sources, same id), uniforms per frame
 shaders: o3d.Shaders                       // kept, like geometry
-wave, errors := o3d.shader(&shaders, vertex_glsl, fragment_glsl)   // errors: "Fragment:3:7: ..."
+wave, errors := o3d.shader(&shaders, vertex_glsl, fragment_glsl)   // errors: []Shader_Error (code, stage, oksl's with its position); text: format_shader_errors
 w := o3d.MATERIAL_DEFAULT
 w.shader = wave
 w.uniforms = o3d.scene_uniforms(&scene, {"uTime", {t}}, {"uColor", {0.3, 0.8, 0.4}})
@@ -700,7 +700,9 @@ includes ovg's `shaders/curves.slang` from there too.
   prelude for each stage and say what to fill; `shader_blocks` writes every
   custom draw's uniform bytes once a frame, which the GPU pushes and the
   software renderer runs on. A shader that fails is kept with its errors
-  and its draws left out by both renderers.
+  (values: `Shader_Error`, oksl's diagnostics or o3d's own, whose operands
+  live with the failed pipeline, also kept) and its draws left out by both
+  renderers; `shader_find` looks one up without making it.
 - **Software ShaderMaterials:** a chunk runs its draw's vertex stage once
   over the vertices it uses (the standard material's too: world position
   and normal), and a triangle's corners carry those floats, divided by w
