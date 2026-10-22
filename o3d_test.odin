@@ -233,10 +233,16 @@ void main() {
 test_shader_table :: proc(t: ^testing.T) {
 	shaders: Shaders
 	defer shaders_destroy(&shaders)
+	_, _, before := shader_find(&shaders, WAVE_VERT, WAVE_FRAG)
+	testing.expect(t, !before, "not found before it is made")
 	id, errors := shader(&shaders, WAVE_VERT, WAVE_FRAG)
 	testing.expectf(t, id != 0 && errors == "", "errors: %s", errors)
 	again, _ := shader(&shaders, WAVE_VERT, WAVE_FRAG)
 	testing.expect_value(t, again, id)
+	found_id, _, found := shader_find(&shaders, WAVE_VERT, WAVE_FRAG)
+	testing.expect(t, found && found_id == id, "found once made")
+	_, _, other := shader_find(&shaders, WAVE_VERT, WAVE_FRAG, glsl3 = true)
+	testing.expect(t, !other, "GLSL 3 is another shader")
 	sh := shader_get(&shaders, id)
 	// modelMatrix is declared by the prelude but unused: absent; the
 	// vertex stage reads every attribute.
@@ -258,6 +264,8 @@ test_shader_table :: proc(t: ^testing.T) {
 		// A failure is kept: asked again, the same errors without compiling.
 		_, errs2 := shader(&shaders, c.vertex, c.fragment)
 		testing.expect_value(t, errs2, errs)
+		found_bad, found_errs, ok := shader_find(&shaders, c.vertex, c.fragment)
+		testing.expect(t, ok && found_bad == bad && found_errs == errs, "found with its errors")
 	}
 }
 
@@ -1047,12 +1055,12 @@ test_toon_shading_and_outlines :: proc(t: ^testing.T) {
 			vector = {0, 0, 1},
 		},
 	}
-	c_shadow_a := shade(&sm, {}, {0, 0, -1}, {0, 0, 5}, lights[:]) // nl = 0.0
-	c_shadow_b := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.08}), {0, 0, 5}, lights[:]) // nl ~ 0.08
-	c_mid_a    := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.30}), {0, 0, 5}, lights[:]) // nl ~ 0.29
-	c_mid_b    := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.45}), {0, 0, 5}, lights[:]) // nl ~ 0.41
-	c_lit_a    := shade(&sm, {}, linalg.normalize(Vec3{1, 0, 0.90}), {0, 0, 5}, lights[:]) // nl ~ 0.67
-	c_lit_b    := shade(&sm, {}, {0, 0, 1}, {0, 0, 5}, lights[:]) // nl = 1.0
+	c_shadow_a := shade(surface(&sm), {}, {0, 0, -1}, {0, 0, 5}, lights[:]) // nl = 0.0
+	c_shadow_b := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.08}), {0, 0, 5}, lights[:]) // nl ~ 0.08
+	c_mid_a    := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.30}), {0, 0, 5}, lights[:]) // nl ~ 0.29
+	c_mid_b    := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.45}), {0, 0, 5}, lights[:]) // nl ~ 0.41
+	c_lit_a    := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.90}), {0, 0, 5}, lights[:]) // nl ~ 0.67
+	c_lit_b    := shade(surface(&sm), {}, {0, 0, 1}, {0, 0, 5}, lights[:]) // nl = 1.0
 
 	testing.expect(t, linalg.length(c_shadow_a - c_shadow_b) < 1e-5, "shadow band plateau is flat")
 	testing.expect(t, linalg.length(c_mid_a - c_mid_b) < 1e-5, "midtone band plateau is flat")

@@ -1,7 +1,9 @@
 package o3d
 
+import "base:runtime"
 import "core:math"
 import "core:math/linalg"
+import "core:slice"
 
 // Geometry: indexed triangles with a normal and uv per vertex, made once and
 // referred to by id. Every geometry's vertices and indices live in two
@@ -361,23 +363,42 @@ wireframe :: proc(g: ^Geometries, src: Geometry_Id) -> Geometry_Id {
 	if !ok || len(idx) < 3 {
 		return 0
 	}
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	clear(&g.scratch.vertices)
 	clear(&g.scratch.indices)
 	append(&g.scratch.vertices, ..verts)
-	add_edge :: proc(indices: ^[dynamic]u32, u, v: u32) {
-		lo, hi := min(u, v), max(u, v)
-		for i := 0; i + 1 < len(indices^); i += 2 {
-			if indices[i] == lo && indices[i + 1] == hi {
-				return
-			}
-		}
-		append(indices, lo, hi)
+	// Each triangle's edges (a-b, b-c, c-a) by their ends, lower first, and
+	// their place: sorted, an edge's first place keeps it, and the kept are
+	// emitted in place order.
+	Edge :: struct {
+		ends: u64,
+		at:   u32,
 	}
-	for t := 0; t + 2 < len(idx); t += 3 {
-		a, b, c := idx[t], idx[t + 1], idx[t + 2]
-		add_edge(&g.scratch.indices, a, b)
-		add_edge(&g.scratch.indices, b, c)
-		add_edge(&g.scratch.indices, c, a)
+	n := len(idx) / 3 * 3
+	edges := make([]Edge, n, context.temp_allocator)
+	for at in 0 ..< n {
+		u, v := idx[at], idx[at + 1 if at % 3 < 2 else at - 2]
+		edges[at] = {u64(min(u, v)) << 32 | u64(max(u, v)), u32(at)}
+	}
+	slice.sort_by(edges, proc(a, b: Edge) -> bool {
+		return a.ends < b.ends || a.ends == b.ends && a.at < b.at
+	})
+	first := make([]bool, n, context.temp_allocator)
+	kept := 0
+	for e, i in edges {
+		if i == 0 || e.ends != edges[i - 1].ends {
+			first[e.at] = true
+			kept += 1
+		}
+	}
+	table_grow_non_zero(&g.scratch.indices, kept * 2)
+	out := 0
+	for keep, at in first {
+		if keep {
+			u, v := idx[at], idx[at + 1 if at % 3 < 2 else at - 2]
+			g.scratch.indices[out], g.scratch.indices[out + 1] = min(u, v), max(u, v)
+			out += 2
+		}
 	}
 	return geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:], mode = .Lines)
 }

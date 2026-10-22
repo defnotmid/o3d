@@ -242,10 +242,9 @@ make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Mate
 @(private = "file")
 upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, data: []u8, pass: ^sdl.GPUCopyPass) -> o3d.Error {
 	size := u32(len(data))
-	if size == b.uploaded {
-		return nil
-	}
-	if size > b.capacity {
+	// A buffer always exists once uploaded to (a failed one is made again:
+	// some are bound with nothing in them).
+	if size > b.capacity || b.buffer == nil {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
@@ -256,6 +255,9 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 			b^ = {}
 			return .Out_Of_Memory
 		}
+	}
+	if size == b.uploaded {
+		return nil
 	}
 	new := data[b.uploaded:]
 	transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = u32(len(new))})
@@ -553,7 +555,11 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	}
 	sdl.EndGPUCopyPass(pass)
 	if err != nil {
+		// None of the pass's copies happen: the geometry and texture
+		// mirrors start over, so the next prepare uploads them again rather
+		// than drawing from what was counted as uploaded.
 		_ = sdl.CancelGPUCommandBuffer(cmd)
+		g.mirrored.geometry, g.mirrored.textures = 0, 0
 		return err
 	}
 	if !sdl.SubmitGPUCommandBuffer(cmd) {

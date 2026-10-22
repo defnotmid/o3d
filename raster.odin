@@ -200,6 +200,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 		return
 	}
 	out_alpha := m.opacity if blend else 1
+	dz := depth_plane(t, area)
 	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	// World position and normal over w per corner.
@@ -237,9 +238,9 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 					shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 				}
 			}
-			lit := shade(m, p, n, job.eye, job.lights, 1, job.env, 1, shadows) + m.emissive
+			lit := shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows) + m.emissive
 			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, t, x, y, area, covered, pack(lit, out_alpha), blend_of(m))
+			write_samples(s, dz, x, y, covered, pack(lit, out_alpha), blend_of(m))
 		}
 	}
 }
@@ -249,6 +250,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 @(private = "file")
 draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32) {
 	s := job.s
+	dz := depth_plane(t, area)
 	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
 	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
@@ -275,7 +277,7 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 			}
 			lit := finish_color(m.base, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, t, x, y, area, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m))
+			write_samples(s, dz, x, y, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m))
 		}
 	}
 }
@@ -283,6 +285,7 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 @(private = "file")
 draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32, blend, receive: bool) {
 	s := job.s
+	dz := depth_plane(t, area)
 	coloured := .Vertex_Colors in m.flags
 	nf := STANDARD_FLOATS + (COLOR_FLOATS if coloured else 0)
 	vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
@@ -370,7 +373,7 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 					project_lane(&lane, projected, l, frame.normal_to_local * (flat_n if .Flat_Shading in m.flags else norms[l]), m.projection_sharpness)
 					tl = &lane
 				}
-				pm := m^
+				pm := surface(m)
 				emissive := m.emissive
 				opacity := m.opacity
 				if coloured {
@@ -459,9 +462,9 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 						n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
 					}
 				}
-				lit := shade(&pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
+				lit := shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
 				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				write_samples(s, t, x, y, area, covered, pack(lit, opacity), blend_of(m))
+				write_samples(s, dz, x, y, covered, pack(lit, opacity), blend_of(m))
 			}
 		}
 	}
@@ -690,10 +693,10 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 	for qi in 0 ..< nq {
 		ref := q.tri[qi]
 		t := s.chunks[ref.chunk].tris[ref.tri]
-		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+		dz := depth_plane(t, edge(t.p[0].xy, t.p[1].xy, t.p[2].xy))
 		for l in q.shaded[qi] {
 			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
-			write_samples(s, t, x, y, area, q.covered[qi][l], pack_raw(q.colours[qi * 4 + l], blend != .Opaque), blend)
+			write_samples(s, dz, x, y, q.covered[qi][l], pack_raw(q.colours[qi * 4 + l], blend != .Opaque), blend)
 		}
 	}
 	return taken
@@ -755,12 +758,9 @@ coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (
 // replacing them (depth written), blended over them or added to them
 // (premultiplied colour added, alpha over; depth kept).
 @(private = "file")
-write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: int, area: f32, covered: Sample_Mask, col: u32, blend: Blend) {
+write_samples :: #force_inline proc "contextless" (s: ^Software, dz: Depth_Plane, x, y: int, covered: Sample_Mask, col: u32, blend: Blend) {
 	for k in covered {
-		p := Vec2{f32(x) + SAMPLE_OFFSETS[k].x, f32(y) + SAMPLE_OFFSETS[k].y}
-		s0 := edge(t.p[1].xy, t.p[2].xy, p) / area
-		s1 := edge(t.p[2].xy, t.p[0].xy, p) / area
-		z := s0 * t.p[0].z + s1 * t.p[1].z + (1 - s0 - s1) * t.p[2].z
+		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
 		i := (y * s.width + x) * SAMPLES + k
 		if z < 0 || z > 1 || z <= s.depth[i] {
 			continue
@@ -779,6 +779,27 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, t: Tri, x, y: i
 			}
 			s.color[i] = out
 		}
+	}
+}
+
+// A triangle's screen depth as a plane: at its first corner, and per pixel
+// along x and y, found once a triangle.
+@(private = "file")
+Depth_Plane :: struct {
+	z0, dx, dy: f32,
+	x0, y0:     f32,
+}
+
+@(private = "file")
+depth_plane :: #force_inline proc "contextless" (t: Tri, area: f32) -> Depth_Plane {
+	a, b, c := t.p[0], t.p[1], t.p[2]
+	inv := 1 / area
+	return {
+		z0 = a.z,
+		dx = ((b.y - c.y) * (a.z - c.z) + (c.y - a.y) * (b.z - c.z)) * inv,
+		dy = ((c.x - b.x) * (a.z - c.z) + (a.x - c.x) * (b.z - c.z)) * inv,
+		x0 = a.x,
+		y0 = a.y,
 	}
 }
 

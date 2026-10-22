@@ -195,8 +195,12 @@ Lighting_Uniforms :: struct {
 @(private = "file")
 device_mutex: sync.Mutex
 
-init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> o3d.Error {
+init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g^ = {device = device}
+	// What was made goes with a failure (the host's device stays).
+	defer if err != nil {
+		destroy(g)
+	}
 	if g.device == nil {
 		sync.guard(&device_mutex)
 		if .VIDEO not_in sdl.WasInit({.VIDEO}) && !sdl.Init({.VIDEO}) {

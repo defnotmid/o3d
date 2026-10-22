@@ -36,6 +36,7 @@ package o3d
 // (60° threshold, matching `threemf.odin`) are computed automatically so smooth
 // curved surfaces and sharp hard edges both render cleanly.
 
+import "base:runtime"
 import "core:math"
 import "core:math/linalg"
 import "core:os"
@@ -62,6 +63,8 @@ OBJ_ERROR_TEXT := [Obj_Error]string {
 
 // Dispatches by file extension (`.glb`, `.gltf`, `.3mf`, `.obj`, `.usdz`, `.usdc`, case-insensitive)
 // and loads the model into flat `Model`, `Geometries`, and `Textures` tables.
+// Destroy the model (`model_destroy`) whether it loaded or not: a failed
+// one keeps what says why (warnings, an unsupported extension).
 model_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -> (m: Model, ok: bool) {
 	dot := strings.last_index_byte(path, '.')
 	if dot < 0 {
@@ -97,10 +100,11 @@ obj_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -> 
 	if !os.exists(path) {
 		return {}, .File_Not_Found
 	}
-	bytes, read_err := os.read_entire_file(path, context.temp_allocator)
+	bytes, read_err := os.read_entire_file(path, context.allocator)
 	if read_err != nil {
 		return {}, .Io
 	}
+	defer delete(bytes)
 	slash := max(strings.last_index_byte(path, '/'), strings.last_index_byte(path, '\\'))
 	base_dir := path[:slash] if slash >= 0 else ""
 	return obj_parse(bytes, geos, textures, base_dir)
@@ -113,6 +117,8 @@ obj_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, bas
 	if len(bytes) == 0 {
 		return {}, .Empty
 	}
+	// The build's scratch is gone on return: what the model keeps is copied.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	positions := make([dynamic]Vec3, 0, 256, context.temp_allocator)
 	vcolors := make([dynamic]Vec3, 0, 256, context.temp_allocator)

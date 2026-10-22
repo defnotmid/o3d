@@ -1,5 +1,6 @@
 package o3d
 
+import "base:runtime"
 import "core:encoding/base64"
 import "core:fmt"
 import "core:math"
@@ -417,6 +418,8 @@ gltf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil, li
 // Files it names resolve against `base_dir` (the working directory when
 // empty).
 gltf_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, base_dir := "", limits: ^Limits = nil) -> (m: Model, err: Gltf_Error) {
+	// The build's scratch is gone on return: what the model keeps is copied.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	doc: Gltf_Document
 	doc, err = gltf_read(bytes, base_dir, limits)
 	defer gltf_document_destroy(&doc)

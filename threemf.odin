@@ -1,5 +1,6 @@
 package o3d
 
+import "base:runtime"
 import "core:encoding/xml"
 import "core:math/linalg"
 import "core:os"
@@ -26,6 +27,8 @@ import "core:strings"
 //   `<m:texture2d>` + `<m:texture2dgroup>` (`u`, `v`) map to `o3d.Material`
 //   and `Textures`. Multi-material meshes split into one `Model_Primitive`
 //   per distinct material; flat face normals are computed per triangle.
+//   Each `<base>` is a file material (`Model.material_names`: its `name`),
+//   its primitives' `material_id`; colour and texture groups' are 0.
 
 // Why a `.3mf` archive did not load; THREEMF_ERROR_TEXT says it in words.
 Threemf_Error :: enum u8 {
@@ -87,10 +90,11 @@ threemf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil)
 	if !os.exists(path) {
 		return {}, .File_Not_Found
 	}
-	data, read_err := os.read_entire_file(path, context.temp_allocator)
+	data, read_err := os.read_entire_file(path, context.allocator)
 	if read_err != nil {
 		return {}, .Io
 	}
+	defer delete(data)
 	return threemf_parse(data, geos, textures)
 }
 
@@ -100,6 +104,8 @@ threemf_parse :: proc(archive: []u8, geos: ^Geometries, textures: ^Textures = ni
 	if len(archive) == 0 {
 		return {}, .Empty
 	}
+	// The build's scratch is gone on return: what the model keeps is copied.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if len(archive) < 4 {
 		return {}, .Data_Too_Short
 	}
@@ -255,6 +261,8 @@ Threemf_Builder :: struct {
 	pbr_groups:  [dynamic]Threemf_PBR_Group,
 	tex2ds:      [dynamic]Threemf_Tex2D,
 	materials:   [dynamic]Material,
+	// By `materials` row: its file material (a `<base>`'s; 0: none).
+	material_ids: [dynamic]Model_Material_Id,
 	uvs:         [dynamic]Vec2,
 	groups:      [dynamic]Threemf_Group,
 	components:  [dynamic]Threemf_Component,
@@ -517,6 +525,7 @@ threemf_load_part :: proc(b: ^Threemf_Builder, raw_path: string, is_root := fals
 		b.pbr_groups.allocator = context.temp_allocator
 		b.tex2ds.allocator = context.temp_allocator
 		b.materials.allocator = context.temp_allocator
+		b.material_ids.allocator = context.temp_allocator
 		b.uvs.allocator = context.temp_allocator
 		b.groups.allocator = context.temp_allocator
 		b.components.allocator = context.temp_allocator
@@ -668,6 +677,9 @@ threemf_parse_resources :: proc(b: ^Threemf_Builder, part_idx: int, doc: ^xml.Do
 					mat.roughness = pbr.roughness
 				}
 				append(&b.materials, mat)
+				name, _ := xml_attr(mel, "name")
+				append(&b.model.material_names, strings.clone(name))
+				append(&b.material_ids, Model_Material_Id(len(b.model.material_names)))
 				mat_count += 1
 			}
 			append(&b.groups, Threemf_Group{id = gid, kind = .Base_Materials, first_item = first_mat, count = mat_count})
@@ -700,6 +712,7 @@ threemf_parse_resources :: proc(b: ^Threemf_Builder, part_idx: int, doc: ^xml.Do
 					mat.roughness = pbr.roughness
 				}
 				append(&b.materials, mat)
+				append(&b.material_ids, 0)
 				mat_count += 1
 			}
 			append(&b.groups, Threemf_Group{id = gid, kind = .Color_Group, first_item = first_mat, count = mat_count})
@@ -815,6 +828,7 @@ Threemf_Tri :: struct {
 	v:          [3]u32,
 	uv:         [3]Vec2,
 	material:   Material,
+	material_id: Model_Material_Id,
 	sort_key:   u64,
 }
 
@@ -826,7 +840,7 @@ threemf_resolve_triangle :: proc(
 	default_pid: u32,
 	default_pindex: u32,
 	has_default_pindex: bool,
-) -> (mat: Material, uvs: [3]Vec2, key: u64) {
+) -> (mat: Material, uvs: [3]Vec2, key: u64, id: Model_Material_Id) {
 	part := &b.parts[part_idx]
 	pid, has_pid := parse_u32_attr(el, "pid")
 	if !has_pid {
@@ -850,7 +864,7 @@ threemf_resolve_triangle :: proc(
 	if !found || !has_p1 {
 		mat = MATERIAL_DEFAULT
 		mat.roughness = 0.5
-		return mat, {}, 0
+		return mat, {}, 0, 0
 	}
 	g := b.groups[gi]
 	switch g.kind {
@@ -858,7 +872,7 @@ threemf_resolve_triangle :: proc(
 		if p1 >= g.count {
 			mat = MATERIAL_DEFAULT
 			mat.roughness = 0.5
-			return mat, {}, 0
+			return mat, {}, 0, 0
 		}
 		if g.kind == .Color_Group && (p2 != p1 || p3 != p1) && p2 < g.count && p3 < g.count {
 			m1 := b.materials[g.first_item + p1]
@@ -872,11 +886,11 @@ threemf_resolve_triangle :: proc(
 				mat.flags += {.Transparent}
 			}
 			key = (u64(u32(gi) + 1) << 32) | u64(0x80000000 | (p1 ~ (p2 << 10) ~ (p3 << 20)))
-			return mat, {}, key
+			return mat, {}, key, 0
 		}
 		mat = b.materials[g.first_item + p1]
 		key = (u64(u32(gi) + 1) << 32) | u64(p1)
-		return mat, {}, key
+		return mat, {}, key, b.material_ids[g.first_item + p1]
 
 	case .Texture_Group:
 		mat = MATERIAL_DEFAULT
@@ -892,11 +906,11 @@ threemf_resolve_triangle :: proc(
 			uvs[2] = b.uvs[g.first_item + p3]
 		}
 		key = (u64(u32(gi) + 1) << 32)
-		return mat, uvs, key
+		return mat, uvs, key, 0
 	}
 	mat = MATERIAL_DEFAULT
 	mat.roughness = 0.5
-	return mat, {}, 0
+	return mat, {}, 0, 0
 }
 
 @(private = "file")
@@ -950,12 +964,13 @@ threemf_build_mesh :: proc(
 				if !ok1 || !ok2 || !ok3 {
 					return -1, .Invalid_Model
 				}
-				mat, uvs, key := threemf_resolve_triangle(b, part_idx, tel, default_pid, default_pindex, has_default_pindex)
+				mat, uvs, key, id := threemf_resolve_triangle(b, part_idx, tel, default_pid, default_pindex, has_default_pindex)
 				append(&tris, Threemf_Tri {
-					v        = {v1, v2, v3},
-					uv       = uvs,
-					material = mat,
-					sort_key = key,
+					v           = {v1, v2, v3},
+					uv          = uvs,
+					material    = mat,
+					material_id = id,
+					sort_key    = key,
 				})
 			}
 		}
@@ -1048,7 +1063,8 @@ threemf_build_mesh :: proc(
 		geo_id := geometry_add(b.geos, verts, indices)
 		append(&b.model.primitives, Model_Primitive {
 			geometry = geo_id,
-			material = run[0].material,
+			material    = run[0].material,
+			material_id = run[0].material_id,
 		})
 		prim_count += 1
 		run_start = run_end

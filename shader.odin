@@ -126,7 +126,7 @@ float shadowAt(vec3 worldPosition, vec3 worldNormal) {
 		return 1.0;
 	}
 	vec4 c = o3dShadowMatrix * vec4(worldPosition + normalize(worldNormal) * o3dShadowParams.z, 1.0);
-	if (c.w <= 0.0) {
+	if (c.w <= 1e-6) {
 		return 1.0;
 	}
 	float u = c.x / c.w * 0.5 + 0.5;
@@ -313,7 +313,7 @@ shaders_destroy :: proc(s: ^Shaders) {
 // draws with it are left out, by both renderers; the id is the shader's
 // either way, so a broken one never stands in as the standard material.
 shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: string) {
-	key := strings.concatenate({vertex, "\x00", fragment, "\x01" if glsl3 else "\x00"}, context.temp_allocator)
+	key := shader_key(vertex, fragment, glsl3)
 	if found, ok := s.keys[key]; ok {
 		return found, s.list[found - 1].errors
 	}
@@ -322,6 +322,22 @@ shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Sh
 	id = Shader_Id(len(s.list))
 	s.keys[strings.clone(key)] = id
 	return id, s.list[id - 1].errors
+}
+
+// The shader for these sources if `shader` has made it, compiled or not
+// (`errors` says why not), without making it: only reads `s`, so a host
+// may look up under a shared lock and make under an exclusive one.
+shader_find :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: string, found: bool) {
+	id, found = s.keys[shader_key(vertex, fragment, glsl3)]
+	if !found {
+		return 0, "", false
+	}
+	return id, s.list[id - 1].errors, true
+}
+
+@(private = "file")
+shader_key :: proc(vertex, fragment: string, glsl3: bool) -> string {
+	return strings.concatenate({vertex, "\x00", fragment, "\x01" if glsl3 else "\x00"}, context.temp_allocator)
 }
 
 // The compiled shader, or nil (no such id, or it failed).

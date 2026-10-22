@@ -163,7 +163,7 @@ shadow_side :: proc "contextless" (side: Side) -> Side {
 shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: Vec3) -> f32 {
 	p := world + normal * sh.normal_bias
 	c := sh.view_proj * Vec4{p.x, p.y, p.z, 1}
-	if c.w <= 0 {
+	if c.w <= 1e-6 {
 		return 1
 	}
 	inv_w := 1 / c.w

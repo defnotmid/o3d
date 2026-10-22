@@ -1088,6 +1088,12 @@ test_threemf_parse_and_draw :: proc(t: ^testing.T) {
 	testing.expect(t, abs(p0.material.color.r - 1.0) < 1e-4)
 	testing.expect(t, abs(p0.material.color.g - 0xcc / 255.0) < 1e-4)
 
+	// The <base> is a file material by its name; the colour group's are not.
+	gold := model_material(&m, "Gold")
+	testing.expect(t, gold != 0 && len(m.material_names) == 1, "the base material by name")
+	testing.expect_value(t, p0.material_id, gold)
+	testing.expect_value(t, m.primitives[1].material_id, Model_Material_Id(0))
+
 	// Second primitive uses colorgroup id=2 index=1 (#00FF0080 -> transparent).
 	p1 := m.primitives[1]
 	testing.expect(t, .Transparent in p1.material.flags)

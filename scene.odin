@@ -1407,8 +1407,9 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 			append(order, i)
 		}
 	}
-	depth :: proc(model, view: Mat4) -> f32 {
-		return (view * model * Vec4{0, 0, 0, 1}).z
+	// The view z of the model's origin: view's row 2 by its translation.
+	depth :: #force_inline proc "contextless" (model, view: Mat4) -> f32 {
+		return view[2, 0] * model[0, 3] + view[2, 1] * model[1, 3] + view[2, 2] * model[2, 3] + view[2, 3]
 	}
 	back := order[first:]
 	for i in 1 ..< len(back) {
@@ -1772,6 +1773,19 @@ toon_step :: #force_inline proc "contextless" (edge0, edge1, x: f32) -> f32 {
 	return t * t * (3 - 2 * t)
 }
 
+// What `shade` reads of a material at a point: its own, or as its maps
+// change it there.
+Surface :: struct {
+	base:      Vec3, // linear
+	metalness: f32,
+	roughness: f32,
+	flags:     Shading_Flags,
+}
+
+surface :: #force_inline proc "contextless" (m: ^Shading_Material) -> Surface {
+	return {m.base, m.metalness, m.roughness, m.flags}
+}
+
 // The colour (linear) leaving a point of `m` at `world` with normal `n`
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
 // specular with Smith correlated visibility and Schlick Fresnel) or
@@ -1779,7 +1793,7 @@ toon_step :: #force_inline proc "contextless" (edge0, edge1, x: f32) -> f32 {
 // direct lights plus ambient, hemisphere and equirectangular environment lighting.
 // `shadow` / `shadows` scale each shadow light's direct light (`shadow_factor`;
 // 1: lit); `ao` scales indirect light (ambient, hemisphere, environment).
-shade :: proc "contextless" (m: ^Shading_Material, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}) -> Vec3 {
+shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}) -> Vec3 {
 	base := m.base
 	if .Basic in m.flags {
 		return base
