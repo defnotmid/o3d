@@ -327,40 +327,85 @@ extrude_geometry :: proc(g: ^Geometries, shapes: []Shape, options := EXTRUDE_DEF
 	for shape in shapes {
 		extrude_shape(&x, shape, o)
 	}
-	clear(&g.scratch.vertices)
-	clear(&g.scratch.indices)
-	emit := proc(x: ^Extruder, g: ^Geometries, corner: Vertex) {
-		if i, ok := x.emitted[corner]; ok {
-			append(&g.scratch.indices, i)
-			return
-		}
-		i := u32(len(g.scratch.vertices))
-		x.emitted[corner] = i
-		append(&g.scratch.vertices, corner)
-		append(&g.scratch.indices, i)
-	}
-	for t in x.caps {
+	// Every triangle's corners, caps then sides, in order.
+	side_normals(&x, o.crease_angle)
+	cap_indices := len(x.caps) * 3
+	resize(&x.corners, cap_indices + len(x.sides) * 3)
+	resize(&x.corner_point, len(x.corners))
+	for t, ti in x.caps {
 		a, b, c := x.points[t[0]], x.points[t[1]], x.points[t[2]]
 		n := face_normal(a, b, c)
-		for p in ([3][3]f64{a, b, c}) {
-			emit(&x, g, {position = vec3(p), normal = n, uv = {f32(p.x), f32(p.y)}})
+		for p, k in ([3][3]f64{a, b, c}) {
+			x.corners[ti * 3 + k] = {position = vec3(p), normal = n, uv = {f32(p.x), f32(p.y)}}
+			x.corner_point[ti * 3 + k] = t[k]
 		}
 	}
-	cap_indices := len(g.scratch.indices)
-	side_normals(&x, o.crease_angle)
 	for t, ti in x.sides {
 		for k in 0 ..< 3 {
 			p := x.points[t.corners[k]]
 			uv := Vec2{f32(p.x if t.u_from_x else p.y), f32(1 - p.z)}
-			emit(&x, g, {position = vec3(p), normal = x.normals[ti * 3 + k], uv = uv})
+			x.corners[cap_indices + ti * 3 + k] = {position = vec3(p), normal = x.normals[ti * 3 + k], uv = uv}
+			x.corner_point[cap_indices + ti * 3 + k] = t.corners[k]
 		}
 	}
+	shared_vertices(&x, g)
 	whole := geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:])
 	return {
 		folded   = x.folded,
 		geometry = whole,
 		caps     = geometry_group(g, whole, 0, u32(cap_indices)),
 		sides    = geometry_group(g, whole, u32(cap_indices), u32(len(g.scratch.indices) - cap_indices)),
+	}
+}
+
+// The corners as vertices and indices in `g.scratch`, equal ones (as
+// values: -0 is 0) one vertex, numbered in the order they first come. Equal corners
+// share a point, so each is looked for among its point's earlier corners
+// only: the corners grouped by point (counted, prefix-summed, filled in
+// place order).
+@(private = "file")
+shared_vertices :: proc(x: ^Extruder, g: ^Geometries) {
+	n := len(x.corners)
+	corners := x.corners[:]
+	resize(&x.point_start, len(x.points) + 1)
+	slice.zero(x.point_start[:])
+	for p in x.corner_point {
+		x.point_start[p + 1] += 1
+	}
+	for i in 1 ..< len(x.point_start) {
+		x.point_start[i] += x.point_start[i - 1]
+	}
+	resize(&x.by_point, n)
+	resize(&x.first, n)
+	for p, i in x.corner_point {
+		x.by_point[x.point_start[p]] = u32(i)
+		x.point_start[p] += 1
+	}
+	// point_start[p] is now where p's span ends; it starts at p - 1's end.
+	for p in 0 ..< len(x.points) {
+		span := x.by_point[x.point_start[p - 1] if p > 0 else 0:x.point_start[p]]
+		for c, k in span {
+			x.first[c] = c
+			for e in span[:k] {
+				if x.first[e] == e && corners[c] == corners[e] {
+					x.first[c] = e
+					break
+				}
+			}
+		}
+	}
+	// Numbered in place order: a first corner takes the next number, the
+	// rest their first's (x.first then holds the numbers at first places).
+	table_grow_non_zero(&g.scratch.indices, n)
+	clear(&g.scratch.vertices)
+	for f, i in x.first {
+		if int(f) == i {
+			x.first[i] = u32(len(g.scratch.vertices))
+			append(&g.scratch.vertices, corners[i])
+			g.scratch.indices[i] = x.first[i]
+		} else {
+			g.scratch.indices[i] = x.first[f]
+		}
 	}
 }
 
@@ -396,12 +441,19 @@ vec3 :: #force_inline proc "contextless" (p: [3]f64) -> Vec3 {
 Shape_Points :: struct {
 	points: [dynamic][2]f64,
 	rings:  [dynamic]int,
+	// Scratch for `triangulate_rings`, kept across shapes: the holes'
+	// ranges and the ear clipper's nodes.
+	starts, ends: [dynamic]int,
+	nodes:        [dynamic]Ear_Node,
 }
 
 @(private = "file")
 shape_points_destroy :: proc(s: ^Shape_Points) {
 	delete(s.points)
 	delete(s.rings)
+	delete(s.starts)
+	delete(s.ends)
+	delete(s.nodes)
 }
 
 // Fills `s` from `shape`; false when its outline has fewer than 3 points.
@@ -452,18 +504,17 @@ ring_area :: proc "contextless" (r: [][2]f64) -> f64 {
 // the same rings moved).
 @(private = "file")
 triangulate_rings :: proc(s: ^Shape_Points, points: [][2]f64, triangles: ^[dynamic]u32) {
-	starts := make([]int, len(s.rings) - 1)
-	defer delete(starts)
-	ends := make([]int, len(s.rings) - 1)
-	defer delete(ends)
+	resize(&s.starts, len(s.rings) - 1)
+	resize(&s.ends, len(s.rings) - 1)
 	k := s.rings[0]
 	for l, h in s.rings[1:] {
-		starts[h], ends[h] = k, k + l
+		s.starts[h], s.ends[h] = k, k + l
 		k += l
 	}
-	e := Earcut{triangles = triangles}
-	defer delete(e.nodes)
-	earcut(&e, points, s.rings[0], starts, ends)
+	clear(&s.nodes)
+	e := Earcut{nodes = s.nodes, triangles = triangles}
+	earcut(&e, points, s.rings[0], s.starts[:], s.ends[:])
+	s.nodes = e.nodes // as it grew
 }
 
 // ExtrudeGeometry's mergeOverlappingPoints: drops points (wrapping around)
@@ -508,7 +559,14 @@ Extruder :: struct {
 	caps:    [dynamic][3]u32,
 	sides:   [dynamic]Side_Triangle,
 	normals: [dynamic]Vec3, // per side corner
-	emitted: map[Vertex]u32,
+	// The corners and their points, and scratch to share equal ones
+	// (`shared_vertices`): the corners by point (a span each) and each
+	// corner's first equal one.
+	corners:      [dynamic]Vertex,
+	corner_point: [dynamic]u32,
+	point_start:  [dynamic]u32,
+	by_point:     [dynamic]u32,
+	first:        [dynamic]u32,
 	shape:   Shape_Points,
 	moves:   [dynamic][2]f64,
 	ring:    [dynamic][2]f64,
@@ -519,6 +577,9 @@ Extruder :: struct {
 	segments: [dynamic]Segment,
 	crossed:  [dynamic]bool,
 	folds:    [dynamic]bool,
+	// Scratch per bevel ring: the points moved, and the contours crossing there.
+	moved:         [dynamic][2]f64,
+	moved_crossed: [dynamic]bool,
 }
 
 @(private = "file")
@@ -527,7 +588,11 @@ extruder_destroy :: proc(x: ^Extruder) {
 	delete(x.caps)
 	delete(x.sides)
 	delete(x.normals)
-	delete(x.emitted)
+	delete(x.corners)
+	delete(x.corner_point)
+	delete(x.point_start)
+	delete(x.by_point)
+	delete(x.first)
 	shape_points_destroy(&x.shape)
 	delete(x.moves)
 	delete(x.ring)
@@ -535,6 +600,8 @@ extruder_destroy :: proc(x: ^Extruder) {
 	delete(x.segments)
 	delete(x.crossed)
 	delete(x.folds)
+	delete(x.moved)
+	delete(x.moved_crossed)
 }
 
 // ExtrudeGeometry's addShape, without extrudePath.
@@ -641,10 +708,9 @@ folded_contours :: proc(x: ^Extruder, rings: []int, vertices, moves: [][2]f64, o
 	slice.fill(x.folds[:], false)
 	slice.fill(x.crossed[:], false)
 	crossings(x, rings, vertices, x.crossed[:])
-	moved := make([][2]f64, len(vertices))
-	defer delete(moved)
-	crossed := make([]bool, len(rings))
-	defer delete(crossed)
+	resize(&x.moved, len(vertices))
+	resize(&x.moved_crossed, len(rings))
+	moved, crossed := x.moved[:], x.moved_crossed[:]
 	for b in 0 ..= o.bevel_segments {
 		bs := f64(o.bevel_size) + f64(o.bevel_offset) // the walls' ring
 		if b < o.bevel_segments {

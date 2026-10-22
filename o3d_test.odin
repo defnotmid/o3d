@@ -2191,3 +2191,29 @@ test_background_color :: proc(t: ^testing.T) {
 	bg := at(frame(&s, &scene, &g, &textures, {1, 0, 0, 1}, false, sky), 0, 0)
 	testing.expectf(t, bg.a == 255 && bg.b > bg.r, "the texture covers the colour: %v", bg)
 }
+
+// software_render into the caller's pixels: the same bytes as into its
+// own, none of its own made, and a short buffer falls back to its own.
+@(test)
+test_software_render_out :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene)
+	scene.camera = {position = {0, 1, 4}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 20}
+	append(&scene.lights, Light{kind = .Directional, color = 1, intensity = 2, position = {1, 2, 3}})
+	append(&scene.draws, Draw{sphere(&g, 1), compose(), MATERIAL_DEFAULT})
+	W, H :: 40, 30
+	mine: [W * H * 4]u8
+	a: Software
+	defer software_destroy(&a)
+	px := software_render(&a, &scene, &g, nil, W, H, out = mine[:])
+	testing.expect(t, raw_data(px) == raw_data(mine[:]) && len(a.own) == 0, "drawn into the caller's, none of its own")
+	b: Software
+	defer software_destroy(&b)
+	own := software_render(&b, &scene, &g, nil, W, H)
+	testing.expect(t, slice.equal(own, mine[:]), "the same bytes as into its own")
+	short := software_render(&b, &scene, &g, nil, W, H, out = mine[:10])
+	testing.expect(t, raw_data(short) == raw_data(b.own), "a short buffer: its own")
+}

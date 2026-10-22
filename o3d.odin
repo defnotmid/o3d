@@ -124,11 +124,41 @@ normal_matrix :: proc "contextless" (model: Mat4) -> Mat4 {
 
 // ---- colour -----------------------------------------------------------------------------
 
-srgb_to_linear :: proc "contextless" (c: f32) -> f32 {
+// The sRGB transfer both ways, per pixel and texel: tables at 1/4096 steps
+// over 0..1 (nearest; within half an 8-bit step), the formula past them.
+SRGB_STEPS :: 4096
+
+@(private = "file")
+srgb_tables: struct {
+	to_linear, to_srgb: [SRGB_STEPS + 1]f32,
+}
+
+@(init, private = "file")
+make_srgb_tables :: proc "contextless" () {
+	for i in 0 ..= SRGB_STEPS {
+		c := f32(i) / SRGB_STEPS
+		srgb_tables.to_linear[i] = srgb_to_linear_exact(c)
+		srgb_tables.to_srgb[i] = linear_to_srgb_exact(c)
+	}
+}
+
+srgb_to_linear :: #force_inline proc "contextless" (c: f32) -> f32 {
+	if c >= 0 && c <= 1 {
+		return srgb_tables.to_linear[int(c * SRGB_STEPS + 0.5)]
+	}
+	return srgb_to_linear_exact(c)
+}
+
+linear_to_srgb :: #force_inline proc "contextless" (value: f32) -> f32 {
+	c := min(value, 1) if value > 0 else 0 // NaN: 0
+	return srgb_tables.to_srgb[int(c * SRGB_STEPS + 0.5)]
+}
+
+srgb_to_linear_exact :: proc "contextless" (c: f32) -> f32 {
 	return c / 12.92 if c <= 0.04045 else math.pow((c + 0.055) / 1.055, 2.4)
 }
 
-linear_to_srgb :: proc "contextless" (value: f32) -> f32 {
+linear_to_srgb_exact :: proc "contextless" (value: f32) -> f32 {
 	c := clamp(value, 0, 1)
 	return c * 12.92 if c <= 0.0031308 else 1.055 * math.pow(c, 1 / 2.4) - 0.055
 }

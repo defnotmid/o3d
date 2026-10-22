@@ -58,7 +58,8 @@ Software :: struct {
 	width, height: int,
 	color:         []u32, // per sample, RGBA8 sRGB premultiplied
 	depth:         []f32, // per sample, 1 near .. 0 far (reversed)
-	pixels:        []u8, // the resolved frame, RGBA8 premultiplied
+	pixels:        []u8, // the resolved frame, RGBA8 premultiplied: the caller's `out` or `own`
+	own:           []u8, // the frame when the caller gives none
 	// Scratch per frame (kept, with the chunks' and workers' arrays, to
 	// reuse).
 	order:         [dynamic]int,
@@ -98,7 +99,7 @@ Software_External :: struct {
 software_destroy :: proc(s: ^Software) {
 	delete(s.color)
 	delete(s.depth)
-	delete(s.pixels)
+	delete(s.own)
 	delete(s.order)
 	delete(s.materials)
 	shader_blocks_destroy(&s.blocks)
@@ -208,18 +209,27 @@ worker_destroy :: proc(w: ^Worker) {
 	delete(w.quads.shaded)
 }
 
-// Draws `scene` into `width x height` premultiplied RGBA8 (returned,
-// borrowed until the next render). `shaders` holds the ShaderMaterials'
-// shaders (nil: none); `textures` holds the material textures (nil: none).
-software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, width, height: int, pool: ^thread.Pool = nil, textures: ^Textures = nil) -> []u8 {
+// Draws `scene` into `width x height` premultiplied RGBA8, rows from the
+// top: into `out` when it holds them (the caller's image: no copy), else
+// into the renderer's own (returned, borrowed until the next render).
+// `shaders` holds the ShaderMaterials' shaders (nil: none); `textures`
+// holds the material textures (nil: none).
+software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, width, height: int, pool: ^thread.Pool = nil, textures: ^Textures = nil, out: []u8 = nil) -> []u8 {
 	if s.width != width || s.height != height {
 		delete(s.color)
 		delete(s.depth)
-		delete(s.pixels)
 		s.width, s.height = width, height
 		s.color = make([]u32, width * height * SAMPLES)
 		s.depth = make([]f32, width * height * SAMPLES)
-		s.pixels = make([]u8, width * height * 4)
+	}
+	if len(out) >= width * height * 4 {
+		s.pixels = out[:width * height * 4]
+	} else {
+		if len(s.own) != width * height * 4 {
+			delete(s.own)
+			s.own = make([]u8, width * height * 4)
+		}
+		s.pixels = s.own
 	}
 	view, proj := camera_matrices(scene.camera, width, height)
 	active := expand_draws(&s.expanded, scene, geos, view, proj, width, height)

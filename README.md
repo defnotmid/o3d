@@ -284,6 +284,7 @@ o3d_sdlgpu.record(&g, &job, out, cmd)      // later, in the host's command buffe
 // CPU: the same pixels, rows banded on the caller's thread pool
 sw: o3d.Software
 pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
+// or into the host's own image, with no copy: o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures, out = image_pixels)
 ```
 
 o3d imports oksl as `deps:oksl`, ovg's core-only curves package as
