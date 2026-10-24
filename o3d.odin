@@ -142,6 +142,44 @@ make_srgb_tables :: proc "contextless" () {
 	}
 }
 
+// AgX's two curves by table (linearly interpolated, within about 1e-8):
+// log2 of a mantissa in [1, 2), and x^2.2 on [0, 1].
+@(private = "file")
+agx_tables: struct {
+	log2_mantissa, pow22: [SRGB_STEPS + 1]f32,
+}
+
+@(init, private = "file")
+make_agx_tables :: proc "contextless" () {
+	for i in 0 ..= SRGB_STEPS {
+		t := f32(i) / SRGB_STEPS
+		agx_tables.log2_mantissa[i] = math.log2(1 + t)
+		agx_tables.pow22[i] = math.pow(t, 2.2)
+	}
+}
+
+@(private = "file")
+table_lerp :: #force_inline proc "contextless" (table: ^[SRGB_STEPS + 1]f32, t: f32) -> f32 {
+	i := min(int(t), SRGB_STEPS - 1)
+	return table[i] + (table[i + 1] - table[i]) * (t - f32(i))
+}
+
+// log2 of a normal positive float: its exponent and its mantissa's.
+@(private = "file")
+agx_log2 :: #force_inline proc "contextless" (x: f32) -> f32 {
+	bits := transmute(u32)x
+	mantissa := f32(bits & 0x7fffff) * (SRGB_STEPS / f32(1 << 23))
+	return f32(i32(bits >> 23) - 127) + table_lerp(&agx_tables.log2_mantissa, mantissa)
+}
+
+@(private = "file")
+agx_pow22 :: #force_inline proc "contextless" (x: f32) -> f32 {
+	if x > 1 {
+		return math.pow(x, 2.2)
+	}
+	return table_lerp(&agx_tables.pow22, max(x, 0) * SRGB_STEPS)
+}
+
 srgb_to_linear :: #force_inline proc "contextless" (c: f32) -> f32 {
 	if c >= 0 && c <= 1 {
 		return srgb_tables.to_linear[int(c * SRGB_STEPS + 0.5)]
@@ -236,7 +274,7 @@ tone_map :: proc "contextless" (c: Vec3, mode: Tone_Mapping, exposure: f32 = 1) 
 			0.11189821 * r2020.r + 0.07679942 * r2020.g + 0.81130237 * r2020.b,
 		}
 		inset = linalg.max(inset, Vec3{1e-10, 1e-10, 1e-10})
-		ev := Vec3{math.log2(inset.r), math.log2(inset.g), math.log2(inset.b)}
+		ev := Vec3{agx_log2(inset.r), agx_log2(inset.g), agx_log2(inset.b)}
 		x := linalg.clamp((ev - Vec3{-12.47393, -12.47393, -12.47393}) * (1.0 / 16.5), 0, 1)
 		x2 := x * x
 		x4 := x2 * x2
@@ -247,7 +285,7 @@ tone_map :: proc "contextless" (c: Vec3, mode: Tone_Mapping, exposure: f32 = 1) 
 			-0.14132976 * x.r - 0.11060664 * x.g + 1.25193641 * x.b,
 		}
 		outset = linalg.max(outset, Vec3{0, 0, 0})
-		lin2020 := Vec3{math.pow(outset.r, 2.2), math.pow(outset.g, 2.2), math.pow(outset.b, 2.2)}
+		lin2020 := Vec3{agx_pow22(outset.r), agx_pow22(outset.g), agx_pow22(outset.b)}
 		out709 := Vec3{
 			 1.6604910 * lin2020.r - 0.5876411 * lin2020.g - 0.0728499 * lin2020.b,
 			-0.1245505 * lin2020.r + 1.1328999 * lin2020.g - 0.0083494 * lin2020.b,

@@ -68,14 +68,18 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 		r += 1
 	}
 	for i in y0 * s.width ..< y1 * s.width {
-		acc: [4]u32
+		// Two channels a sum: red and blue, green and alpha (4 samples of
+		// 255 fit 16 bits).
+		rb, ga: u32
 		for k in 0 ..< SAMPLES {
 			c := s.color[i * SAMPLES + k]
-			acc += {c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, c >> 24}
+			rb += c & 0x00ff00ff
+			ga += (c >> 8) & 0x00ff00ff
 		}
-		for ch in 0 ..< 4 {
-			s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
-		}
+		s.pixels[i * 4 + 0] = u8(((rb & 0xffff) + SAMPLES / 2) / SAMPLES)
+		s.pixels[i * 4 + 1] = u8(((ga & 0xffff) + SAMPLES / 2) / SAMPLES)
+		s.pixels[i * 4 + 2] = u8(((rb >> 16) + SAMPLES / 2) / SAMPLES)
+		s.pixels[i * 4 + 3] = u8(((ga >> 16) + SAMPLES / 2) / SAMPLES)
 	}
 	if job.capture {
 		// The snapshot's level 0: the samples' light averaged, premultiplied
