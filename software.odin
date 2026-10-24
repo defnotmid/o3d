@@ -329,7 +329,8 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		s.capture, job.capture = true, true
 		run_pass(s, active, geos, &job, pool, draw_band, 0, snapshot)
 		s.capture, job.capture = false, false
-		texture_finish(&s.snapshot, &s.snapshot_tex)
+		// Mipmapped as the GPU's snapshot is (three.js's too).
+		texture_finish(&s.snapshot, &s.snapshot_tex, blit = true)
 		job.keep = true
 	}
 	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))

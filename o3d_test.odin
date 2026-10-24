@@ -2332,3 +2332,27 @@ test_ior_without_layers :: proc(t: ^testing.T) {
 	low, high := centre(&s, &scene, &g, 1.5), centre(&s, &scene, &g, 2.4)
 	testing.expectf(t, high > low + 10, "ior 2.4 %d, 1.5 %d", high, low)
 }
+
+// The transmission snapshot's mipmaps as the GPU's blit makes them: an odd
+// level spread over the whole level above (3 texels to 1: the middle one,
+// where a 2x2 box would average the first two), an even one boxed.
+@(test)
+test_snapshot_mips_blit :: proc(t: ^testing.T) {
+	textures: Textures
+	defer textures_destroy(&textures)
+	tex := texture_grow(&textures.hdr_texels, 3, 1)
+	tex.hdr = true
+	level := textures.hdr_texels[tex.mips[0]:][:3]
+	level[0], level[1], level[2] = {0, 0, 0, 1}, {1, 1, 1, 1}, {0, 0, 0, 1}
+	id := texture_finish(&textures, &tex, blit = true)
+	got, _ := texture_get(&textures, id)
+	testing.expect_value(t, f32(textures.hdr_texels[got.mips[1]].r), 1)
+
+	even := texture_grow(&textures.hdr_texels, 2, 1)
+	even.hdr = true
+	l0 := textures.hdr_texels[even.mips[0]:][:2]
+	l0[0], l0[1] = {0, 0, 0, 1}, {1, 1, 1, 1}
+	eid := texture_finish(&textures, &even, blit = true)
+	eg, _ := texture_get(&textures, eid)
+	testing.expect_value(t, f32(textures.hdr_texels[eg.mips[1]].r), 0.5)
+}

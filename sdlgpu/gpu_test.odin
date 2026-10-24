@@ -132,6 +132,8 @@ test_physical_match_software :: proc(t: ^testing.T) {expect_parity(t, "physical"
 test_transmission_match_software :: proc(t: ^testing.T) {expect_parity(t, "transmission")}
 @(test)
 test_layer_maps_match_software :: proc(t: ^testing.T) {expect_parity(t, "layer_maps")}
+@(test)
+test_transmission_mips_match_software :: proc(t: ^testing.T) {expect_parity(t, "transmission_mips")}
 
 // ShaderMaterials receiving shadows through shadowAt.
 @(test)

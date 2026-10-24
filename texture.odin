@@ -113,11 +113,13 @@ texture_grow :: proc(table: ^[dynamic]$T, width, height: int) -> Texture {
 
 // Downsamples level 0 of a grown texture into its mip chain and lists it.
 @(private)
-texture_finish :: proc(t: ^Textures, tex: ^Texture) -> Texture_Id {
+texture_finish :: proc(t: ^Textures, tex: ^Texture, blit := false) -> Texture_Id {
 	sw, sh := int(tex.width), int(tex.height)
 	for l in 1 ..< int(tex.levels) {
 		dw, dh := max(sw >> 1, 1), max(sh >> 1, 1)
-		if tex.hdr {
+		if tex.hdr && blit {
+			downsample_mip_hdr_blit(t.hdr_texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.hdr_texels[tex.mips[l]:][:dw * dh], dw, dh)
+		} else if tex.hdr {
 			downsample_mip_hdr(t.hdr_texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.hdr_texels[tex.mips[l]:][:dw * dh], dw, dh)
 		} else {
 			downsample_mip(t.texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.texels[tex.mips[l]:][:dw * dh], dw, dh)
@@ -222,6 +224,30 @@ downsample_mip_hdr :: proc "contextless" (src: [][4]f16, sw, sh: int, dst: [][4]
 			x0, x1 := min(x * 2, sw - 1), min(x * 2 + 1, sw - 1)
 			sum := linalg.array_cast(src[row0 + x0], f32) + linalg.array_cast(src[row0 + x1], f32) + linalg.array_cast(src[row1 + x0], f32) + linalg.array_cast(src[row1 + x1], f32)
 			dst[y * dw + x] = linalg.array_cast(sum * 0.25, f16)
+		}
+	}
+}
+
+// An HDR level downsampled as a GPU's linear blit does (SDL's
+// GenerateMipmaps): each texel bilinear at its centre scaled to the level
+// above, 8-bit subtexel weights; the 2x2 box for even sizes, odd ones
+// spread over the whole level rather than dropping its last row.
+@(private = "file")
+downsample_mip_hdr_blit :: proc "contextless" (src: [][4]f16, sw, sh: int, dst: [][4]f16, dw, dh: int) #no_bounds_check {
+	tap :: #force_inline proc "contextless" (d, sn, dn: int) -> (i0, i1: int, w: f32) {
+		p := (f32(d) + 0.5) * f32(sn) / f32(dn) - 0.5
+		f := math.floor(p)
+		w = math.round((p - f) * BILINEAR_SCALE) / BILINEAR_SCALE
+		i := int(f)
+		return clamp(i, 0, sn - 1), clamp(i + 1, 0, sn - 1), w
+	}
+	for y in 0 ..< dh {
+		y0, y1, wy := tap(y, sh, dh)
+		for x in 0 ..< dw {
+			x0, x1, wx := tap(x, sw, dw)
+			top := linalg.lerp(linalg.array_cast(src[y0 * sw + x0], f32), linalg.array_cast(src[y0 * sw + x1], f32), wx)
+			bottom := linalg.lerp(linalg.array_cast(src[y1 * sw + x0], f32), linalg.array_cast(src[y1 * sw + x1], f32), wx)
+			dst[y * dw + x] = linalg.array_cast(linalg.lerp(top, bottom, wy), f16)
 		}
 	}
 }

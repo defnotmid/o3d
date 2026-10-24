@@ -69,6 +69,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"physical", 240, 180, build_physical},
 	{"transmission", 240, 180, build_transmission},
 	{"layer_maps", 240, 180, build_layer_maps},
+	{"transmission_mips", 270, 170, build_transmission_mips},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -2198,6 +2199,39 @@ build_layer_maps :: proc(a: ^Parity_Assets) -> string {
 			m.sheen_color, m.sheen_color_map = {1, 0.6, 0.8}, cloth
 		}
 		append(&s.draws, o3d.Draw{sphere, o3d.compose({-1.35 + 0.9 * f32(k), 0.1, 0}), m})
+	}
+	return ""
+}
+
+// Rough glass over a checker at a size whose mips go odd (270 x 170: 135,
+// 85, 67 ..): the blurrier levels of the snapshot, made as the GPU's
+// mipmap blit makes them, land in the same place on both renderers.
+@(private = "file")
+build_transmission_mips :: proc(a: ^Parity_Assets) -> string {
+	S :: 64
+	px: [S * S * 4]u8
+	for y in 0 ..< S {
+		for x in 0 ..< S {
+			v: u8 = 230 if ((x / 8) + (y / 8)) % 2 == 0 else 70
+			i := (y * S + x) * 4
+			px[i], px[i + 1], px[i + 2], px[i + 3] = v, v, u8(int(v) * 3 / 4), 255
+		}
+	}
+	checker := o3d.texture_add(&a.textures, px[:], S, S)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0.3, 0.2, 3.2}, target = {0, 0, 0}, fov = 50, near = 0.1, far = 50}
+	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 3})
+	back := o3d.MATERIAL_DEFAULT
+	back.color_map, back.flags = checker, {.Basic}
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 5, 4), o3d.compose({0.4, 0.3, -1}), back})
+	sphere := o3d.sphere(&a.geos, 0.5, 48, 24)
+	roughness := [3]f32{0.25, 0.5, 0.8}
+	for k in 0 ..< 3 {
+		m := o3d.MATERIAL_DEFAULT
+		m.color, m.transmission = {1, 1, 1}, 1
+		m.roughness = roughness[k]
+		append(&s.draws, o3d.Draw{sphere, o3d.compose({-1.1 + 1.1 * f32(k), 0, 0}), m})
 	}
 	return ""
 }
