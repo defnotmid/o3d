@@ -166,8 +166,8 @@ Gltf_Material :: struct {
 	// KHR_materials_unlit.
 	unlit:                bool,
 	// KHR_materials_ior (1.5 without), _clearcoat, _sheen, _transmission
-	// and _volume factors (their textures are not read); an infinite
-	// attenuation distance is 0.
+	// and _volume: factors and textures (scale: the clear coat normal's);
+	// an infinite attenuation distance is 0.
 	ior:                  f32,
 	clearcoat:            f32,
 	clearcoat_roughness:  f32,
@@ -177,6 +177,13 @@ Gltf_Material :: struct {
 	thickness:            f32,
 	attenuation_color:    [3]f32,
 	attenuation_distance: f32,
+	clearcoat_texture:           Gltf_Texture_Ref,
+	clearcoat_roughness_texture: Gltf_Texture_Ref,
+	clearcoat_normal_texture:    Gltf_Texture_Ref,
+	sheen_color_texture:         Gltf_Texture_Ref,
+	sheen_roughness_texture:     Gltf_Texture_Ref,
+	transmission_texture:        Gltf_Texture_Ref,
+	thickness_texture:           Gltf_Texture_Ref,
 	// Into `strings`: the material's extensions o3d does not read.
 	unread_extensions:    Gltf_Range,
 }
@@ -1020,6 +1027,9 @@ parse_material :: proc(r: ^Gltf_Reader, o: json.Object, m: ^Gltf_Material) {
 	parse_texture_ref(r, o, "normalTexture", &m.normal_texture)
 	parse_texture_ref(r, o, "occlusionTexture", &m.occlusion_texture)
 	parse_texture_ref(r, o, "emissiveTexture", &m.emissive_texture)
+	for ref in ([]^Gltf_Texture_Ref{&m.clearcoat_texture, &m.clearcoat_roughness_texture, &m.clearcoat_normal_texture, &m.sheen_color_texture, &m.sheen_roughness_texture, &m.transmission_texture, &m.thickness_texture}) {
+		parse_texture_ref(r, nil, "", ref)
+	}
 	get_floats(r, o, "emissiveFactor", m.emissive[:])
 	if mode, ok := get_string(r, o, "alphaMode"); ok {
 		switch mode {
@@ -1048,16 +1058,23 @@ parse_material :: proc(r: ^Gltf_Reader, o: json.Object, m: ^Gltf_Material) {
 	if cc, ok := get_object(r, exts, "KHR_materials_clearcoat"); ok {
 		m.clearcoat = get_f32(r, cc, "clearcoatFactor", 0)
 		m.clearcoat_roughness = get_f32(r, cc, "clearcoatRoughnessFactor", 0)
+		parse_texture_ref(r, cc, "clearcoatTexture", &m.clearcoat_texture)
+		parse_texture_ref(r, cc, "clearcoatRoughnessTexture", &m.clearcoat_roughness_texture)
+		parse_texture_ref(r, cc, "clearcoatNormalTexture", &m.clearcoat_normal_texture)
 	}
 	if sh, ok := get_object(r, exts, "KHR_materials_sheen"); ok {
 		get_floats(r, sh, "sheenColorFactor", m.sheen_color[:])
 		m.sheen_roughness = get_f32(r, sh, "sheenRoughnessFactor", 0)
+		parse_texture_ref(r, sh, "sheenColorTexture", &m.sheen_color_texture)
+		parse_texture_ref(r, sh, "sheenRoughnessTexture", &m.sheen_roughness_texture)
 	}
 	if tr, ok := get_object(r, exts, "KHR_materials_transmission"); ok {
 		m.transmission = get_f32(r, tr, "transmissionFactor", 0)
+		parse_texture_ref(r, tr, "transmissionTexture", &m.transmission_texture)
 	}
 	if vol, ok := get_object(r, exts, "KHR_materials_volume"); ok {
 		m.thickness = get_f32(r, vol, "thicknessFactor", 0)
+		parse_texture_ref(r, vol, "thicknessTexture", &m.thickness_texture)
 		get_floats(r, vol, "attenuationColor", m.attenuation_color[:])
 		if d := get_f32(r, vol, "attenuationDistance", 0); d > 0 && d < math.F32_MAX {
 			m.attenuation_distance = d

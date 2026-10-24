@@ -118,13 +118,20 @@ Material_Flag :: enum u8 {
 Material_Flags :: bit_set[Material_Flag; u16]
 
 Texture_Slot :: enum u8 {
-	Color     = 0,
-	Normal    = 1,
-	Roughness = 2,
-	Emissive  = 3,
-	Metalness = 4,
-	Ao        = 5,
-	Alpha     = 6,
+	Color               = 0,
+	Normal              = 1,
+	Roughness           = 2,
+	Emissive            = 3,
+	Metalness           = 4,
+	Ao                  = 5,
+	Alpha               = 6,
+	Clearcoat           = 7,
+	Clearcoat_Roughness = 8,
+	Clearcoat_Normal    = 9,
+	Sheen_Color         = 10,
+	Sheen_Roughness     = 11,
+	Transmission        = 12,
+	Thickness           = 13,
 }
 
 // UV set (0 or 1) and KHR_texture_transform for a texture slot; zero is the
@@ -179,6 +186,9 @@ Material :: struct {
 	metalness_map:       Texture_Id, // its blue channel (metalnessMap; glTF packs both in one)
 	ao_map:              Texture_Id, // its red channel (three.js's aoMap; indirect light only)
 	alpha_map:           Texture_Id, // its green channel times opacity (three.js's alphaMap; with .Transparent or .Alpha_Mask)
+	// The normal map's tangent x and y scale (three.js's normalScale; 0:
+	// 1, a negative y for a map with green down).
+	normal_scale:        Vec2,
 	color_transform:     Texture_Transform,
 	normal_transform:    Texture_Transform,
 	roughness_transform: Texture_Transform,
@@ -205,6 +215,26 @@ Material :: struct {
 	clearcoat_roughness: f32,
 	sheen_color:         Vec3, // sRGB
 	sheen_roughness:     f32,
+	// The layers' maps, three.js's: clear coat in red and its roughness in
+	// green (times the factors), the coat's own normal map (and its scale,
+	// 0: 1; without it the coat follows the surface's normal, not
+	// `normal_map`), sheen colour in rgb (sRGB) and its roughness in alpha,
+	// transmission in red, thickness in green. Each with its transform.
+	clearcoat_map:                 Texture_Id,
+	clearcoat_roughness_map:       Texture_Id,
+	clearcoat_normal_map:          Texture_Id,
+	clearcoat_normal_scale:        Vec2,
+	sheen_color_map:               Texture_Id,
+	sheen_roughness_map:           Texture_Id,
+	transmission_map:              Texture_Id,
+	thickness_map:                 Texture_Id,
+	clearcoat_transform:           Texture_Transform,
+	clearcoat_roughness_transform: Texture_Transform,
+	clearcoat_normal_transform:    Texture_Transform,
+	sheen_color_transform:         Texture_Transform,
+	sheen_roughness_transform:     Texture_Transform,
+	transmission_transform:        Texture_Transform,
+	thickness_transform:           Texture_Transform,
 	// Transmission (KHR_materials_transmission, _volume): how much light
 	// passes through (0 to 1), seen through the surface as the frame drawn
 	// before it (the opaque draws), refracted by the ior through
@@ -1409,9 +1439,10 @@ depth_image :: proc "contextless" (c: Camera, depths: []f32, width, height: int,
 
 // The order to draw in: the draws that can be seen (with geometry, and a
 // compiled shader if they ask for one, the bounding sphere at least partly
-// in the view), the opaque ones as listed, the transmissive ones, then the
-// blended ones farthest from the camera first. `snapshot` is where the
-// frame drawn so far is kept for transmissive draws to see through: the
+// in the view), the opaque ones as listed, then the transmissive ones
+// (blended or not), then the other blended ones, each of those two
+// farthest from the camera first, as three.js orders them. `snapshot` is
+// where the frame is kept for the transmissive draws to see through: the
 // first transmissive one's place (len(order): none).
 draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, proj: Mat4, order: ^[dynamic]int, exp: ^Expanded_Draws = nil) -> (snapshot: int) {
 	clear(order)
@@ -1420,36 +1451,38 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	models := scene.draws.model[:n]
 	geometries := scene.draws.geometry[:n]
 	view_proj := proj * view
+	seen :: #force_inline proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, m: Material, i: int, geometries: []Geometry_Id, models: []Mat4, view_proj: Mat4, exp: ^Expanded_Draws) -> bool {
+		return (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp)
+	}
 	for m, i in materials {
-		if !blended(m) && !transmissive(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
+		if !blended(m) && !transmissive(m) && seen(scene, geos, shaders, m, i, geometries, models, view_proj, exp) {
 			append(order, i)
 		}
 	}
 	snapshot = len(order)
 	for m, i in materials {
-		if !blended(m) && transmissive(m) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
+		if transmissive(m) && seen(scene, geos, shaders, m, i, geometries, models, view_proj, exp) {
 			append(order, i)
 		}
 	}
 	first := len(order)
-	transmissive_blended := false
 	for m, i in materials {
-		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
+		if blended(m) && !transmissive(m) && seen(scene, geos, shaders, m, i, geometries, models, view_proj, exp) {
 			append(order, i)
-			transmissive_blended ||= transmissive(m)
 		}
 	}
-	if snapshot == first && !transmissive_blended {
+	if snapshot == first {
 		snapshot = len(order)
 	}
 	// The view z of the model's origin: view's row 2 by its translation.
 	depth :: #force_inline proc "contextless" (model, view: Mat4) -> f32 {
 		return view[2, 0] * model[0, 3] + view[2, 1] * model[1, 3] + view[2, 2] * model[2, 3] + view[2, 3]
 	}
-	back := order[first:]
-	for i in 1 ..< len(back) {
-		for j := i; j > 0 && depth(models[back[j]], view) < depth(models[back[j - 1]], view); j -= 1 {
-			back[j], back[j - 1] = back[j - 1], back[j]
+	for span in ([2][]int{order[min(snapshot, first):first], order[first:]}) {
+		for i in 1 ..< len(span) {
+			for j := i; j > 0 && depth(models[span[j]], view) < depth(models[span[j - 1]], view); j -= 1 {
+				span[j], span[j - 1] = span[j - 1], span[j]
+			}
 		}
 	}
 	return
@@ -1461,45 +1494,96 @@ transmissive :: #force_inline proc "contextless" (m: Material) -> bool {
 	return m.transmission > 0 && m.shader == 0 && m.mode != .Sprites && .Basic not_in m.flags && .Toon not_in m.flags && .Shadow_Only not_in m.flags
 }
 
-// Each transmissive draw's thickness in world units: its material's times
-// the mean of its model's axis scales (three.js scales the ray by each).
+// Each transmissive draw's model axis scales (three.js scales the
+// refracted ray by them).
 transmission_scale :: proc "contextless" (materials: []Shading_Material, models: []Mat4) {
 	for &m, i in materials {
 		if .Transmission in m.flags {
 			md := models[i]
-			sx := linalg.length(Vec3{md[0, 0], md[1, 0], md[2, 0]})
-			sy := linalg.length(Vec3{md[0, 1], md[1, 1], md[2, 1]})
-			sz := linalg.length(Vec3{md[0, 2], md[1, 2], md[2, 2]})
-			m.layers.thickness *= (sx + sy + sz) / 3
+			m.layers.scale = {
+				linalg.length(Vec3{md[0, 0], md[1, 0], md[2, 0]}),
+				linalg.length(Vec3{md[0, 1], md[1, 1], md[2, 1]}),
+				linalg.length(Vec3{md[0, 2], md[1, 2], md[2, 2]}),
+			}
 		}
 	}
 }
 
 // Where a transmissive point sees the frame behind it (three.js's
 // getIBLVolumeRefraction): the view refracted into the surface by the ior,
-// out `thickness` later, projected to the frame (uv, v up), and the level
-// to read there (the frame's mips, blurrier as it is rougher and refracts
-// more).
-refraction :: #force_inline proc "contextless" (world, n, eye: Vec3, roughness: f32, ly: ^Shading_Layers, view_proj: Mat4, width: int) -> (uv: Vec2, lod: f32) {
+// out the thickness later (each axis by the model's scale), projected to
+// the frame (uv, v up); the level to read there (blurrier as it is
+// rougher and refracts more), and how far the ray went (the absorption's
+// distance).
+refraction :: #force_inline proc "contextless" (world, n, eye: Vec3, roughness: f32, ly: ^Shading_Layers, view_proj: Mat4, width: int) -> (uv: Vec2, lod, distance: f32) {
 	v := linalg.normalize(eye - world)
 	ray := linalg.refract(-v, n, 1 / ly.ior)
 	if l := linalg.length(ray); l > 0 {
 		ray *= ly.thickness / l
 	}
+	ray *= ly.scale
 	c := view_proj * Vec4{world.x + ray.x, world.y + ray.y, world.z + ray.z, 1}
 	w := c.w if abs(c.w) > 1e-6 else 1e-6
 	uv = linalg.clamp(c.xy / w * 0.5 + 0.5, 0, 1)
 	lod = math.log2(f32(max(width, 1))) * clamp(roughness, 0.0525, 1) * clamp(ly.ior * 2 - 2, 0, 1)
-	return
+	return uv, lod, linalg.length(ray)
 }
 
-// The frame behind a transmissive point, from its snapshot's texel
-// (premultiplied sRGB): linear light, premultiplied, and its alpha.
-frame_behind :: #force_inline proc "contextless" (c: Vec4) -> Vec4 {
-	if c.a <= 0 {
+// The frame behind a transmissive point: the snapshot (texture 1 of `t`,
+// linear and premultiplied, not tone mapped) at `uv` (v up), clamped at
+// its edges, by three.js's textureBicubic: a cubic B-spline at mips
+// floor(lod) and floor(lod) + 1, four bilinear taps each, mixed by the
+// fraction.
+frame_behind :: proc "contextless" (t: ^Textures, uv: Vec2, lod: f32) -> Vec4 {
+	tex, ok := texture_get(t, 1)
+	if !ok || !tex.hdr {
 		return {}
 	}
-	return Vec4{srgb_to_linear(c.r / c.a), srgb_to_linear(c.g / c.a), srgb_to_linear(c.b / c.a), 1} * c.a
+	l := clamp(lod, 0, f32(tex.levels - 1))
+	f := math.floor(l)
+	c := frame_bicubic(t, &tex, int(f), uv)
+	if l > f {
+		c = linalg.lerp(c, frame_bicubic(t, &tex, int(f) + 1, uv), l - f)
+	}
+	return c
+}
+
+@(private = "file")
+frame_bicubic :: proc "contextless" (t: ^Textures, tex: ^Texture, level: int, uv: Vec2) -> Vec4 {
+	w, h := int(max(tex.width >> u32(level), 1)), int(max(tex.height >> u32(level), 1))
+	mip := t.hdr_texels[tex.mips[level]:][:w * h]
+	// In texels from the top left (row 0 is the frame's top).
+	st := Vec2{uv.x * f32(w), (1 - uv.y) * f32(h)} + 0.5
+	i := linalg.floor(st)
+	f := st - i
+	g0, g1, h0, h1 := cubic_weights(f)
+	// Each tap a bilinear read at texel coordinate q (centres at +0.5).
+	tap :: #force_inline proc "contextless" (mip: [][4]f16, w, h: int, q: Vec2) -> Vec4 {
+		p := q - 0.5
+		p0 := linalg.floor(p)
+		wt := linalg.array_cast(linalg.clamp(linalg.array_cast(linalg.round((p - p0) * f32(BILINEAR_SCALE)), i32), 0, BILINEAR_SCALE), f32) * (1.0 / BILINEAR_SCALE)
+		x0, y0 := int(p0.x), int(p0.y)
+		x1, y1 := clamp(x0 + 1, 0, w - 1), clamp(y0 + 1, 0, h - 1)
+		x0, y0 = clamp(x0, 0, w - 1), clamp(y0, 0, h - 1)
+		top := linalg.lerp(linalg.array_cast(mip[y0 * w + x0], f32), linalg.array_cast(mip[y0 * w + x1], f32), wt.x)
+		bottom := linalg.lerp(linalg.array_cast(mip[y1 * w + x0], f32), linalg.array_cast(mip[y1 * w + x1], f32), wt.x)
+		return linalg.lerp(top, bottom, wt.y)
+	}
+	return g0.y * (g0.x * tap(mip, w, h, i + {h0.x, h0.y} - 0.5) + g1.x * tap(mip, w, h, i + {h1.x, h0.y} - 0.5)) +
+		g1.y * (g0.x * tap(mip, w, h, i + {h0.x, h1.y} - 0.5) + g1.x * tap(mip, w, h, i + {h1.x, h1.y} - 0.5))
+}
+
+// The cubic B-spline's two amplitudes and offsets per axis (three.js's g0,
+// g1, h0, h1).
+@(private = "file")
+cubic_weights :: #force_inline proc "contextless" (a: Vec2) -> (g0, g1, h0, h1: Vec2) {
+	w0 := (1.0 / 6) * (a * (a * (-a + 3) - 3) + 1)
+	w1 := (1.0 / 6) * (a * a * (3 * a - 6) + 4)
+	w2 := (1.0 / 6) * (a * (a * (-3 * a + 3) + 3) + 1)
+	w3 := (1.0 / 6) * (a * a * a)
+	g0, g1 = w0 + w1, w2 + w3
+	h0, h1 = -1 + w1 / g0, 1 + w3 / g1
+	return
 }
 
 // Whether a sphere (world centre and radius) is at least partly inside the
@@ -1613,6 +1697,13 @@ background_clear :: proc "contextless" (scene: ^Scene) -> [4]u8 {
 	return {u8(math.round(c.r * c.a * 255)), u8(math.round(c.g * c.a * 255)), u8(math.round(c.b * c.a * 255)), u8(math.round(c.a * 255))}
 }
 
+// The clear in the transmission snapshot: the background colour's linear
+// light, premultiplied, and its alpha.
+background_clear_light :: proc "contextless" (scene: ^Scene) -> Vec4 {
+	c := linalg.clamp(scene.background_color, 0, 1)
+	return {srgb_to_linear(c.r) * c.a, srgb_to_linear(c.g) * c.a, srgb_to_linear(c.b) * c.a, c.a}
+}
+
 // The fog's near, far and density, defaults in place of unset ones.
 fog_terms :: #force_inline proc "contextless" (fog: Fog) -> (near, far, density: f32) {
 	if fog.far > fog.near {
@@ -1671,6 +1762,13 @@ Shading_Material :: struct {
 	metalness_map: Texture_Id,
 	ao_map:        Texture_Id,
 	alpha_map:     Texture_Id,
+	normal_scale:  Vec2,
+	// The layers' maps (0: none, its layer off, or past the textures
+	// bound); for the GPU, each map's texture (4 bits a Layer_Map: 0 none,
+	// else 1 + its index in layer_textures).
+	layer_maps:    [Layer_Map]Texture_Id,
+	layer_slots:   u32,
+	layer_textures: [LAYER_TEXTURES]Texture_Id,
 	shader:        Shader_Id, // 0: the standard material
 	shader_maps:   [SHADER_MAPS]Texture_Id,
 	// Triplanar (`.Triplanar`): repeats per unit and the weights' power.
@@ -1683,20 +1781,28 @@ Shading_Material :: struct {
 // flags are set.
 Shading_Layers :: struct {
 	f0:                  f32, // a dielectric's reflectance from the ior (0.04 at 1.5)
+	// The factors, times their maps at a point (`shade` clamps them as
+	// three.js does after the maps: the coat to 1, its roughness from
+	// 0.0525).
 	clearcoat:           f32,
 	clearcoat_roughness: f32,
-	sheen_roughness:     f32,
+	sheen_roughness:     f32, // clamped to 0.07 before its map, as three.js
 	sheen:               Vec3, // linear
+	coat_normal_scale:   Vec2,
 	transmission:        f32,
-	// World units (the material's times its draw's scale: `transmission_scale`).
+	// In the model's units; at a point, the refracted ray's length in the
+	// world's (`refraction`).
 	thickness:           f32,
+	// The draw's model's axis scales (`transmission_scale`).
+	scale:               Vec3,
 	ior:                 f32,
 	// Absorption per world unit (log of the attenuation colour over its
 	// distance; 0: none).
 	attenuation:         Vec3,
 }
 
-SHADING_LAYERS_NONE :: Shading_Layers{f0 = 0.04, ior = 1.5}
+SHADING_LAYERS_NONE :: Shading_Layers{f0 = 0.04, ior = 1.5, scale = 1}
+
 
 // Bit values are the shader's FLAG_* constants (o3d_test checks).
 Shading_Flag :: enum u8 {
@@ -1731,6 +1837,10 @@ Shading_Flag :: enum u8 {
 	Clearcoat,
 	Sheen,
 	Transmission,
+	// The layers' multiplying maps (`clearcoat_map` .. `thickness_map`) are
+	// read: those of the layers on (white without a map).
+	Layer_Maps,
+	Clearcoat_Normal_Map,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1746,7 +1856,26 @@ shadow_mask :: #force_inline proc "contextless" (m: ^Shading_Material) -> (maske
 	return masked, (m.uv_sets >> u32(slot)) & 1 != 0
 }
 
-TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map, .Ao_Map, .Alpha_Map}
+// The physical layers' maps (Material.clearcoat_map ..), as Texture_Slot
+// names them, and how many distinct textures a material's may use.
+Layer_Map :: enum u8 {
+	Clearcoat,
+	Clearcoat_Roughness,
+	Clearcoat_Normal,
+	Sheen_Color,
+	Sheen_Roughness,
+	Transmission,
+	Thickness,
+}
+
+LAYER_TEXTURES :: 2
+
+// A layer map's texture slot (its transform and uv set).
+layer_slot :: #force_inline proc "contextless" (r: Layer_Map) -> Texture_Slot {
+	return Texture_Slot(u8(Texture_Slot.Clearcoat) + u8(r))
+}
+
+TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map, .Ao_Map, .Alpha_Map, .Layer_Maps, .Clearcoat_Normal_Map}
 
 // 2x3 affine matrix in o3d's UV space (v = 1 at top) for KHR_texture_transform
 // (defined in glTF's top-left UV space, v_gltf = 1 - v_o3d).
@@ -1824,13 +1953,20 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			f += {.Alpha_Map}
 		}
 		tforms := [Texture_Slot]Texture_Transform{
-			.Color     = m.color_transform,
-			.Normal    = m.normal_transform,
-			.Roughness = m.roughness_transform,
-			.Emissive  = m.emissive_transform,
-			.Metalness = m.metalness_transform,
-			.Ao        = m.ao_transform,
-			.Alpha     = m.alpha_transform,
+			.Color               = m.color_transform,
+			.Normal              = m.normal_transform,
+			.Roughness           = m.roughness_transform,
+			.Emissive            = m.emissive_transform,
+			.Metalness           = m.metalness_transform,
+			.Ao                  = m.ao_transform,
+			.Alpha               = m.alpha_transform,
+			.Clearcoat           = m.clearcoat_transform,
+			.Clearcoat_Roughness = m.clearcoat_roughness_transform,
+			.Clearcoat_Normal    = m.clearcoat_normal_transform,
+			.Sheen_Color         = m.sheen_color_transform,
+			.Sheen_Roughness     = m.sheen_roughness_transform,
+			.Transmission        = m.transmission_transform,
+			.Thickness           = m.thickness_transform,
 		}
 		uv_sets: u32
 		uv_xforms: [Texture_Slot][2]Vec3
@@ -1849,11 +1985,12 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		layers := Shading_Layers {
 			f0                  = r * r,
 			clearcoat           = clamp(m.clearcoat, 0, 1),
-			clearcoat_roughness = clamp(m.clearcoat_roughness, 0.0525, 1),
+			clearcoat_roughness = clamp(m.clearcoat_roughness, 0, 1),
 			sheen_roughness     = clamp(m.sheen_roughness, 0.07, 1),
 			sheen               = linear(m.sheen_color),
 			transmission        = clamp(m.transmission, 0, 1),
 			thickness           = max(m.thickness, 0),
+			scale               = 1,
 			ior                 = ior,
 		}
 		if m.attenuation_distance > 0 {
@@ -1871,6 +2008,51 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 				f += {.Transmission}
 			}
 		}
+		// The layers' maps, of the layers on, in at most LAYER_TEXTURES
+		// distinct textures (the GPU binds that many): a map in another is
+		// dropped, on both renderers.
+		layer_map :: #force_inline proc(t: ^Textures, id: Texture_Id, on: bool) -> Texture_Id {
+			_, ok := texture_get(t, id)
+			return id if ok && on else 0
+		}
+		coat, sheen, trans := .Clearcoat in f, .Sheen in f, .Transmission in f
+		maps := [Layer_Map]Texture_Id {
+			.Clearcoat           = layer_map(textures, m.clearcoat_map, coat),
+			.Clearcoat_Roughness = layer_map(textures, m.clearcoat_roughness_map, coat),
+			.Clearcoat_Normal    = layer_map(textures, m.clearcoat_normal_map, coat),
+			.Sheen_Color         = layer_map(textures, m.sheen_color_map, sheen),
+			.Sheen_Roughness     = layer_map(textures, m.sheen_roughness_map, sheen),
+			.Transmission        = layer_map(textures, m.transmission_map, trans),
+			.Thickness           = layer_map(textures, m.thickness_map, trans),
+		}
+		layer_textures: [LAYER_TEXTURES]Texture_Id
+		layer_slots: u32
+		bound := 0
+		for &id, r in maps {
+			if id == 0 {
+				continue
+			}
+			k := 0
+			for k < bound && layer_textures[k] != id {
+				k += 1
+			}
+			if k == bound {
+				if bound == LAYER_TEXTURES {
+					id = 0
+					continue
+				}
+				layer_textures[k] = id
+				bound += 1
+			}
+			layer_slots |= u32(k + 1) << (4 * u32(r))
+			if r != .Clearcoat_Normal {
+				f += {.Layer_Maps}
+			}
+		}
+		if maps[.Clearcoat_Normal] != 0 {
+			f += {.Clearcoat_Normal_Map}
+		}
+		layers.coat_normal_scale = m.clearcoat_normal_scale if m.clearcoat_normal_scale != {} else 1
 		if .Shadow_Only in m.flags && m.shader == 0 {
 			f = (f - TEXTURE_FLAGS - {.Basic, .Toon, .Alpha_Mask, .Curves, .Vertex_Colors, .Clearcoat, .Sheen, .Transmission}) + {.Shadow_Only, .Receive_Shadow}
 		}
@@ -1893,6 +2075,10 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			metalness_map = m.metalness_map,
 			ao_map        = m.ao_map,
 			alpha_map     = m.alpha_map,
+			normal_scale  = m.normal_scale if m.normal_scale != {} else 1,
+			layer_maps    = maps,
+			layer_slots   = layer_slots,
+			layer_textures = layer_textures,
 			shader        = m.shader,
 			shader_maps   = m.shader_maps,
 			projection_scale     = m.projection_scale if m.projection_scale > 0 else 1,
@@ -1926,49 +2112,83 @@ surface :: #force_inline proc "contextless" (m: ^Shading_Material) -> Surface {
 // specular with Smith correlated visibility and Schlick Fresnel) or
 // MeshToonMaterial (`.Toon`: 3-band quantized cel-shading + stepped highlight),
 // direct lights plus ambient, hemisphere and equirectangular environment lighting,
-// with MeshPhysicalMaterial's layers (`layers`, nil: none; the dielectric
-// F0 from its ior, sheen and a clear coat over the rest).
+// plus `emissive`.
 // `shadow` / `shadows` scale each shadow light's direct light (`shadow_factor`;
 // 1: lit); `ao` scales indirect light (ambient, hemisphere, environment).
 //
-// Transmission (`.Transmission`) takes its share of the diffuse light; what
-// it lets through of the frame behind (`refraction`, `frame_behind`) is
-// returned in `through`: rgb the factor on that light (linear, added after
-// tone mapping, as the frame was), a how much of the frame's alpha shows.
-shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}, layers: ^Shading_Layers = nil, through: ^Vec4 = nil) -> Vec3 {
+// MeshPhysicalMaterial's layers (`layers`: the material's as its maps
+// change them at the point; nil: none), composed as three.js r181 does:
+// the dielectric F0 from the ior; transmission (`.Transmission`) mixing the
+// diffuse light toward the frame `behind` (linear, premultiplied:
+// `frame_behind` at `refraction`, whose distance is `layers.thickness`)
+// absorbed and less what the surface reflects, its alpha into `alpha`;
+// sheen, the rest scaled by 1 - 0.157 max(sheen); and a clear coat over
+// everything (emissive too), lit about its own normal `coat_n` (the
+// surface's before its normal map, or the coat's normal map's).
+shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}, emissive: Vec3 = {}, f0: f32 = 0.04) -> Vec3 {
+	_, out := shade_point(m, world, n_in, eye, lights, shadow, env, ao, shadows, emissive, nil, {}, {}, f0, false)
+	return out
+}
+
+// `shade` with the layers (any of .Clearcoat, .Sheen, .Transmission), and
+// transmission's alpha.
+shade_layered :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32, env: Shading_Environment, ao: f32, shadows: [MAX_SHADOWS]f32, emissive: Vec3, layers: ^Shading_Layers, coat_n: Vec3, behind: Vec4) -> (alpha: f32, out: Vec3) {
+	return shade_point(m, world, n_in, eye, lights, shadow, env, ao, shadows, emissive, layers, coat_n, behind, layers.f0, true)
+}
+
+LAYER_FLAGS :: Shading_Flags{.Clearcoat, .Sheen, .Transmission}
+
+// Both, one source: LAYERED compiles the layers in.
+@(private = "file")
+shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32, env: Shading_Environment, ao: f32, shadows: [MAX_SHADOWS]f32, emissive: Vec3, layers: ^Shading_Layers, coat_n: Vec3, behind: Vec4, dielectric_f0: f32, $LAYERED: bool) -> (alpha: f32, out: Vec3) {
 	base := m.base
+	alpha = 1
 	if .Basic in m.flags {
-		return base
+		return 1, base + emissive
 	}
-	none := SHADING_LAYERS_NONE
-	ly := layers if layers != nil else &none
 	n := n_in
 	v := linalg.normalize(eye - world)
 	if linalg.dot(n, v) < 0 && .Two_Sided in m.flags {
 		n = -n
 	}
 	diffuse := base * (1 - m.metalness)
-	f0 := linalg.lerp(Vec3(ly.f0), base, m.metalness)
+	when LAYERED {
+		ly := layers
+	}
+	f0 := linalg.lerp(Vec3(dielectric_f0), base, m.metalness)
 	roughness := clamp(m.roughness, 0.0525, 1)
-	alpha := roughness * roughness
+	alpha_r := roughness * roughness
 	nv := clamp(linalg.dot(n, v), 1e-4, 1)
-	out, sheen, coat: Vec3
-	pass: Vec4
-	if .Transmission in m.flags {
-		// The light through: the base colour absorbed over the thickness,
-		// less what the surface reflects.
-		t := diffuse * linalg.exp(ly.attenuation * ly.thickness)
-		pass.rgb = ly.transmission * (1 - env_brdf(f0, roughness, nv)) * t
-		pass.a = ly.transmission * (t.r + t.g + t.b) / 3
-		diffuse *= 1 - ly.transmission
+	when LAYERED {
+		coat := .Clearcoat in m.flags
+		cn := coat_n
+		cc, cr, cnv: f32
+		sheen, coat_l: Vec3
+	}
+	when LAYERED do if coat {
+		if linalg.dot(cn, v) < 0 && .Two_Sided in m.flags {
+			cn = -cn
+		}
+		cc = clamp(ly.clearcoat, 0, 1)
+		cr = clamp(ly.clearcoat_roughness, 0.0525, 1)
+		cnv = clamp(linalg.dot(cn, v), 1e-4, 1)
+	}
+	// Diffuse and specular apart only for transmission (it mixes the
+	// diffuse); one sum otherwise.
+	out_d: Vec3
+	when LAYERED {
+		spec_sum: Vec3
+		out_s := &spec_sum
+	} else {
+		out_s := &out_d
 	}
 	for &l in lights {
 		switch l.kind {
 		case .Ambient:
-			out += l.color * diffuse * (ao / math.PI)
+			out_d += l.color * diffuse * (ao / math.PI)
 		case .Hemisphere:
 			w := 0.5 * n.y + 0.5
-			out += linalg.lerp(l.ground, l.color, w) * diffuse * (ao / math.PI)
+			out_d += linalg.lerp(l.ground, l.color, w) * diffuse * (ao / math.PI)
 		case .Directional, .Point, .Spot:
 			ldir := l.vector
 			light := l.color
@@ -2006,8 +2226,16 @@ shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shadi
 					spec_s := toon_step(thresh - 0.02, thresh + 0.02, nh) * (1.0 - roughness) * 0.55
 					spec_term = linalg.lerp(Vec3{1, 1, 1}, base, m.metalness) * spec_s
 				}
-				out += light * (diffuse * (toon_nl / math.PI) + spec_term)
+				out_d += light * diffuse * (toon_nl / math.PI)
+				out_s^ += light * spec_term
 				continue
+			}
+			when LAYERED do if coat {
+				// The coat by its own normal, whatever the surface's.
+				if cnl := clamp(linalg.dot(cn, ldir), 0, 1); cnl > 0 {
+					ch := linalg.normalize(ldir + v)
+					coat_l += light * cnl * ggx(0.04, cr * cr, cnl, cnv, clamp(linalg.dot(cn, ch), 0, 1), clamp(linalg.dot(v, ch), 0, 1))
+				}
 			}
 			nl := clamp(linalg.dot(n, ldir), 0, 1)
 			if nl <= 0 {
@@ -2017,13 +2245,10 @@ shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shadi
 			h := linalg.normalize(ldir + v)
 			nh := clamp(linalg.dot(n, h), 0, 1)
 			vh := clamp(linalg.dot(v, h), 0, 1)
-			out += irradiance * (diffuse / math.PI + ggx(f0, alpha, nl, nv, nh, vh))
-			if .Sheen in m.flags {
+			out_d += irradiance * diffuse / math.PI
+			out_s^ += irradiance * ggx(f0, alpha_r, nl, nv, nh, vh)
+			when LAYERED do if .Sheen in m.flags {
 				sheen += irradiance * ly.sheen * (charlie(ly.sheen_roughness, nh) * neubelt(nv, nl))
-			}
-			if .Clearcoat in m.flags {
-				cr := ly.clearcoat_roughness
-				coat += irradiance * ggx(0.04, cr * cr, nl, nv, nh, vh)
 			}
 		}
 	}
@@ -2032,29 +2257,37 @@ shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shadi
 		irr := sample_lod_linear(env.textures, env.irradiance, equirect_uv(n), 0)
 		rad := sample_lod_linear(env.textures, env.radiance, equirect_uv(r), roughness * env.max_lod)
 		spec := env_brdf(f0, roughness, nv)
-		out += (ao * env.intensity) * (irr * diffuse * (1 - spec) + rad * spec)
-		if .Sheen in m.flags {
-			sheen += (ao * env.intensity) * irr * ly.sheen * ibl_sheen(ly.sheen_roughness, nv)
+		k := ao * env.intensity
+		out_d += k * irr * diffuse * (1 - spec)
+		out_s^ += k * rad * spec
+		when LAYERED do if .Sheen in m.flags {
+			sheen += k * irr * ly.sheen * ibl_sheen(ly.sheen_roughness, nv)
 		}
-		if .Clearcoat in m.flags {
-			cr := ly.clearcoat_roughness
-			coat += (ao * env.intensity) * sample_lod_linear(env.textures, env.radiance, equirect_uv(r), cr * env.max_lod) * env_brdf(0.04, cr, nv)
+		when LAYERED do if coat {
+			cr_dir := 2 * linalg.dot(cn, v) * cn - v
+			coat_l += k * sample_lod_linear(env.textures, env.radiance, equirect_uv(cr_dir), cr * env.max_lod) * env_brdf(0.04, cr, cnv)
 		}
 	}
-	if .Sheen in m.flags {
-		k := 1 - 0.157 * max(ly.sheen.r, ly.sheen.g, ly.sheen.b)
-		out = out * k + sheen
-		pass.rgb *= k
+	when LAYERED do if .Transmission in m.flags {
+		// The frame behind, absorbed over the ray and less what the surface
+		// reflects, takes transmission's share of the diffuse light.
+		t := diffuse * linalg.exp(ly.attenuation * ly.thickness)
+		through := (1 - env_brdf(f0, roughness, nv)) * t * behind.rgb
+		out_d = linalg.lerp(out_d, through, ly.transmission)
+		alpha = linalg.lerp(f32(1), 1 - (1 - behind.a) * (t.r + t.g + t.b) / 3, ly.transmission)
 	}
-	if .Clearcoat in m.flags {
-		k := 1 - ly.clearcoat * (0.04 + 0.96 * math.pow(1 - nv, 5))
-		out = out * k + coat * ly.clearcoat
-		pass.rgb *= k
+	when LAYERED {
+		out = out_d + spec_sum + emissive
+	} else {
+		out = out_d + emissive
 	}
-	if through != nil {
-		through^ = pass
+	when LAYERED do if .Sheen in m.flags {
+		out = out * (1 - 0.157 * max(ly.sheen.r, ly.sheen.g, ly.sheen.b)) + sheen
 	}
-	return out
+	when LAYERED do if coat {
+		out = out * (1 - cc * (0.04 + 0.96 * math.pow(1 - cnv, 5))) + coat_l * cc
+	}
+	return
 }
 
 // GGX specular (Schlick Fresnel to 1, Smith-GGX correlated visibility,

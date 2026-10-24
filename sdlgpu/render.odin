@@ -84,9 +84,17 @@ Job :: struct {
 	depth_buffer:         ^sdl.GPUTexture,
 	depth_size:           [2]u32,
 	order:                [dynamic]int,
-	// Where in `order` the frame is kept for the transmissive draws after
-	// it (len(order): none), and that snapshot (mipmapped, at its size).
+	// Where in `order` the transmissive draws start (len(order): none);
+	// the draws before it are drawn first into the snapshot (linear light,
+	// mipmapped, at the frame's size) with `snapshot_lighting`,
+	// `snapshot_bg` and `snapshot_clear`.
 	snapshot:             int,
+	snapshot_lighting:    Lighting_Uniforms,
+	snapshot_bg:          struct {
+		params: [4]f32,
+		flags:  [4]u32,
+	},
+	snapshot_clear:       [4]f32,
 	snapshot_tex:         ^sdl.GPUTexture,
 	snapshot_size:        [2]u32,
 	materials:            [dynamic]o3d.Shading_Material, // per draw
@@ -234,10 +242,13 @@ make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Mate
 		uv_sets      = m.uv_sets,
 		curve_table  = geo.sprite_table if geo.mode == .Sprites else geo.curve_table,
 		softness     = m.softness,
-		layers       = {m.layers.f0, m.layers.clearcoat, m.layers.clearcoat_roughness, m.layers.sheen_roughness},
-		sheen        = {m.layers.sheen.r, m.layers.sheen.g, m.layers.sheen.b, 0},
-		transmission = {m.layers.transmission, m.layers.thickness, m.layers.ior, 0},
-		attenuation  = {m.layers.attenuation.r, m.layers.attenuation.g, m.layers.attenuation.b, 0},
+		layers        = {m.layers.f0, m.layers.clearcoat, m.layers.clearcoat_roughness, m.layers.sheen_roughness},
+		sheen         = {m.layers.sheen.r, m.layers.sheen.g, m.layers.sheen.b, 0},
+		normal_scales = {m.normal_scale.x, m.normal_scale.y, m.layers.coat_normal_scale.x, m.layers.coat_normal_scale.y},
+		transmission  = {m.layers.transmission, m.layers.thickness, m.layers.ior, 0},
+		scale         = {m.layers.scale.x, m.layers.scale.y, m.layers.scale.z, 0},
+		attenuation   = {m.layers.attenuation.r, m.layers.attenuation.g, m.layers.attenuation.b, 0},
+		layer_info    = {m.layer_slots, 0, 0, 0},
 	}
 	for s, i in o3d.Texture_Slot {
 		t := m.uv_transforms[s]
@@ -543,13 +554,24 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 		}
 	}
 	job.snapshot = o3d.draw_order(active, geos, shaders, view, proj, &job.order, &job.expanded)
-	if job.snapshot < len(job.order) && !ensure_snapshot(g, job, width, height) {
-		return .Out_Of_Memory
+	if job.snapshot < len(job.order) {
+		if !ensure_snapshot(g, job, width, height) || !ensure_snapshot_pass(g) {
+			return .Out_Of_Memory
+		}
+		// The snapshot's pass: linear light out, the background not tone
+		// mapped, the clear's light.
+		job.snapshot_lighting = job.lighting
+		job.snapshot_lighting.env_flags.z = 1
+		job.snapshot_bg = {params = {bg_intensity, bg_lod, 0, 1}, flags = {job.bg_params.flags.x, 1, 0, 0}}
+		job.snapshot_clear = o3d.background_clear_light(scene)
 	}
-	for di in job.order {
+	for di, oi in job.order {
 		m := &job.materials[di]
 		if m.shader != 0 {
 			custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, o3d.blend_of(m))
+			if oi < job.snapshot {
+				custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, .Opaque, snapshot = true)
+			}
 		}
 	}
 
@@ -612,46 +634,58 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		m = job.shadow_maps[si] if si < job.shadow_count else g.dummy_shadow
 	}
 
-	// Into the targets' top-left width x height (they may be larger), then
-	// copied to `out`. With transmissive draws, in two passes: the frame
-	// before them is kept (resolved, mipmapped) for them to see through.
-	split := job.snapshot < len(job.order)
-	color := sdl.GPUColorTargetInfo{texture = g.color, clear_color = sdl.FColor(job.clear), load_op = .CLEAR, store_op = .STORE}
-	frame := g.color
-	if g.samples != ._1 {
-		color.store_op, color.resolve_texture = .RESOLVE_AND_STORE if split else .RESOLVE, g.resolved
-		frame = g.resolved
+	viewport :: proc(pass: ^sdl.GPURenderPass, width, height: u32) {
+		sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
+		sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})
 	}
-	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .STORE if split else .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
-	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
-	sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
-	sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})
-	if job.background != 0 {
-		sdl.BindGPUGraphicsPipeline(pass, g.bg_pipeline)
+	background :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCommandBuffer, pipeline: ^sdl.GPUGraphicsPipeline, params: rawptr) {
+		sdl.BindGPUGraphicsPipeline(pass, pipeline)
 		bg_binding := tex_binding(g, job.background, g.env_sampler)
 		sdl.BindGPUFragmentSamplers(pass, 0, &bg_binding, 1)
 		inv_vp := linalg.inverse(job.view_proj)
 		sdl.PushGPUVertexUniformData(cmd, 0, &inv_vp, size_of(inv_vp))
-		sdl.PushGPUFragmentUniformData(cmd, 0, &job.bg_params, size_of(job.bg_params))
+		sdl.PushGPUFragmentUniformData(cmd, 0, params, size_of(job.bg_params))
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	}
-	if split {
-		draw_list(g, job, pass, cmd, job.order[:job.snapshot], &shadow_maps)
+	if job.snapshot < len(job.order) {
+		// The opaque draws before the transmissive ones, in linear light,
+		// resolved, copied into the snapshot and mipmapped (three.js's
+		// transmission pass).
+		color := sdl.GPUColorTargetInfo{texture = g.snapshot_color, clear_color = sdl.FColor(job.snapshot_clear), load_op = .CLEAR, store_op = .STORE}
+		light := g.snapshot_color
+		if g.samples != ._1 {
+			color.store_op, color.resolve_texture = .RESOLVE, g.snapshot_resolved
+			light = g.snapshot_resolved
+		}
+		depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+		pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
+		viewport(pass, width, height)
+		if job.background != 0 {
+			background(g, job, pass, cmd, g.snapshot_bg_pipeline, &job.snapshot_bg)
+		}
+		draw_list(g, job, pass, cmd, job.order[:job.snapshot], &shadow_maps, true)
 		sdl.EndGPURenderPass(pass)
 		copy_pass := sdl.BeginGPUCopyPass(cmd)
-		sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = job.snapshot_tex}, width, height, 1, false)
+		sdl.CopyGPUTextureToTexture(copy_pass, {texture = light}, {texture = job.snapshot_tex}, width, height, 1, false)
 		sdl.EndGPUCopyPass(copy_pass)
 		sdl.GenerateMipmapsForGPUTexture(cmd, job.snapshot_tex)
-		color.load_op, depth.load_op = .LOAD, .LOAD
-		if g.samples != ._1 {
-			color.store_op = .RESOLVE
-		}
-		depth.store_op = .DONT_CARE
-		pass = sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
-		sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
-		sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})
 	}
-	draw_list(g, job, pass, cmd, job.order[job.snapshot if split else 0:], &shadow_maps)
+
+	// Into the targets' top-left width x height (they may be larger), then
+	// copied to `out`.
+	color := sdl.GPUColorTargetInfo{texture = g.color, clear_color = sdl.FColor(job.clear), load_op = .CLEAR, store_op = .STORE}
+	frame := g.color
+	if g.samples != ._1 {
+		color.store_op, color.resolve_texture = .RESOLVE, g.resolved
+		frame = g.resolved
+	}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
+	viewport(pass, width, height)
+	if job.background != 0 {
+		background(g, job, pass, cmd, g.bg_pipeline, &job.bg_params)
+	}
+	draw_list(g, job, pass, cmd, job.order[:], &shadow_maps, false)
 	sdl.EndGPURenderPass(pass)
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
 	sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = out}, width, height, 1, false)
@@ -659,12 +693,13 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	return nil
 }
 
-// The draws `order` (the job's) into the open main pass.
+// The draws `order` (the job's) into the open pass: the main one, or the
+// transmission snapshot's (`snapshot`: its pipelines and lighting).
 @(private = "file")
-draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCommandBuffer, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture) {
+draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCommandBuffer, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture, snapshot: bool) {
 	scene, geos, shaders := job.scene, job.geos, job.shaders
 	bound: ^sdl.GPUGraphicsPipeline
-	sdl.PushGPUFragmentUniformData(cmd, 1, &job.lighting, size_of(job.lighting))
+	sdl.PushGPUFragmentUniformData(cmd, 1, &job.snapshot_lighting if snapshot else &job.lighting, size_of(job.lighting))
 	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	bound_vb: ^sdl.GPUBuffer
 	bound_ib: ^sdl.GPUBuffer
@@ -690,7 +725,7 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 		m := &job.materials[di]
 		blend := o3d.blend_of(m)
 		if m.shader != 0 {
-			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend, make = false)
+			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend, make = false, snapshot = snapshot)
 			if p == nil {
 				continue
 			}
@@ -747,6 +782,16 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 		if sprite {
 			p = g.sprite_pipelines[d.material.side][blend]
 		}
+		if snapshot {
+			kind := Snapshot_Kind.Skinned if skinned else .Standard
+			if curved {
+				kind = .Curves
+			}
+			if sprite {
+				kind = .Sprite
+			}
+			p = g.snapshot_pipelines[kind][d.material.side]
+		}
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
 			bound = p
@@ -757,7 +802,7 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 		if sprite {
 			sdl.BindGPUFragmentStorageBuffers(pass, 0, &job.sprite_rows.buffer, 1)
 		}
-		samplers := [14]sdl.GPUTextureSamplerBinding {
+		samplers := [16]sdl.GPUTextureSamplerBinding {
 			tex_binding(g, m.color_map),
 			{texture = shadow_maps[0], sampler = g.shadow_sampler},
 			tex_binding(g, m.normal_map),
@@ -774,11 +819,14 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 			// Sprites: the frame's depth (soft particles); transmissive
 			// draws: the frame's snapshot.
 			{texture = job.depth_map if job.depth && job.depth_map != nil else g.dummy_shadow, sampler = g.shadow_sampler},
+			// The layers' two textures (white for none).
+			tex_binding(g, m.layer_textures[0]),
+			tex_binding(g, m.layer_textures[1]),
 		}
 		if !sprite {
-			samplers[13] = {texture = job.snapshot_tex if .Transmission in m.flags && job.snapshot_tex != nil else g.dummy_texture, sampler = g.frame_sampler}
+			samplers[13] = {texture = job.snapshot_tex if .Transmission in m.flags && job.snapshot_tex != nil && !snapshot else g.dummy_texture, sampler = g.frame_sampler}
 		}
-		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], 14)
+		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], 16)
 		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m, geo)

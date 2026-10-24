@@ -1170,6 +1170,8 @@ convert_material :: proc(doc: ^Gltf_Document, mi: i32, img_ids: []Texture_Id) ->
 	}
 	m.normal_map = tex_from_ref(doc, gm.normal_texture, img_ids)
 	m.normal_transform = ref_transform(gm.normal_texture)
+	// o3d's 0 is the default 1: glTF's 0 (flat) as nearly 0.
+	m.normal_scale = gm.normal_texture.scale if gm.normal_texture.scale != 0 else 1e-6
 	m.emissive_map = tex_from_ref(doc, gm.emissive_texture, img_ids)
 	m.emissive_transform = ref_transform(gm.emissive_texture)
 	m.ao_map = tex_from_ref(doc, gm.occlusion_texture, img_ids)
@@ -1186,6 +1188,21 @@ convert_material :: proc(doc: ^Gltf_Document, mi: i32, img_ids: []Texture_Id) ->
 	m.thickness = gm.thickness
 	m.attenuation_color = linear_to_srgb_vec3(Vec3(gm.attenuation_color))
 	m.attenuation_distance = gm.attenuation_distance
+	m.clearcoat_map = tex_from_ref(doc, gm.clearcoat_texture, img_ids)
+	m.clearcoat_transform = ref_transform(gm.clearcoat_texture)
+	m.clearcoat_roughness_map = tex_from_ref(doc, gm.clearcoat_roughness_texture, img_ids)
+	m.clearcoat_roughness_transform = ref_transform(gm.clearcoat_roughness_texture)
+	m.clearcoat_normal_map = tex_from_ref(doc, gm.clearcoat_normal_texture, img_ids)
+	m.clearcoat_normal_transform = ref_transform(gm.clearcoat_normal_texture)
+	m.clearcoat_normal_scale = gm.clearcoat_normal_texture.scale if gm.clearcoat_normal_texture.scale != 0 else 1e-6
+	m.sheen_color_map = tex_from_ref(doc, gm.sheen_color_texture, img_ids)
+	m.sheen_color_transform = ref_transform(gm.sheen_color_texture)
+	m.sheen_roughness_map = tex_from_ref(doc, gm.sheen_roughness_texture, img_ids)
+	m.sheen_roughness_transform = ref_transform(gm.sheen_roughness_texture)
+	m.transmission_map = tex_from_ref(doc, gm.transmission_texture, img_ids)
+	m.transmission_transform = ref_transform(gm.transmission_texture)
+	m.thickness_map = tex_from_ref(doc, gm.thickness_texture, img_ids)
+	m.thickness_transform = ref_transform(gm.thickness_texture)
 	if gm.double_sided {
 		m.side = .Double
 	}

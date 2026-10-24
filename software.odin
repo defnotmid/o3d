@@ -87,9 +87,14 @@ Software :: struct {
 	// The host's pixels for external textures (by id - 1), as the GPU's
 	// `texture_set_external` binds its textures: `software_set_external`.
 	externals:     [dynamic]Software_External,
-	// The frame drawn before its transmissive draws, with its mipmaps
-	// (texture 1), for them to see through.
+	// The frame drawn before its transmissive draws, linear (not tone
+	// mapped) with its mipmaps (texture 1), for them to see through: while
+	// that part is drawn (`capture`), each sample's light (RGB9E5) in
+	// `hdr`, resolved by each band into level 0 of `snapshot_tex`.
 	snapshot:      Textures,
+	snapshot_tex:  Texture,
+	hdr:           []u32,
+	capture:       bool,
 }
 
 // An external texture's pixels for the software renderer: RGBA8 (sRGB
@@ -104,6 +109,7 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.depth)
 	delete(s.own)
 	textures_destroy(&s.snapshot)
+	delete(s.hdr)
 	delete(s.order)
 	delete(s.materials)
 	shader_blocks_destroy(&s.blocks)
@@ -273,6 +279,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		bg_intensity  = bg_intensity,
 		bg_lod        = bg_lod,
 		clear         = transmute(u32)background_clear(active),
+		clear_light   = rgb9e5(background_clear_light(active).rgb),
 		eye           = active.camera.position,
 		shadows       = shadows,
 		shadow_count  = ns,
@@ -311,10 +318,18 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	if snapshot < len(s.order) {
 		// The frame so far, resolved and mipmapped, for the transmissive
 		// draws after it.
-		run_pass(s, active, geos, &job, pool, draw_band, 0, snapshot)
+		if len(s.hdr) != width * height * SAMPLES {
+			delete(s.hdr)
+			s.hdr = make([]u32, width * height * SAMPLES)
+		}
 		clear(&s.snapshot.list)
-		clear(&s.snapshot.texels)
-		texture_add(&s.snapshot, s.pixels, width, height)
+		clear(&s.snapshot.hdr_texels)
+		s.snapshot_tex = texture_grow(&s.snapshot.hdr_texels, width, height)
+		s.snapshot_tex.hdr = true
+		s.capture, job.capture = true, true
+		run_pass(s, active, geos, &job, pool, draw_band, 0, snapshot)
+		s.capture, job.capture = false, false
+		texture_finish(&s.snapshot, &s.snapshot_tex)
 		job.keep = true
 	}
 	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))
@@ -373,6 +388,7 @@ Frame_Job :: struct {
 	bg_intensity:  f32,
 	bg_lod:        f32,
 	clear:         u32, // a colour sample: background_clear
+	clear_light:   u32, // its snapshot sample (RGB9E5; alpha from `clear`)
 	inv_vp:        Mat4,
 	eye:           Vec3,
 	shadows:       [MAX_SHADOWS]Shadow,
@@ -393,6 +409,8 @@ Frame_Job :: struct {
 	bands:         int,
 	// Over what the pass before drew (no clear, no background).
 	keep:          bool,
+	// Keeping the linear light for the snapshot (`Software.capture`).
+	capture:       bool,
 }
 
 @(private = "file")

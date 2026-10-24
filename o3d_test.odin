@@ -2267,3 +2267,68 @@ test_transmission :: proc(t: ^testing.T) {
 	snapshot := draw_order(&scene, &g, nil, view, proj, &order)
 	testing.expectf(t, snapshot == 1 && len(order) == 2 && order[0] == 1 && order[1] == 0, "opaque first, then transmissive: %v at %d", order, snapshot)
 }
+
+// RGB9E5, the transmission snapshot's sample: within half a step of the
+// largest channel, zero and negatives to 0, the top clamped.
+@(test)
+test_rgb9e5 :: proc(t: ^testing.T) {
+	for c in ([]Vec3{{1, 0.5, 0.25}, {0.001, 0.002, 0.0005}, {300, 2, 0}, {0.18, 0.18, 0.18}, {12.5, 40, 3}}) {
+		got := rgb9e5_light(rgb9e5(c))
+		step := max(c.r, c.g, c.b) / 256
+		testing.expectf(t, abs(got.r - c.r) <= step && abs(got.g - c.g) <= step && abs(got.b - c.b) <= step, "%v -> %v", c, got)
+	}
+	testing.expect_value(t, rgb9e5({}), 0)
+	testing.expect_value(t, rgb9e5({-1, -2, -3}), 0)
+	testing.expect(t, rgb9e5_light(rgb9e5({1e9, 0, 0})).r <= 65408, "clamped")
+}
+
+// The layers' maps in at most LAYER_TEXTURES textures: a map sharing one
+// takes its slot, a map in a third texture is dropped; maps of a layer
+// that is off are not read.
+@(test)
+test_layer_map_slots :: proc(t: ^testing.T) {
+	textures: Textures
+	defer textures_destroy(&textures)
+	px := [4]u8{255, 255, 255, 255}
+	a := texture_add(&textures, px[:], 1, 1)
+	b := texture_add(&textures, px[:], 1, 1)
+	c := texture_add(&textures, px[:], 1, 1)
+	m := MATERIAL_DEFAULT
+	m.clearcoat, m.clearcoat_map, m.clearcoat_roughness_map, m.clearcoat_normal_map = 1, a, a, b
+	m.sheen_color, m.sheen_color_map = {1, 1, 1}, c
+	m.transmission_map = a // transmission off: not read
+	out: [dynamic]Shading_Material
+	defer delete(out)
+	shading_materials([]Material{m}, &out, &textures)
+	sm := out[0]
+	testing.expect(t, sm.layer_textures == {a, b}, "the first two distinct textures")
+	testing.expect(t, sm.layer_maps[.Clearcoat] == a && sm.layer_maps[.Clearcoat_Roughness] == a && sm.layer_maps[.Clearcoat_Normal] == b, "coat maps kept")
+	testing.expect(t, sm.layer_maps[.Sheen_Color] == 0 && sm.layer_maps[.Transmission] == 0, "a third texture and an off layer's map dropped")
+	testing.expect_value(t, sm.layer_slots, u32(1 | 1 << 4 | 2 << 8))
+	testing.expect(t, .Layer_Maps in sm.flags && .Clearcoat_Normal_Map in sm.flags, "flags")
+}
+
+// An ior alone (no clear coat, sheen or transmission) still sets a
+// dielectric's reflectance: a higher one reflects more at normal incidence.
+@(test)
+test_ior_without_layers :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+	W :: 16
+	centre :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, ior: f32) -> u8 {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, fov = 30, near = 0.1, far = 20}
+		append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 0, 5}})
+		m := MATERIAL_DEFAULT
+		m.color, m.roughness, m.ior = {0.05, 0.05, 0.05}, 0.2, ior
+		append(&scene.draws, Draw{plane(g, 2, 2), compose(), m})
+		px := software_render(s, scene, g, nil, W, W)
+		return px[(W / 2 * W + W / 2) * 4]
+	}
+	low, high := centre(&s, &scene, &g, 1.5), centre(&s, &scene, &g, 2.4)
+	testing.expectf(t, high > low + 10, "ior 2.4 %d, 1.5 %d", high, low)
+}

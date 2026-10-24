@@ -11,7 +11,7 @@ struct Background_VS {
 
 struct Background_FS {
     float4 params; // x = intensity, y = lod, z = tone_mapping, w = tone_exposure
-    uint4 flags; // x: the map is linear (HDR), not sRGB-encoded
+    uint4 flags; // x: the map is linear (HDR), not sRGB-encoded; y: drawing the transmission snapshot (linear out)
 };
 
 [[vk::binding(0, 1)]] ConstantBuffer<Background_VS> bg_vs : register(b0, space1);
@@ -43,6 +43,9 @@ float4 fs_main(VS_Out i) : SV_Target {
         bg = linear_rgb(bg);
     }
     bg *= bg_fs.params.x;
+    if (bg_fs.flags.y != 0u) {
+        return float4(bg, 1);
+    }
     bg = tone_map(bg, uint(bg_fs.params.z), bg_fs.params.w);
     return float4(linear_to_srgb(bg.r), linear_to_srgb(bg.g), linear_to_srgb(bg.b), 1);
 }

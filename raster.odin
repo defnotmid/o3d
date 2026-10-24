@@ -26,6 +26,11 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 			for &c in s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES] {
 				c = job.clear
 			}
+			if job.capture {
+				for &c in s.hdr[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES] {
+					c = job.clear_light
+				}
+			}
 		} else {
 			// The background first, as the GPU draws it: what is drawn then
 			// blends over it or adds to it.
@@ -45,6 +50,9 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 					c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
 					bg := pack(tone_map(c, job.tone_mapping, job.tone_exposure), 1)
 					slice.fill(s.color[(y * s.width + x) * SAMPLES:][:SAMPLES], bg)
+					if job.capture {
+						slice.fill(s.hdr[(y * s.width + x) * SAMPLES:][:SAMPLES], rgb9e5(c))
+					}
 				}
 			}
 		}
@@ -69,25 +77,89 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 			s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
 		}
 	}
-}
-
-// A transmissive point's colour (finished: tone mapped and fogged) with
-// the frame behind it added as `shade` lets it through, and its alpha: the
-// frame's where it shows (three.js's transmissionAlpha), the colour kept
-// premultiplied as the frame's was where that is under 1.
-@(private = "file")
-transmit :: #force_inline proc "contextless" (job: ^Frame_Job, lit: Vec3, alpha: f32, through: Vec4, world, n_in: Vec3, roughness: f32, ly: ^Shading_Layers) -> (Vec3, f32) {
-	n := n_in if linalg.dot(n_in, job.eye - world) >= 0 else -n_in
-	uv, lod := refraction(world, n, job.eye, roughness, ly, job.view_proj, job.width)
-	behind := frame_behind(sample_lod(&job.s.snapshot, 1, uv, lod))
-	c := lit + through.rgb * behind.rgb
-	a := 1 - through.a * (1 - behind.a)
-	if a < 1 {
-		for &ch in c {
-			ch = srgb_to_linear(min(linear_to_srgb(ch) / max(a, 1e-4), 1))
+	if job.capture {
+		// The snapshot's level 0: the samples' light averaged, premultiplied
+		// as the colour's alpha (the clear's light already is).
+		level := s.snapshot.hdr_texels[s.snapshot_tex.mips[0]:][:s.width * s.height]
+		for i in y0 * s.width ..< y1 * s.width {
+			light: Vec3
+			alpha: u32
+			for k in 0 ..< SAMPLES {
+				light += rgb9e5_light(s.hdr[i * SAMPLES + k])
+				alpha += s.color[i * SAMPLES + k] >> 24
+			}
+			light *= 1.0 / SAMPLES
+			level[i] = {f16(light.r), f16(light.g), f16(light.b), f16(f32(alpha) / (255 * SAMPLES))}
 		}
 	}
-	return c, alpha * a
+}
+
+// What a transmissive point sees behind it (`shade`'s `behind`), its
+// normal facing the eye as `shade` turns it; the layers' thickness becomes
+// the refracted ray's world length.
+@(private = "file")
+behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n_in: Vec3, roughness: f32, ly: ^Shading_Layers, two_sided: bool) -> Vec4 {
+	n := -n_in if two_sided && linalg.dot(n_in, job.eye - world) < 0 else n_in
+	uv, lod, distance := refraction(world, n, job.eye, roughness, ly, job.view_proj, job.width)
+	ly.thickness = distance
+	return frame_behind(&job.s.snapshot, uv, lod)
+}
+
+// A finished colour with transmission's alpha under 1 (the frame behind
+// showing): kept premultiplied as the frame's was, so `pack` multiplying
+// by the alpha gives back what three.js writes.
+@(private = "file")
+see_through :: #force_inline proc "contextless" (c: Vec3, a: f32) -> Vec3 {
+	if a >= 1 {
+		return c
+	}
+	out: Vec3
+	for ch, i in c {
+		out[i] = srgb_to_linear(min(linear_to_srgb(ch) / max(a, 1e-4), 1))
+	}
+	return out
+}
+
+// A colour's linear light for the snapshot, fogged and not tone mapped,
+// when the pass keeps one (else 0).
+@(private = "file")
+snapshot_light :: #force_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3) -> u32 {
+	if !job.capture {
+		return 0
+	}
+	return capture_light(job, lit, world)
+}
+
+// Out of line: the frame's shading loops stay as they were without it.
+@(private = "file")
+capture_light :: #force_no_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3) -> u32 {
+	return rgb9e5(finish_color(lit, world, job.eye, .None, 1, job.fog, job.fog_color))
+}
+
+// RGB9E5: three 9-bit mantissas with a shared 5-bit exponent, a sample's
+// linear light in 32 bits (0 to 65408).
+@(private)
+rgb9e5 :: proc "contextless" (c: Vec3) -> u32 {
+	MAX :: 65408.0
+	r, g, b := clamp(c.r, 0, MAX), clamp(c.g, 0, MAX), clamp(c.b, 0, MAX)
+	top := max(r, g, b)
+	if !(top > 0) {
+		return 0
+	}
+	e := max(int(math.floor(math.log2(top))), -16) + 16
+	scale := math.ldexp(f32(1), 24 - e)
+	if math.floor(top * scale + 0.5) >= 512 {
+		e += 1
+		scale *= 0.5
+	}
+	m := Vec3{math.floor(r * scale + 0.5), math.floor(g * scale + 0.5), math.floor(b * scale + 0.5)}
+	return u32(m.r) | u32(m.g) << 9 | u32(m.b) << 18 | u32(e) << 27
+}
+
+@(private)
+rgb9e5_light :: #force_inline proc "contextless" (v: u32) -> Vec3 {
+	scale := math.ldexp(f32(1), int(v >> 27) - 24)
+	return Vec3{f32(v & 511), f32((v >> 9) & 511), f32((v >> 18) & 511)} * scale
 }
 
 // A band of the shadow map: its rows cleared to the far plane (0), then each
@@ -260,14 +332,26 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 					shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 				}
 			}
-			through: Vec4
-			lit := shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, &m.layers, &through) + m.emissive
-			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			alpha := out_alpha
+			// The layers as they are, or (transmission) a copy taking the
+			// ray's length.
+			ly := &m.layers
+			local: Shading_Layers = ---
+			behind: Vec4
 			if .Transmission in m.flags {
-				lit, alpha = transmit(job, lit, alpha, through, p, n, m.roughness, &m.layers)
+				local = m.layers
+				ly = &local
+				behind = behind_of(job, p, n, m.roughness, ly, .Two_Sided in m.flags)
 			}
-			write_samples(s, dz, x, y, covered, pack(lit, alpha), blend_of(m))
+			a: f32 = 1
+			lit: Vec3
+			if m.flags & LAYER_FLAGS != {} {
+				a, lit = shade_layered(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, ly, n, behind)
+			} else {
+				lit = shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, m.layers.f0)
+			}
+			hdr := snapshot_light(job, lit, p)
+			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
+			write_samples(s, dz, x, y, covered, pack(see_through(lit, a), out_alpha * a), blend_of(m), hdr)
 		}
 	}
 }
@@ -304,13 +388,13 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 			}
 			lit := finish_color(m.base, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, dz, x, y, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m))
+			write_samples(s, dz, x, y, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m), 0)
 		}
 	}
 }
 
 @(private = "file")
-draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32, blend, receive: bool) {
+draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32, blend, receive: bool) {
 	s := job.s
 	dz := depth_plane(t, area)
 	coloured := .Vertex_Colors in m.flags
@@ -475,28 +559,46 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 						shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], worlds[l], n)
 					}
 				}
-				if .Normal_Map in m.flags {
-					if linalg.dot(n, job.eye - worlds[l]) < 0 && .Two_Sided in pm.flags {
-						n = -n
-					}
-					pm.flags -= {.Two_Sided}
-					if triplanar {
-						n = triplanar_normal(job, m, tl, frame, n)
-					} else {
-						dp_dx, dp_dy := quad_deriv(worlds, l)
-						n_uv, n_dx, n_dy := slot_uv(m, .Normal, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-						map_n := sample_map(job, m.normal_map, n_uv, n_dx, n_dy).rgb * 2 - 1
-						n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
+				// The layers' maps, and the coat's normal: the surface's
+				// before its normal map (facing the eye when two-sided), or
+				// the coat's normal map's.
+				ly := &m.layers
+				local: Shading_Layers = ---
+				if m.flags & {.Layer_Maps, .Transmission} != {} {
+					local = m.layers
+					ly = &local
+					if .Layer_Maps in m.flags {
+						read_layers(job, m, tl, ly, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
 					}
 				}
-				through: Vec4
-				lit := shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, &m.layers, &through) + emissive
-				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				alpha := opacity
+				if .Two_Sided in pm.flags && linalg.dot(n, job.eye - worlds[l]) < 0 {
+					n = -n
+				}
+				pm.flags -= {.Two_Sided}
+				coat_n := n
+				if .Normal_Map in m.flags || .Clearcoat_Normal_Map in m.flags {
+					dp_dx, dp_dy := quad_deriv(worlds, l)
+					if .Normal_Map in m.flags {
+						n = map_normal(job, m, tl, frame, .Normal, m.normal_map, m.normal_scale, n, dp_dx, dp_dy, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					}
+					if .Clearcoat_Normal_Map in m.flags {
+						coat_n = map_normal(job, m, tl, frame, .Clearcoat_Normal, m.layer_maps[.Clearcoat_Normal], ly.coat_normal_scale, coat_n, dp_dx, dp_dy, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					}
+				}
+				behind: Vec4
 				if .Transmission in m.flags {
-					lit, alpha = transmit(job, lit, alpha, through, worlds[l], n, pm.roughness, &m.layers)
+					behind = behind_of(job, worlds[l], n, pm.roughness, ly, false)
 				}
-				write_samples(s, dz, x, y, covered, pack(lit, alpha), blend_of(m))
+				a: f32 = 1
+				lit: Vec3
+				if m.flags & LAYER_FLAGS != {} {
+					a, lit = shade_layered(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, ly, coat_n, behind)
+				} else {
+					lit = shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, m.layers.f0)
+				}
+				hdr := snapshot_light(job, lit, worlds[l])
+				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
+				write_samples(s, dz, x, y, covered, pack(see_through(lit, a), opacity * a), blend_of(m), hdr)
 			}
 		}
 	}
@@ -554,16 +656,31 @@ read_projection :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shadin
 	return sample_map(job, id, uv, dx, dy)
 }
 
+// A normal map's normal (slot `slot`, its tangent x and y times `scale`)
+// about `n`: by the uv's tangent frame from screen derivatives, or
+// triplanar.
+@(private = "file")
+map_normal :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, frame: Projection_Frame, slot: Texture_Slot, id: Texture_Id, scale: Vec2, n, dp_dx, dp_dy: Vec3, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec3 {
+	if at != nil {
+		return triplanar_normal(job, m, at, frame, slot, id, scale, n)
+	}
+	uv, dx, dy := slot_uv(m, slot, uv0, uv1, d0x, d0y, d1x, d1y)
+	map_n := sample_map(job, id, uv, dx, dy).rgb * 2 - 1
+	map_n.xy *= scale
+	return perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n)
+}
+
 // A triplanar normal map's normal: each projection's tangent normal laid
 // on the surface normal's axes and blended by the weights (a whiteout
 // blend), in the projection's frame, then back in the world's.
 @(private = "file")
-triplanar_normal :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, frame: Projection_Frame, n: Vec3) -> Vec3 {
+triplanar_normal :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, frame: Projection_Frame, slot: Texture_Slot, id: Texture_Id, scale: Vec2, n: Vec3) -> Vec3 {
 	nl := linalg.normalize(frame.normal_to_local * n)
 	tn: [3]Vec3
 	for a in 0 ..< 3 {
 		if at.weights[a] > 0 {
-			tn[a] = read_projection(job, m, at, .Normal, m.normal_map, a).rgb * 2 - 1
+			tn[a] = read_projection(job, m, at, slot, id, a).rgb * 2 - 1
+			tn[a].xy *= scale
 		}
 	}
 	bx := Vec3{tn[0].x + nl.z, tn[0].y + nl.y, abs(tn[0].z) * nl.x}
@@ -572,6 +689,34 @@ triplanar_normal :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, a
 	w := at.weights
 	blended := bx.zyx * w.x + by.xzy * w.y + bz * w.z
 	return linalg.normalize(frame.normal_to_world * linalg.normalize(blended))
+}
+
+// The layers' multiplying maps at a lane, into `ly`: clear coat (red) and
+// its roughness (green), sheen colour (rgb, sRGB) and roughness (alpha),
+// transmission (red) and thickness (green).
+@(private = "file")
+read_layers :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, ly: ^Shading_Layers, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) {
+	read :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, r: Layer_Map, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec4 {
+		return read_map(job, m, at, layer_slot(r), m.layer_maps[r], uv0, uv1, d0x, d0y, d1x, d1y)
+	}
+	if m.layer_maps[.Clearcoat] != 0 {
+		ly.clearcoat *= read(job, m, at, .Clearcoat, uv0, uv1, d0x, d0y, d1x, d1y).r
+	}
+	if m.layer_maps[.Clearcoat_Roughness] != 0 {
+		ly.clearcoat_roughness *= read(job, m, at, .Clearcoat_Roughness, uv0, uv1, d0x, d0y, d1x, d1y).g
+	}
+	if m.layer_maps[.Sheen_Color] != 0 {
+		ly.sheen *= linear(read(job, m, at, .Sheen_Color, uv0, uv1, d0x, d0y, d1x, d1y).rgb)
+	}
+	if m.layer_maps[.Sheen_Roughness] != 0 {
+		ly.sheen_roughness *= read(job, m, at, .Sheen_Roughness, uv0, uv1, d0x, d0y, d1x, d1y).a
+	}
+	if m.layer_maps[.Transmission] != 0 {
+		ly.transmission *= read(job, m, at, .Transmission, uv0, uv1, d0x, d0y, d1x, d1y).r
+	}
+	if m.layer_maps[.Thickness] != 0 {
+		ly.thickness *= read(job, m, at, .Thickness, uv0, uv1, d0x, d0y, d1x, d1y).g
+	}
 }
 
 // The area of the pixel at shape coordinate `rc` the shape covers, the
@@ -728,7 +873,8 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		dz := depth_plane(t, edge(t.p[0].xy, t.p[1].xy, t.p[2].xy))
 		for l in q.shaded[qi] {
 			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
-			write_samples(s, dz, x, y, q.covered[qi][l], pack_raw(q.colours[qi * 4 + l], blend != .Opaque), blend)
+			c := q.colours[qi * 4 + l]
+			write_samples(s, dz, x, y, q.covered[qi][l], pack_raw(c, blend != .Opaque), blend, rgb9e5(c.rgb) if job.capture else 0)
 		}
 	}
 	return taken
@@ -790,7 +936,7 @@ coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (
 // replacing them (depth written), blended over them or added to them
 // (premultiplied colour added, alpha over; depth kept).
 @(private = "file")
-write_samples :: #force_inline proc "contextless" (s: ^Software, dz: Depth_Plane, x, y: int, covered: Sample_Mask, col: u32, blend: Blend) {
+write_samples :: #force_inline proc "contextless" (s: ^Software, dz: Depth_Plane, x, y: int, covered: Sample_Mask, col: u32, blend: Blend, hdr: u32) {
 	for k in covered {
 		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
 		i := (y * s.width + x) * SAMPLES + k
@@ -801,6 +947,9 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, dz: Depth_Plane
 		case .Opaque:
 			s.color[i] = col
 			s.depth[i] = z
+			if s.capture {
+				s.hdr[i] = hdr
+			}
 		case .Over:
 			s.color[i] = over(col, s.color[i])
 		case .Add:

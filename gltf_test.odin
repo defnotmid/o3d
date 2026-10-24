@@ -1440,4 +1440,24 @@ test_gltf_physical_materials :: proc(t: ^testing.T) {
 	defer delete(warnings)
 	warn_unread_extensions(&doc, &warnings)
 	testing.expect_value(t, len(warnings), 0)
+
+	// Their textures, with transforms and the coat normal's scale.
+	tex := `{"asset":{"version":"2.0"},"images":[{"uri":"a.png"},{"uri":"b.png"}],"textures":[{"source":0},{"source":1}],
+		"materials":[{"normalTexture":{"index":0,"scale":0.5},"extensions":{
+			"KHR_materials_clearcoat":{"clearcoatFactor":1,"clearcoatTexture":{"index":0},"clearcoatRoughnessTexture":{"index":0},"clearcoatNormalTexture":{"index":1,"scale":2}},
+			"KHR_materials_sheen":{"sheenColorFactor":[1,1,1],"sheenColorTexture":{"index":1,"texCoord":1},"sheenRoughnessTexture":{"index":1}},
+			"KHR_materials_transmission":{"transmissionFactor":1,"transmissionTexture":{"index":0,"extensions":{"KHR_texture_transform":{"scale":[2,2]}}}},
+			"KHR_materials_volume":{"thicknessFactor":1,"thicknessTexture":{"index":1}}}}]}`
+	doc2, err2 := gltf_read(transmute([]u8)tex)
+	defer gltf_document_destroy(&doc2)
+	testing.expect_value(t, err2, Gltf_Error.None)
+	if err2 != nil {
+		return
+	}
+	ids := []Texture_Id{10, 20}
+	mt := convert_material(&doc2, 0, ids)
+	testing.expect(t, mt.normal_scale == {0.5, 0.5} && mt.clearcoat_normal_scale == {2, 2}, "normal scales")
+	testing.expect(t, mt.clearcoat_map == 10 && mt.clearcoat_roughness_map == 10 && mt.clearcoat_normal_map == 20, "clear coat maps")
+	testing.expect(t, mt.sheen_color_map == 20 && mt.sheen_roughness_map == 20 && mt.sheen_color_transform.tex_coord == 1, "sheen maps")
+	testing.expect(t, mt.transmission_map == 10 && mt.transmission_transform.scale == {2, 2} && mt.thickness_map == 20, "transmission and thickness maps")
 }

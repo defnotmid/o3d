@@ -331,11 +331,18 @@ struct KernelContext_0
     }
 
 
-
-    float3 bg_2 = tone_map_0(bg_1 * float3(bg_fs_1->params_0.x) , uint(bg_fs_1->params_0.z), bg_fs_1->params_0.w);
+    float3 bg_2 = bg_1 * float3(bg_fs_1->params_0.x) ;
+    if((bg_fs_1->flags_0.y) != 0U)
+    {
 
 #line 46
-    pixelOutput_0 _S30 = { float4(linear_to_srgb_0(bg_2.x), linear_to_srgb_0(bg_2.y), linear_to_srgb_0(bg_2.z), 1.0f) };
-    return _S30;
+        pixelOutput_0 _S30 = { float4(bg_2, 1.0f) };
+        return _S30;
+    }
+    float3 bg_3 = tone_map_0(bg_2, uint(bg_fs_1->params_0.z), bg_fs_1->params_0.w);
+
+#line 49
+    pixelOutput_0 _S31 = { float4(linear_to_srgb_0(bg_3.x), linear_to_srgb_0(bg_3.y), linear_to_srgb_0(bg_3.z), 1.0f) };
+    return _S31;
 }
 

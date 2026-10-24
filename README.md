@@ -36,7 +36,7 @@ What is known about three.js carries over:
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
   `emissive`, `emissive_intensity`, `ao_map_intensity`, `opacity`,
   `alpha_cutoff`, `size`, `mode`, `side`, texture maps `color_map`,
-  `normal_map`, `roughness_map` (green), `metalness_map` (blue; glTF packs
+  `normal_map` (with `normal_scale`), `roughness_map` (green), `metalness_map` (blue; glTF packs
   both in one texture), `emissive_map`, `ao_map` (red, applied to indirect
   light only as three.js's `aoMap` does), `alpha_map` (green, times opacity,
   as three.js's `alphaMap`; with `.Transparent` or `.Alpha_Mask`, shadows
@@ -44,15 +44,29 @@ What is known about three.js carries over:
   (`offset`, `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`),
   and the booleans as a bit set: `flags = {.Transparent, .Alpha_Mask,
   .Flat_Shading, .No_Size_Attenuation}`) with MeshPhysicalMaterial's
-  layers: `ior` (a dielectric's reflectance), `clearcoat` and
-  `clearcoat_roughness` (a second GGX lobe over the rest), `sheen_color` and
+  layers, composed as three.js r181 does: `ior` (a dielectric's
+  reflectance), `clearcoat` and `clearcoat_roughness` (a second GGX lobe
+  over everything, emissive too, lit about the surface's normal before its
+  normal map, or `clearcoat_normal_map`'s), `sheen_color` and
   `sheen_roughness` (cloth's Charlie lobe), and `transmission` with
-  `thickness`, `attenuation_color` and `attenuation_distance` (glass:
-  the frame drawn before the transmissive draws, kept with its mipmaps, seen
-  through them refracted by the ior, blurred by roughness and absorbed over
-  the thickness; three.js's transmission pass, so they see the opaque draws
-  but not each other or the transparent ones, and over the empty background
-  they leave it see-through), ShadowMaterial (`.Shadow_Only`:
+  `thickness`, `attenuation_color` and `attenuation_distance` (glass: the
+  opaque draws are kept as a linear, untone-mapped snapshot with mipmaps,
+  seen through the glass refracted by the ior out the thickness (each axis
+  by the model's scale), read with three.js's bicubic filter, blurred by
+  roughness, absorbed over the ray and mixed into the diffuse light before
+  tone mapping; transmissive draws come after the opaque ones, farthest
+  first, and see neither each other, the back faces of double-sided ones,
+  nor transparent draws; over the empty background they leave it
+  see-through, where three.js shows half-white). Their maps, three.js's:
+  `clearcoat_map` (red), `clearcoat_roughness_map` (green),
+  `clearcoat_normal_map` (with `clearcoat_normal_scale`),
+  `sheen_color_map` (rgb, sRGB), `sheen_roughness_map` (alpha),
+  `transmission_map` (red), `thickness_map` (green), each with its
+  transform; a material's layer maps may use two distinct textures (the
+  GPU binds two; a map in a third is dropped on both renderers — none of
+  the 150 Khronos sample models uses more than two). A ShaderMaterial
+  behind glass is seen as it draws into the frame (its own tone mapping
+  included). ShadowMaterial (`.Shadow_Only`:
   only the shadows it receives, `color` at `opacity` times the light they
   take, blended over what is behind: shadows on a backdrop or a video
   without a visible ground), MeshBasicMaterial (`.Basic`),
@@ -368,8 +382,8 @@ includes ovg's `shaders/curves.slang` from there too.
   with `alphaCutoff` default 0.5, `BLEND`; `occlusionTexture` red channel +
   `strength`; `KHR_materials_unlit`; `KHR_materials_emissive_strength`;
   `KHR_texture_transform` `offset`, `rotation`, `scale` and `texCoord` 0 or
-  1 per texture reference; the factors of `KHR_materials_ior`,
-  `_clearcoat`, `_sheen`, `_transmission` and `_volume`, not their
+  1 per texture reference; `normalTexture.scale`; `KHR_materials_ior`,
+  `_clearcoat`, `_sheen`, `_transmission` and `_volume` with their
   textures) into `Material`, punctual lights
   (`KHR_lights_punctual`: directional, point, and spot lights with `color`,
   `intensity`, `range`, and cone angles `innerConeAngle` / `outerConeAngle`)
@@ -743,10 +757,8 @@ For models people download:
 1. **Compressed models and remaining glTF extensions:** decoders for Draco
    (`KHR_draco_mesh_compression`) and KTX2 / Basis textures
    (`KHR_texture_basisu`), which today fail cleanly with
-   `Gltf_Error.Unsupported_Extension` when required; the textures of the
-   physical extensions (clear coat, sheen, transmission and thickness maps;
-   their factors are read); and `KHR_materials_specular`, ignored when
-   listed in `extensionsUsed`.
+   `Gltf_Error.Unsupported_Extension` when required; and
+   `KHR_materials_specular`, ignored when listed in `extensionsUsed`.
 
 For typical three.js scenes:
 

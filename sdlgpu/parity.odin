@@ -68,6 +68,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"background_color", 240, 180, build_background_color},
 	{"physical", 240, 180, build_physical},
 	{"transmission", 240, 180, build_transmission},
+	{"layer_maps", 240, 180, build_layer_maps},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -2122,6 +2123,81 @@ build_transmission :: proc(a: ^Parity_Assets) -> string {
 			m.color, m.thickness, m.ior = {1, 0.85, 0.7}, 0.3, 1.33
 		}
 		append(&s.draws, o3d.Draw{sphere, o3d.compose({-1.35 + 0.9 * f32(k), 0.1 + (0.75 if k == 3 else 0), 0}), m})
+	}
+	return ""
+}
+
+// The layers' maps: a clear coat in stripes (red) with its roughness
+// (green) in the same texture and the coat's own normal map over a bumpy
+// base; sheen colour and roughness from one texture; transmission (red)
+// and thickness (green) from one texture over coloured boxes; and a third
+// distinct texture on one material, which both renderers drop.
+@(private = "file")
+build_layer_maps :: proc(a: ^Parity_Assets) -> string {
+	S :: 32
+	make_map :: proc(a: ^Parity_Assets, texel: proc(x, y: int) -> [4]u8) -> o3d.Texture_Id {
+		px: [S * S * 4]u8
+		for y in 0 ..< S {
+			for x in 0 ..< S {
+				c := texel(x, y)
+				copy(px[(y * S + x) * 4:][:4], c[:])
+			}
+		}
+		return o3d.texture_add(&a.textures, px[:], S, S)
+	}
+	stripes := make_map(a, proc(x, y: int) -> [4]u8 {return {255 if (x / 4) % 2 == 0 else 40, u8(y * 8), 0, 255}})
+	bumps := make_map(a, proc(x, y: int) -> [4]u8 {
+		fx, fy := math.sin(f32(x) * 0.8), math.sin(f32(y) * 0.8)
+		return {u8(128 + 90 * fx), u8(128 + 90 * fy), 230, 255}
+	})
+	ripples := make_map(a, proc(x, y: int) -> [4]u8 {
+		f := math.sin(f32(x + y) * 0.5)
+		return {u8(128 + 70 * f), 128, 240, 255}
+	})
+	cloth := make_map(a, proc(x, y: int) -> [4]u8 {return {u8(255 - x * 4), 140, u8(y * 8), u8(60 + (x ~ y) * 6)}})
+	glass := make_map(a, proc(x, y: int) -> [4]u8 {return {255 if (y / 8) % 2 == 0 else 90, u8(x * 8), 0, 255}})
+	sky := o3d.SKY_DEFAULT
+	sky.sun = {0.5, 0.35, 1}
+	id := o3d.sky_texture(&a.textures, sky, 256)
+	o3d.environment_prefilter(&a.textures, id)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0, 0.5, 4.2}, target = {0, 0.1, 0}, fov = 50, near = 0.1, far = 50}
+	s.environment = id
+	s.tone_mapping = .AgX
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.9}, intensity = 2, position = {2, 3.5, 3}})
+	box := o3d.box(&a.geos, 0.5, 1.6, 0.5)
+	colors := [3]o3d.Vec3{{0.9, 0.2, 0.1}, {0.1, 0.7, 0.2}, {0.1, 0.3, 0.9}}
+	for k in 0 ..< 3 {
+		m := o3d.MATERIAL_DEFAULT
+		m.color, m.roughness = colors[k], 0.6
+		append(&s.draws, o3d.Draw{box, o3d.compose({-0.4 + 0.6 * f32(k), 0.1, -1.4}), m})
+	}
+	sphere := o3d.sphere(&a.geos, 0.42, 48, 24)
+	for k in 0 ..< 4 {
+		m := o3d.MATERIAL_DEFAULT
+		switch k {
+		case 0:
+			m.color, m.roughness = {0.6, 0.05, 0.05}, 0.5
+			m.normal_map, m.normal_scale = bumps, {1.5, 1.5}
+			m.clearcoat, m.clearcoat_roughness = 1, 0.6
+			m.clearcoat_map, m.clearcoat_roughness_map = stripes, stripes
+			m.clearcoat_normal_map = ripples
+		case 1:
+			m.color, m.roughness = {0.05, 0.08, 0.25}, 0.9
+			m.sheen_color, m.sheen_roughness = {1, 1, 1}, 1
+			m.sheen_color_map, m.sheen_roughness_map = cloth, cloth
+		case 2:
+			m.color, m.roughness, m.transmission = {1, 1, 1}, 0.15, 1
+			m.thickness, m.attenuation_color, m.attenuation_distance = 0.8, {0.5, 0.8, 1}, 0.6
+			m.transmission_map, m.thickness_map = glass, glass
+		case 3:
+			// Three distinct textures: the third (sheen's) is dropped.
+			m.color, m.roughness = {0.2, 0.5, 0.2}, 0.7
+			m.clearcoat, m.clearcoat_map, m.clearcoat_normal_map = 0.8, stripes, ripples
+			m.sheen_color, m.sheen_color_map = {1, 0.6, 0.8}, cloth
+		}
+		append(&s.draws, o3d.Draw{sphere, o3d.compose({-1.35 + 0.9 * f32(k), 0.1, 0}), m})
 	}
 	return ""
 }

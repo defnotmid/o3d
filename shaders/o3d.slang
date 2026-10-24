@@ -51,6 +51,8 @@ static const uint FLAG_TRIPLANAR = 1048576;
 static const uint FLAG_CLEARCOAT = 2097152;
 static const uint FLAG_SHEEN = 4194304;
 static const uint FLAG_TRANSMISSION = 8388608;
+static const uint FLAG_LAYER_MAPS = 16777216;
+static const uint FLAG_CLEARCOAT_NORMAL_MAP = 33554432;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -59,6 +61,21 @@ static const uint SLOT_EMISSIVE = 3;
 static const uint SLOT_METALNESS = 4;
 static const uint SLOT_AO = 5;
 static const uint SLOT_ALPHA = 6;
+static const uint SLOT_CLEARCOAT = 7;
+static const uint SLOT_CLEARCOAT_ROUGHNESS = 8;
+static const uint SLOT_CLEARCOAT_NORMAL = 9;
+static const uint SLOT_SHEEN_COLOR = 10;
+static const uint SLOT_SHEEN_ROUGHNESS = 11;
+static const uint SLOT_TRANSMISSION = 12;
+static const uint SLOT_THICKNESS = 13;
+// o3d.Layer_Map: the layers' maps, in layer_info.x's 4-bit fields.
+static const uint LAYER_CLEARCOAT = 0;
+static const uint LAYER_CLEARCOAT_ROUGHNESS = 1;
+static const uint LAYER_CLEARCOAT_NORMAL = 2;
+static const uint LAYER_SHEEN_COLOR = 3;
+static const uint LAYER_SHEEN_ROUGHNESS = 4;
+static const uint LAYER_TRANSMISSION = 5;
+static const uint LAYER_THICKNESS = 6;
 
 struct Morph_Delta {
     float4 position;
@@ -89,7 +106,7 @@ struct Material {
     uint uv_sets;
     uint curve_table; // an exact shape's or glyph run's quad table, or a particle draw's first row
     float softness;   // particles: fade distance before the frame's depth
-    float4 uv_transforms[14];
+    float4 uv_transforms[28];
     // Triplanar (FLAG_TRIPLANAR): repeats per unit and the weights' power;
     // world positions to the projection's frame (3x4 rows) and normals to
     // it (rows of the model's transposed 3x3; back with to_local's
@@ -97,13 +114,19 @@ struct Material {
     float4 triplanar;
     float4 to_local[3];
     float4 normal_to_local[3];
-    // o3d.Shading_Layers: the dielectric F0, clear coat and its roughness,
-    // sheen roughness; sheen colour (linear).
+    // o3d.Shading_Layers: the dielectric F0, clear coat and its roughness
+    // (factors), sheen roughness; sheen colour (linear); the normal map's
+    // x and y scale and the coat normal map's; transmission, thickness (the
+    // model's units), ior; the model's axis scales; absorption per unit;
+    // x: each layer map's texture (4 bits an o3d.Layer_Map: 0 none, 1
+    // layerMap0, 2 layerMap1).
     float4 layers;
     float4 sheen;
-    // Transmission, thickness (world units), ior; absorption per unit.
+    float4 normal_scales;
     float4 transmission;
+    float4 scale;
     float4 attenuation;
+    uint4 layer_info;
 };
 
 // Shading_Light: color, ground linear times intensity (or spot axis + cos_inner/outer);
@@ -129,7 +152,8 @@ struct Lighting {
     float4 shadowParams[MAX_SHADOWS];
     float4 envParams;
     // x: the environment's maps are linear (HDR), not sRGB-encoded;
-    // y: the camera is orthographic.
+    // y: the camera is orthographic; z: drawing the transmission snapshot
+    // (linear light out, fogged, not tone mapped or encoded).
     uint4 envFlags;
     // The frame's width and height, the camera's near and far.
     float4 frameParams;
@@ -166,9 +190,12 @@ struct Joints_VS {
 [[vk::binding(12, 2)]] Sampler2D<float4> alphaMap : register(t12, space2);
 // The shadow pass's alpha map, after its colour map.
 [[vk::binding(1, 2)]] Sampler2D<float4> shadowAlphaMap : register(t1, space2) : register(s1, space2);
-// Transmissive draws: the frame drawn before them, mipmapped (premultiplied
-// sRGB), after the main pass's samplers.
-[[vk::binding(13, 2)]] Sampler2D<float4> transmissionMap : register(t13, space2) : register(s13, space2);
+// Transmissive draws: the frame before them (linear light, premultiplied,
+// mipmapped: three.js's transmissionSamplerMap); then the layers' two
+// textures (Material.layer_info).
+[[vk::binding(13, 2)]] Sampler2D<float4> frameMap : register(t13, space2) : register(s13, space2);
+[[vk::binding(14, 2)]] Sampler2D<float4> layerMap0 : register(t14, space2) : register(s14, space2);
+[[vk::binding(15, 2)]] Sampler2D<float4> layerMap1 : register(t15, space2) : register(s15, space2);
 // Particles: the frame's depth (soft particles) in its place, and the rows
 // after it (SPIR-V; on Metal after the uniform buffers, as curveWords).
 [[vk::binding(13, 2)]] Sampler2D<float> sceneDepth : register(t13, space2) : register(s13, space2);
@@ -178,12 +205,12 @@ struct SpriteRow {
     float4 color;
     float4 probe;
 };
-[[vk::binding(14, 2)]] StructuredBuffer<SpriteRow> spriteRows : register(t2, space2);
+[[vk::binding(16, 2)]] StructuredBuffer<SpriteRow> spriteRows : register(t2, space2);
 // Exact shapes' curves (Geometries.curve_words): after the samplers in
 // SPIR-V's set 2, after the uniform buffers on Metal (slang numbers the
 // buffer from the register; no DXIL for these entries): fs_curves' at
 // [[buffer(2)]], fs_shadow_curves' at [[buffer(1)]].
-[[vk::binding(14, 2)]] StructuredBuffer<uint> curveWords : register(t2, space2);
+[[vk::binding(16, 2)]] StructuredBuffer<uint> curveWords : register(t2, space2);
 [[vk::binding(2, 2)]] StructuredBuffer<uint> shadowCurveWords : register(t1, space2);
 
 struct VS_In {
@@ -429,34 +456,43 @@ float3 env_radiance(float3 r, float lod) {
     return lighting.envFlags.x == 0u ? linear_rgb(rad) : rad;
 }
 
-float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao, uint flags, out float4 through) {
+// What shade reads of the layers at a fragment: o3d.Shading_Layers as
+// the maps change it there (thickness: the refracted ray's world length).
+struct Layers {
+    float clearcoat;
+    float clearcoat_roughness;
+    float sheen_roughness;
+    float transmission;
+    float thickness;
+    float3 sheen;
+};
+
+// scene.odin's shade, with emissive, the layers, the coat's normal and the
+// frame behind; transmission's alpha out.
+float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao, uint flags, float3 emissive, Layers ly, float3 coat_n, float4 behind, out float alpha) {
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
-    float4 ly = material.layers;
-    float3 f0 = lerp(float3(ly.x), base, metalness);
+    float3 f0 = lerp(float3(material.layers.x), base, metalness);
     float roughness = clamp(roughness_in, 0.0525, 1);
-    float alpha = roughness * roughness;
+    float alpha_r = roughness * roughness;
     float nv = clamp(dot(n, v), 1e-4, 1);
-    float3 o = float3(0);
+    bool coat = (flags & FLAG_CLEARCOAT) != 0;
+    float cc = saturate(ly.clearcoat);
+    float cr = clamp(ly.clearcoat_roughness, 0.0525, 1);
+    float cnv = clamp(dot(coat_n, v), 1e-4, 1);
+    float3 out_d = float3(0);
+    float3 out_s = float3(0);
     float3 sheen = float3(0);
-    float3 coat = float3(0);
-    through = float4(0);
-    if ((flags & FLAG_TRANSMISSION) != 0) {
-        float4 tr = material.transmission;
-        float3 t = diffuse * exp(material.attenuation.rgb * tr.y);
-        through.rgb = tr.x * (1 - env_brdf(f0, roughness, nv)) * t;
-        through.a = tr.x * (t.r + t.g + t.b) / 3;
-        diffuse *= 1 - tr.x;
-    }
+    float3 coat_l = float3(0);
     for (int k = 0; k < lighting.count.x; k++) {
         Light l = lighting.lights[k];
         if (l.kind == LIGHT_AMBIENT) {
-            o += l.color.rgb * diffuse * (ao / PI);
+            out_d += l.color.rgb * diffuse * (ao / PI);
             continue;
         }
         if (l.kind == LIGHT_HEMISPHERE) {
             float w = 0.5 * n.y + 0.5;
-            o += lerp(l.ground.rgb, l.color.rgb, w) * diffuse * (ao / PI);
+            out_d += lerp(l.ground.rgb, l.color.rgb, w) * diffuse * (ao / PI);
             continue;
         }
         float3 ldir = l.vector.xyz;
@@ -493,8 +529,16 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
                 float spec_s = smoothstep(thresh - 0.02, thresh + 0.02, nh) * (1.0 - roughness) * 0.55;
                 spec_term = lerp(float3(1), base, metalness) * spec_s;
             }
-            o += light * (diffuse * (toon_nl / PI) + spec_term);
+            out_d += light * diffuse * (toon_nl / PI);
+            out_s += light * spec_term;
             continue;
+        }
+        if (coat) {
+            float cnl = saturate(dot(coat_n, ldir));
+            if (cnl > 0) {
+                float3 ch = normalize(ldir + v);
+                coat_l += light * cnl * ggx(float3(0.04), cr * cr, cnl, cnv, saturate(dot(coat_n, ch)), saturate(dot(v, ch)));
+            }
         }
         float nl = saturate(dot(n, ldir));
         if (nl <= 0) {
@@ -504,12 +548,10 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
         float3 h = normalize(ldir + v);
         float nh = saturate(dot(n, h));
         float vh = saturate(dot(v, h));
-        o += irradiance * (diffuse / PI + ggx(f0, alpha, nl, nv, nh, vh));
+        out_d += irradiance * diffuse / PI;
+        out_s += irradiance * ggx(f0, alpha_r, nl, nv, nh, vh);
         if ((flags & FLAG_SHEEN) != 0) {
-            sheen += irradiance * material.sheen.rgb * (charlie(ly.w, nh) * neubelt(nv, nl));
-        }
-        if ((flags & FLAG_CLEARCOAT) != 0) {
-            coat += irradiance * ggx(float3(0.04), ly.z * ly.z, nl, nv, nh, vh);
+            sheen += irradiance * ly.sheen * (charlie(ly.sheen_roughness, nh) * neubelt(nv, nl));
         }
     }
     if (lighting.envParams.x > 0) {
@@ -521,55 +563,94 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
         float3 rad = env_radiance(r, roughness * lighting.envParams.y);
         float3 spec = env_brdf(f0, roughness, nv);
         float k = ao * lighting.envParams.x;
-        o += k * (irr * diffuse * (1 - spec) + rad * spec);
+        out_d += k * irr * diffuse * (1 - spec);
+        out_s += k * rad * spec;
         if ((flags & FLAG_SHEEN) != 0) {
-            sheen += k * irr * material.sheen.rgb * ibl_sheen(ly.w, nv);
+            sheen += k * irr * ly.sheen * ibl_sheen(ly.sheen_roughness, nv);
         }
-        if ((flags & FLAG_CLEARCOAT) != 0) {
-            coat += k * env_radiance(r, ly.z * lighting.envParams.y) * env_brdf(float3(0.04), ly.z, nv);
+        if (coat) {
+            float3 cr_dir = 2 * dot(coat_n, v) * coat_n - v;
+            coat_l += k * env_radiance(cr_dir, cr * lighting.envParams.y) * env_brdf(float3(0.04), cr, cnv);
         }
     }
+    alpha = 1;
+    if ((flags & FLAG_TRANSMISSION) != 0) {
+        float3 t = diffuse * exp(material.attenuation.rgb * ly.thickness);
+        float3 through = (1 - env_brdf(f0, roughness, nv)) * t * behind.rgb;
+        out_d = lerp(out_d, through, ly.transmission);
+        alpha = lerp(1.0, 1 - (1 - behind.a) * (t.r + t.g + t.b) / 3, ly.transmission);
+    }
+    float3 o = out_d + out_s + emissive;
     if ((flags & FLAG_SHEEN) != 0) {
-        float3 sc = material.sheen.rgb;
-        float k = 1 - 0.157 * max(sc.r, max(sc.g, sc.b));
-        o = o * k + sheen;
-        through.rgb *= k;
+        o = o * (1 - 0.157 * max(ly.sheen.r, max(ly.sheen.g, ly.sheen.b))) + sheen;
     }
-    if ((flags & FLAG_CLEARCOAT) != 0) {
-        float k = 1 - ly.y * (0.04 + 0.96 * pow(1 - nv, 5));
-        o = o * k + coat * ly.y;
-        through.rgb *= k;
+    if (coat) {
+        o = o * (1 - cc * (0.04 + 0.96 * pow(1 - cnv, 5))) + coat_l * cc;
     }
     return o;
 }
 
-// scene.odin's refraction and frame_behind, raster.odin's transmit: the
-// finished colour with the frame behind added, and its alpha.
-float4 transmit(float3 c, float a, float4 through, float3 world, float3 n_in, float roughness) {
+// scene.odin's refraction: where a transmissive fragment sees the frame
+// behind it (uv, v up) and the level there; the ray's world length.
+float2 refraction(float3 world, float3 n, float roughness, float thickness, out float lod, out float distance) {
     float3 v = normalize(lighting.eye.xyz - world);
-    float3 n = dot(n_in, v) >= 0 ? n_in : -n_in;
-    float4 tr = material.transmission;
-    float3 ray = refract(-v, n, 1 / tr.z);
+    float ior = material.transmission.z;
+    float3 ray = refract(-v, n, 1 / ior);
     float rl = length(ray);
     if (rl > 0) {
-        ray *= tr.y / rl;
+        ray *= thickness / rl;
     }
+    ray *= material.scale.xyz;
     float4 cp = mul(lighting.viewProj, float4(world + ray, 1));
     float w = abs(cp.w) > 1e-6 ? cp.w : 1e-6;
-    float2 uv = saturate(cp.xy / w * 0.5 + 0.5);
-    float lod = log2(max(lighting.frameParams.x, 1)) * clamp(roughness, 0.0525, 1) * saturate(tr.z * 2 - 2);
-    float4 s = transmissionMap.SampleLevel(float2(uv.x, 1 - uv.y), lod);
-    float4 behind = float4(0);
-    if (s.a > 0) {
-        behind = float4(linear_rgb(s.rgb / s.a), 1) * s.a;
+    lod = log2(max(lighting.frameParams.x, 1)) * clamp(roughness, 0.0525, 1) * saturate(ior * 2 - 2);
+    distance = length(ray);
+    return saturate(cp.xy / w * 0.5 + 0.5);
+}
+
+// scene.odin's frame_behind: the snapshot by three.js's textureBicubic
+// (a cubic B-spline at two mips, four bilinear taps each).
+float4 frame_bicubic(float2 uv, uint level) {
+    float2 size = max(floor(lighting.frameParams.xy / float(1u << level)), float2(1));
+    float2 st = float2(uv.x, 1 - uv.y) * size + 0.5;
+    float2 i = floor(st);
+    float2 a = st - i;
+    float2 w0 = (1.0 / 6) * (a * (a * (-a + 3) - 3) + 1);
+    float2 w1 = (1.0 / 6) * (a * a * (3 * a - 6) + 4);
+    float2 w2 = (1.0 / 6) * (a * (a * (-3 * a + 3) + 3) + 1);
+    float2 w3 = (1.0 / 6) * (a * a * a);
+    float2 g0 = w0 + w1;
+    float2 g1 = w2 + w3;
+    float2 h0 = -1 + w1 / g0;
+    float2 h1 = 1 + w3 / g1;
+    float lod = float(level);
+    float4 t00 = frameMap.SampleLevel((i + float2(h0.x, h0.y) - 0.5) / size, lod);
+    float4 t10 = frameMap.SampleLevel((i + float2(h1.x, h0.y) - 0.5) / size, lod);
+    float4 t01 = frameMap.SampleLevel((i + float2(h0.x, h1.y) - 0.5) / size, lod);
+    float4 t11 = frameMap.SampleLevel((i + float2(h1.x, h1.y) - 0.5) / size, lod);
+    return g0.y * (g0.x * t00 + g1.x * t10) + g1.y * (g0.x * t01 + g1.x * t11);
+}
+
+float4 frame_behind(float2 uv, float lod) {
+    float2 size = lighting.frameParams.xy;
+    float top = floor(log2(max(size.x, size.y)));
+    float l = clamp(lod, 0, top);
+    float f = floor(l);
+    float4 c = frame_bicubic(uv, uint(f));
+    if (l > f) {
+        c = lerp(c, frame_bicubic(uv, uint(f) + 1), l - f);
     }
-    float3 o = c + through.rgb * behind.rgb;
-    float ta = 1 - through.a * (1 - behind.a);
-    if (ta < 1) {
-        float3 e = float3(linear_to_srgb(o.r), linear_to_srgb(o.g), linear_to_srgb(o.b));
-        o = linear_rgb(min(e / max(ta, 1e-4), float3(1)));
+    return c;
+}
+
+// raster.odin's see_through: a finished colour with transmission's alpha
+// under 1, kept premultiplied as the frame's was.
+float3 see_through(float3 c, float a) {
+    if (a >= 1) {
+        return c;
     }
-    return float4(o, a * ta);
+    float3 e = float3(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b));
+    return linear_rgb(min(e / max(a, 1e-4), float3(1)));
 }
 
 // The standard material's colour at a fragment (premultiplied sRGB), as
@@ -624,12 +705,13 @@ float4 read_map(Sampler2D<float4> tex, uint slot, LaneUv at) {
 
 // A triplanar normal map's normal (o3d's triplanar_normal): a whiteout
 // blend in the projection's frame, then back in the world's.
-float3 triplanar_normal(LaneUv at, float3 n) {
+float3 triplanar_normal(Sampler2D<float4> tex, uint slot, float2 scale, LaneUv at, float3 n) {
     float3 nl = normalize(float3(dot(material.normal_to_local[0].xyz, n), dot(material.normal_to_local[1].xyz, n), dot(material.normal_to_local[2].xyz, n)));
     float3 tn[3] = { float3(0), float3(0), float3(0) };
     for (uint a = 0; a < 3; a++) {
         if (at.weights[a] > 0) {
-            tn[a] = read_projection(normalMap, SLOT_NORMAL, at, a).rgb * 2 - 1;
+            tn[a] = read_projection(tex, slot, at, a).rgb * 2 - 1;
+            tn[a].xy *= scale;
         }
     }
     float3 bx = float3(tn[0].x + nl.z, tn[0].y + nl.y, abs(tn[0].z) * nl.x);
@@ -639,8 +721,38 @@ float3 triplanar_normal(LaneUv at, float3 n) {
     return normalize(material.to_local[0].xyz * b.x + material.to_local[1].xyz * b.y + material.to_local[2].xyz * b.z);
 }
 
-// TRANSMIT: whether the entry reads transmissionMap (fs_sprite has its
-// depth there instead).
+// raster.odin's map_normal: a normal map's normal (its tangent x and y
+// times `scale`) about n.
+float3 map_normal(Sampler2D<float4> tex, uint slot, float2 scale, LaneUv at, float3 n, float3 dp_dx, float3 dp_dy) {
+    if (at.triplanar) {
+        return triplanar_normal(tex, slot, scale, at, n);
+    }
+    float2 uv, dx, dy;
+    slot_uv(slot, at.uv, at.uv1, at.d0x, at.d0y, at.d1x, at.d1y, uv, dx, dy);
+    float3 map_n = sample_map(tex, uv, dx, dy).rgb * 2 - 1;
+    map_n.xy *= scale;
+    return perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n);
+}
+
+// A layer map's texel (white without one): in layerMap0 or layerMap1 as
+// layer_info.x says.
+uint layer_texture(uint map) {
+    return (material.layer_info.x >> (4 * map)) & 15u;
+}
+
+float4 read_layer(uint map, LaneUv at) {
+    uint t = layer_texture(map);
+    if (t == 1u) {
+        return read_map(layerMap0, SLOT_CLEARCOAT + map, at);
+    }
+    if (t == 2u) {
+        return read_map(layerMap1, SLOT_CLEARCOAT + map, at);
+    }
+    return float4(1);
+}
+
+// TRANSMIT: whether the entry reads frameMap (fs_sprite has its depth
+// there instead).
 float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
@@ -685,10 +797,12 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
             a = 1;
         }
     }
+    float3 emissive = material.emissive.rgb;
+    if ((flags & FLAG_EMISSIVE_MAP) != 0) {
+        emissive *= linear_rgb(read_map(emissiveMap, SLOT_EMISSIVE, at).rgb);
+    }
     float3 c;
-    float4 through = float4(0);
-    float3 trans_n = float3(0, 0, 1);
-    float trans_roughness = 1;
+    float ta = 1;
     if ((flags & FLAG_SHADOW_ONLY) != 0) {
         // Only the light its shadows take: 1 minus their factors' product.
         float3 sn = normalize(i.normal);
@@ -699,7 +813,7 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
         a *= 1 - mask;
         c = base;
     } else if ((flags & FLAG_BASIC) != 0) {
-        c = base;
+        c = base + emissive;
     } else {
         float roughness = material.roughness;
         if ((flags & FLAG_ROUGHNESS_MAP) != 0) {
@@ -712,6 +826,21 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
         float ao = 1;
         if ((flags & FLAG_AO_MAP) != 0) {
             ao = (read_map(aoMap, SLOT_AO, at).r - 1) * material.ao_intensity + 1;
+        }
+        Layers ly;
+        ly.clearcoat = material.layers.y;
+        ly.clearcoat_roughness = material.layers.z;
+        ly.sheen_roughness = material.layers.w;
+        ly.sheen = material.sheen.rgb;
+        ly.transmission = material.transmission.x;
+        ly.thickness = material.transmission.y;
+        if ((flags & FLAG_LAYER_MAPS) != 0) {
+            ly.clearcoat *= read_layer(LAYER_CLEARCOAT, at).r;
+            ly.clearcoat_roughness *= read_layer(LAYER_CLEARCOAT_ROUGHNESS, at).g;
+            ly.sheen *= linear_rgb(read_layer(LAYER_SHEEN_COLOR, at).rgb);
+            ly.sheen_roughness *= read_layer(LAYER_SHEEN_ROUGHNESS, at).a;
+            ly.transmission *= read_layer(LAYER_TRANSMISSION, at).r;
+            ly.thickness *= read_layer(LAYER_THICKNESS, at).g;
         }
         float3 n = normalize(i.normal);
         if ((flags & FLAG_FLAT_SHADING) != 0) {
@@ -730,42 +859,47 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
         if ((flags & FLAG_TWO_SIDED) != 0 && !front) {
             n = -n;
         }
+        // The coat's normal: the surface's before its normal map, or the
+        // coat's normal map's.
+        float3 coat_n = n;
         if ((flags & FLAG_NORMAL_MAP) != 0) {
-            if (at.triplanar) {
-                n = triplanar_normal(at, n);
-            } else {
-                float2 uv, dx, dy;
-                slot_uv(SLOT_NORMAL, i.uv, i.uv1, d0x, d0y, d1x, d1y, uv, dx, dy);
-                float3 map_n = sample_map(normalMap, uv, dx, dy).rgb * 2 - 1;
-                n = perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n);
+            n = map_normal(normalMap, SLOT_NORMAL, material.normal_scales.xy, at, n, dp_dx, dp_dy);
+        }
+        if ((flags & FLAG_CLEARCOAT_NORMAL_MAP) != 0) {
+            uint t = layer_texture(LAYER_CLEARCOAT_NORMAL);
+            if (t == 1u) {
+                coat_n = map_normal(layerMap0, SLOT_CLEARCOAT_NORMAL, material.normal_scales.zw, at, coat_n, dp_dx, dp_dy);
+            } else if (t == 2u) {
+                coat_n = map_normal(layerMap1, SLOT_CLEARCOAT_NORMAL, material.normal_scales.zw, at, coat_n, dp_dx, dp_dy);
             }
         }
-        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags, through);
-        trans_n = n;
-        trans_roughness = roughness;
+        float4 behind = float4(0);
+        if (TRANSMIT && (flags & FLAG_TRANSMISSION) != 0) {
+            float lod, distance;
+            float2 uv = refraction(i.world, n, roughness, ly.thickness, lod, distance);
+            ly.thickness = distance;
+            behind = frame_behind(uv, lod);
+        }
+        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags, emissive, ly, coat_n, behind, ta);
     }
-    float3 emissive = material.emissive.rgb;
-    if ((flags & FLAG_EMISSIVE_MAP) != 0) {
-        emissive *= linear_rgb(read_map(emissiveMap, SLOT_EMISSIVE, at).rgb);
-    }
-    c += emissive;
-    c = tone_map(c, lighting.count.y, lighting.envParams.z);
+    float fog = 0;
     if (lighting.count.z != FOG_NONE) {
         float dist = length(i.world - lighting.eye.xyz);
-        float f = 0;
         if (lighting.count.z == FOG_LINEAR) {
-            f = saturate((dist - lighting.fogParams.x) / max(lighting.fogParams.y - lighting.fogParams.x, 1e-6));
+            fog = saturate((dist - lighting.fogParams.x) / max(lighting.fogParams.y - lighting.fogParams.x, 1e-6));
         } else if (lighting.count.z == FOG_EXP2) {
             float d = lighting.envParams.w * dist;
-            f = saturate(1 - exp(-d * d));
+            fog = saturate(1 - exp(-d * d));
         }
-        c = lerp(c, lighting.fogColor.rgb, f);
     }
-    if (TRANSMIT && (flags & FLAG_TRANSMISSION) != 0) {
-        float4 t = transmit(c, a, through, i.world, trans_n, trans_roughness);
-        c = t.rgb;
-        a = t.a;
+    if (lighting.envFlags.z != 0u) {
+        // The transmission snapshot: linear light, fogged, premultiplied.
+        c = lerp(c, lighting.fogColor.rgb, fog);
+        return float4(c * a, a);
     }
+    c = tone_map(c, lighting.count.y, lighting.envParams.z);
+    c = see_through(lerp(c, lighting.fogColor.rgb, fog), ta);
+    a *= ta;
     return float4(linear_to_srgb(c.r) * a, linear_to_srgb(c.g) * a, linear_to_srgb(c.b) * a, a);
 }
 
