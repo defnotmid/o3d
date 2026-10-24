@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 import "core:mem/virtual"
 import "core:os"
+import "core:slice"
 import "core:strings"
 
 // glTF 2.0 reading: `gltf_read` turns a `.gltf` (JSON with external,
@@ -164,6 +165,18 @@ Gltf_Material :: struct {
 	double_sided:         bool,
 	// KHR_materials_unlit.
 	unlit:                bool,
+	// KHR_materials_ior (1.5 without), _clearcoat, _sheen, _transmission
+	// and _volume factors (their textures are not read); an infinite
+	// attenuation distance is 0.
+	ior:                  f32,
+	clearcoat:            f32,
+	clearcoat_roughness:  f32,
+	sheen_color:          [3]f32,
+	sheen_roughness:      f32,
+	transmission:         f32,
+	thickness:            f32,
+	attenuation_color:    [3]f32,
+	attenuation_distance: f32,
 	// Into `strings`: the material's extensions o3d does not read.
 	unread_extensions:    Gltf_Range,
 }
@@ -300,6 +313,23 @@ GLTF_EXTENSIONS := [?]string {
 	"KHR_lights_punctual",
 	"EXT_meshopt_compression",
 	"EXT_texture_webp",
+	"KHR_materials_ior",
+	"KHR_materials_clearcoat",
+	"KHR_materials_sheen",
+	"KHR_materials_transmission",
+	"KHR_materials_volume",
+}
+
+// The material extensions o3d reads (others are named in `Model.warnings`).
+@(rodata)
+GLTF_MATERIAL_EXTENSIONS := [?]string {
+	"KHR_materials_unlit",
+	"KHR_materials_emissive_strength",
+	"KHR_materials_ior",
+	"KHR_materials_clearcoat",
+	"KHR_materials_sheen",
+	"KHR_materials_transmission",
+	"KHR_materials_volume",
 }
 
 // Reads a `.gltf` or `.glb` in memory into `doc` (destroy it, error or not):
@@ -975,7 +1005,7 @@ parse_texture_ref :: proc(r: ^Gltf_Reader, o: json.Object, key: string, ref: ^Gl
 
 @(private = "file")
 parse_material :: proc(r: ^Gltf_Reader, o: json.Object, m: ^Gltf_Material) {
-	m^ = {name = get_name(r, o), base_color = 1, metallic = 1, roughness = 1, emissive_strength = 1, alpha_cutoff = 0.5}
+	m^ = {name = get_name(r, o), base_color = 1, metallic = 1, roughness = 1, emissive_strength = 1, alpha_cutoff = 0.5, ior = 1.5, attenuation_color = 1}
 	if pbr, ok := get_object(r, o, "pbrMetallicRoughness"); ok {
 		m.has_pbr = true
 		get_floats(r, pbr, "baseColorFactor", m.base_color[:])
@@ -1007,9 +1037,30 @@ parse_material :: proc(r: ^Gltf_Reader, o: json.Object, m: ^Gltf_Material) {
 	}
 	m.unread_extensions.first = u32(len(r.doc.strings))
 	for name in exts {
-		if name != "KHR_materials_unlit" && name != "KHR_materials_emissive_strength" {
+		if !slice.contains(GLTF_MATERIAL_EXTENSIONS[:], name) {
 			append(&r.doc.strings, strings.clone(name, r.a))
 			m.unread_extensions.count += 1
+		}
+	}
+	if ior, ok := get_object(r, exts, "KHR_materials_ior"); ok {
+		m.ior = get_f32(r, ior, "ior", 1.5)
+	}
+	if cc, ok := get_object(r, exts, "KHR_materials_clearcoat"); ok {
+		m.clearcoat = get_f32(r, cc, "clearcoatFactor", 0)
+		m.clearcoat_roughness = get_f32(r, cc, "clearcoatRoughnessFactor", 0)
+	}
+	if sh, ok := get_object(r, exts, "KHR_materials_sheen"); ok {
+		get_floats(r, sh, "sheenColorFactor", m.sheen_color[:])
+		m.sheen_roughness = get_f32(r, sh, "sheenRoughnessFactor", 0)
+	}
+	if tr, ok := get_object(r, exts, "KHR_materials_transmission"); ok {
+		m.transmission = get_f32(r, tr, "transmissionFactor", 0)
+	}
+	if vol, ok := get_object(r, exts, "KHR_materials_volume"); ok {
+		m.thickness = get_f32(r, vol, "thicknessFactor", 0)
+		get_floats(r, vol, "attenuationColor", m.attenuation_color[:])
+		if d := get_f32(r, vol, "attenuationDistance", 0); d > 0 && d < math.F32_MAX {
+			m.attenuation_distance = d
 		}
 	}
 	if _, ok := exts["KHR_materials_unlit"]; ok {

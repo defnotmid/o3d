@@ -66,6 +66,8 @@ PARITY_CASES := [?]Parity_Case {
 	{"custom_finish", 240, 180, build_custom_finish},
 	{"sky", 240, 180, build_sky},
 	{"background_color", 240, 180, build_background_color},
+	{"physical", 240, 180, build_physical},
+	{"transmission", 240, 180, build_transmission},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -2038,6 +2040,88 @@ depth_check :: proc(g: ^GPU) -> (err: string) {
 		if share > 1.0 / 2000 {
 			return fmt.tprintf("depth: %s: %d of %d texels differ", name, differ, len(cpu_depth))
 		}
+	}
+	return ""
+}
+
+// MeshPhysicalMaterial's layers under a sky and a sun: a clear coat over
+// rough red, sheen on dark blue cloth, both on rough green, and a
+// high-ior white beside the default one.
+@(private = "file")
+build_physical :: proc(a: ^Parity_Assets) -> string {
+	sky := o3d.SKY_DEFAULT
+	sky.sun = {0.5, 0.35, 1}
+	id := o3d.sky_texture(&a.textures, sky, 256)
+	o3d.environment_prefilter(&a.textures, id)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0, 0.6, 4.2}, target = {0, 0.1, 0}, fov = 50, near = 0.1, far = 50}
+	s.background = id
+	s.environment = id
+	s.tone_mapping, s.tone_mapping_exposure = .AgX, 0.6
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.9}, intensity = 2, position = {2, 3.5, 3}})
+	sphere := o3d.sphere(&a.geos, 0.42, 48, 24)
+	for k in 0 ..< 5 {
+		m := o3d.MATERIAL_DEFAULT
+		switch k {
+		case 0:
+			m.color, m.roughness = {0.7, 0.05, 0.04}, 0.6
+			m.clearcoat, m.clearcoat_roughness = 1, 0.05
+		case 1:
+			m.color, m.roughness = {0.05, 0.08, 0.25}, 0.9
+			m.sheen_color, m.sheen_roughness = {1, 0.6, 0.8}, 0.4
+		case 2:
+			m.color, m.roughness = {0.1, 0.5, 0.15}, 0.8
+			m.clearcoat, m.clearcoat_roughness = 0.6, 0.3
+			m.sheen_color, m.sheen_roughness = {0.8, 0.9, 0.5}, 0.15
+		case 3:
+			m.color, m.roughness = {0.9, 0.9, 0.9}, 0.2
+		case 4:
+			m.color, m.roughness, m.ior = {0.9, 0.9, 0.9}, 0.2, 2.4
+		}
+		x := -1.8 + 0.9 * f32(k)
+		append(&s.draws, o3d.Draw{sphere, o3d.compose({x, 0.1, 0}), m})
+	}
+	return ""
+}
+
+// Transmission: glass spheres before coloured boxes, under a sun and an
+// environment: thin and clear, thick (refracting) and tinted by
+// absorption, rough (the frame's blurrier mips), and one half over the
+// empty (transparent) background, which shows through as alpha.
+@(private = "file")
+build_transmission :: proc(a: ^Parity_Assets) -> string {
+	sky := o3d.SKY_DEFAULT
+	sky.sun = {0.5, 0.35, 1}
+	id := o3d.sky_texture(&a.textures, sky, 256)
+	o3d.environment_prefilter(&a.textures, id)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0, 0.5, 4.2}, target = {0, 0.1, 0}, fov = 50, near = 0.1, far = 50}
+	s.environment = id
+	s.tone_mapping = .ACES_Filmic
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.9}, intensity = 2, position = {2, 3.5, 3}})
+	box := o3d.box(&a.geos, 0.5, 1.6, 0.5)
+	colors := [4]o3d.Vec3{{0.9, 0.2, 0.1}, {0.1, 0.7, 0.2}, {0.1, 0.3, 0.9}, {0.9, 0.8, 0.1}}
+	for k in 0 ..< 4 {
+		m := o3d.MATERIAL_DEFAULT
+		m.color, m.roughness = colors[k], 0.6
+		append(&s.draws, o3d.Draw{box, o3d.compose({-1.5 + 0.9 * f32(k), 0.1, -1.2}), m})
+	}
+	sphere := o3d.sphere(&a.geos, 0.42, 48, 24)
+	for k in 0 ..< 4 {
+		m := o3d.MATERIAL_DEFAULT
+		m.color, m.roughness, m.transmission = {1, 1, 1}, 0.05, 1
+		switch k {
+		case 1:
+			m.thickness, m.ior = 0.8, 1.5
+			m.attenuation_color, m.attenuation_distance = {0.4, 0.8, 1}, 0.5
+		case 2:
+			m.roughness, m.thickness, m.ior = 0.5, 0.4, 1.4
+		case 3:
+			m.color, m.thickness, m.ior = {1, 0.85, 0.7}, 0.3, 1.33
+		}
+		append(&s.draws, o3d.Draw{sphere, o3d.compose({-1.35 + 0.9 * f32(k), 0.1 + (0.75 if k == 3 else 0), 0}), m})
 	}
 	return ""
 }

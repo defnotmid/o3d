@@ -861,7 +861,7 @@ build_model :: proc(doc: ^Gltf_Document, geos: ^Geometries, textures: ^Textures,
 
 // One warning per extension the file uses that o3d does not implement,
 // naming the materials that have it: they are drawn without it.
-@(private = "file")
+@(private)
 warn_unread_extensions :: proc(doc: ^Gltf_Document, warnings: ^[dynamic]string) {
 	unread := make([dynamic]string, context.temp_allocator)
 	for ext in doc.extensions_used {
@@ -1148,7 +1148,7 @@ ref_transform :: proc "contextless" (ref: Gltf_Texture_Ref) -> (t: Texture_Trans
 	return
 }
 
-@(private = "file")
+@(private)
 convert_material :: proc(doc: ^Gltf_Document, mi: i32, img_ids: []Texture_Id) -> Material {
 	if mi < 0 {
 		return MATERIAL_DEFAULT
@@ -1177,6 +1177,15 @@ convert_material :: proc(doc: ^Gltf_Document, mi: i32, img_ids: []Texture_Id) ->
 	m.ao_map_intensity = gm.occlusion_texture.scale if gm.occlusion_texture.texture >= 0 else 1
 	m.emissive = linear_to_srgb_vec3(Vec3(gm.emissive))
 	m.emissive_intensity = gm.emissive_strength
+	m.ior = gm.ior
+	m.clearcoat = gm.clearcoat
+	m.clearcoat_roughness = gm.clearcoat_roughness
+	m.sheen_color = linear_to_srgb_vec3(Vec3(gm.sheen_color))
+	m.sheen_roughness = gm.sheen_roughness
+	m.transmission = gm.transmission
+	m.thickness = gm.thickness
+	m.attenuation_color = linear_to_srgb_vec3(Vec3(gm.attenuation_color))
+	m.attenuation_distance = gm.attenuation_distance
 	if gm.double_sided {
 		m.side = .Double
 	}

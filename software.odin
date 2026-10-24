@@ -87,6 +87,9 @@ Software :: struct {
 	// The host's pixels for external textures (by id - 1), as the GPU's
 	// `texture_set_external` binds its textures: `software_set_external`.
 	externals:     [dynamic]Software_External,
+	// The frame drawn before its transmissive draws, with its mipmaps
+	// (texture 1), for them to see through.
+	snapshot:      Textures,
 }
 
 // An external texture's pixels for the software renderer: RGBA8 (sRGB
@@ -100,6 +103,7 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.color)
 	delete(s.depth)
 	delete(s.own)
+	textures_destroy(&s.snapshot)
 	delete(s.order)
 	delete(s.materials)
 	shader_blocks_destroy(&s.blocks)
@@ -236,6 +240,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	lights: [MAX_LIGHTS]Shading_Light
 	nl := shading_lights(active.lights[:], &lights)
 	shading_materials(scene_materials(active), &s.materials, textures)
+	transmission_scale(s.materials[:len(active.draws)], active.draws.model[:len(active.draws)])
 	sprite_materials(active, geos, &s.expanded, s.materials[:])
 	shadows: [MAX_SHADOWS]Shadow
 	ns := frame_shadows(active, &shadows)
@@ -287,23 +292,32 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.shadow_index = si
 		job.view_proj, job.width, job.height, job.depth_only = sh.view_proj, size, size, true
 		job.depth_target, job.own_side = s.shadow_maps[si], false
-		run_pass(s, active, geos, &job, pool, draw_depth_band)
+		run_pass(s, active, geos, &job, pool, draw_depth_band, 0, len(s.order))
 	}
 	if needs_depth(active) {
 		table_grow_non_zero(&s.depth_map, width * height)
 		depth_draws(active, geos, shaders, proj * view, &s.order, &s.expanded)
 		job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, true
 		job.depth_target, job.own_side = s.depth_map[:width * height], true
-		run_pass(s, active, geos, &job, pool, draw_depth_band)
+		run_pass(s, active, geos, &job, pool, draw_depth_band, 0, len(s.order))
 	} else {
 		clear(&s.depth_map)
 	}
-	draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
+	snapshot := draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
 	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
 	if bg_tex != 0 {
 		job.inv_vp = linalg.inverse(job.view_proj)
 	}
-	run_pass(s, active, geos, &job, pool, draw_band)
+	if snapshot < len(s.order) {
+		// The frame so far, resolved and mipmapped, for the transmissive
+		// draws after it.
+		run_pass(s, active, geos, &job, pool, draw_band, 0, snapshot)
+		clear(&s.snapshot.list)
+		clear(&s.snapshot.texels)
+		texture_add(&s.snapshot, s.pixels, width, height)
+		job.keep = true
+	}
+	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))
 	return s.pixels
 }
 
@@ -313,11 +327,11 @@ software_depth :: proc "contextless" (s: ^Software) -> []f32 {
 	return s.depth_map[:]
 }
 
-// The phases over the draws in `s.order` into a `job.width x job.height`
-// target, its bands drawn by `draw`.
+// The phases over the draws `s.order[first:last]` into a `job.width x
+// job.height` target, its bands drawn by `draw`.
 @(private = "file")
-run_pass :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, job: ^Frame_Job, pool: ^thread.Pool, draw: proc(data: rawptr, band, worker: int)) {
-	make_chunks(s, scene, geos)
+run_pass :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, job: ^Frame_Job, pool: ^thread.Pool, draw: proc(data: rawptr, band, worker: int), first, last: int) {
+	make_chunks(s, scene, geos, first, last)
 	job.bands = (job.height + BAND_ROWS - 1) / BAND_ROWS
 	table_grow_non_zero(&s.chunk_bands, s.chunk_count * job.bands)
 	parallel(pool, s.chunk_count, job, transform_chunk)
@@ -328,9 +342,10 @@ run_pass :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, job: ^Frame_Job
 
 // Splits the drawing order into chunks of at most CHUNK_TRIS triangles.
 @(private = "file")
-make_chunks :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries) {
+make_chunks :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, from, to: int) {
 	n := 0
-	for di, oi in s.order {
+	for oi in from ..< to {
+		di := s.order[oi]
 		geo, _ := geometry_get_any(geos, &s.expanded, scene.draws[di].geometry)
 		tris := int(geo.index_count / 3)
 		for first := 0; first < tris; first += CHUNK_TRIS {
@@ -376,6 +391,8 @@ Frame_Job :: struct {
 	depth_target:  []f32,
 	own_side:      bool,
 	bands:         int,
+	// Over what the pass before drew (no clear, no background).
+	keep:          bool,
 }
 
 @(private = "file")

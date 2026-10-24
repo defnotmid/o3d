@@ -1404,3 +1404,40 @@ test_model_node_bounds :: proc(t: ^testing.T) {
 	lo, hi, ok := model_bounds(&m, &geos)
 	testing.expectf(t, ok && near(lo, {-0.5, -0.5, -1}) && near(hi, {11, 3, 1}), "the roots together: %v .. %v", lo, hi)
 }
+
+// MeshPhysicalMaterial's extensions: ior, clear coat, sheen (linear colour
+// to sRGB), transmission and volume (an infinite attenuation distance is
+// none) read into the material, none of them warned of; a material without
+// them keeps the defaults.
+@(test)
+test_gltf_physical_materials :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	src := `{"asset":{"version":"2.0"},
+		"extensionsUsed":["KHR_materials_ior","KHR_materials_clearcoat","KHR_materials_sheen","KHR_materials_transmission","KHR_materials_volume"],
+		"materials":[{"extensions":{
+			"KHR_materials_ior":{"ior":1.33},
+			"KHR_materials_clearcoat":{"clearcoatFactor":0.8,"clearcoatRoughnessFactor":0.2},
+			"KHR_materials_sheen":{"sheenColorFactor":[1,0.5,0],"sheenRoughnessFactor":0.3},
+			"KHR_materials_transmission":{"transmissionFactor":0.9},
+			"KHR_materials_volume":{"thicknessFactor":0.4,"attenuationColor":[0.5,1,1],"attenuationDistance":2}}},
+			{"extensions":{"KHR_materials_volume":{"thicknessFactor":1}}}]}`
+	doc, err := gltf_read(transmute([]u8)src)
+	defer gltf_document_destroy(&doc)
+	testing.expect_value(t, err, Gltf_Error.None)
+	if err != nil {
+		return
+	}
+	m := convert_material(&doc, 0, nil)
+	testing.expect_value(t, m.ior, 1.33)
+	testing.expect(t, m.clearcoat == 0.8 && m.clearcoat_roughness == 0.2, "clear coat")
+	testing.expect(t, linalg.length(m.sheen_color - {1, linear_to_srgb(0.5), 0}) < 1e-3, fmt.tprint("sheen colour in sRGB", m.sheen_color))
+	testing.expect_value(t, m.sheen_roughness, 0.3)
+	testing.expect(t, m.transmission == 0.9 && m.thickness == 0.4 && m.attenuation_distance == 2, "transmission and volume")
+	m1 := convert_material(&doc, 1, nil)
+	testing.expect(t, m1.ior == 1.5 && m1.thickness == 1 && m1.attenuation_distance == 0 && linalg.length(m1.attenuation_color - 1) < 1e-3, fmt.tprint("defaults", m1))
+	warnings: [dynamic]string
+	defer delete(warnings)
+	warn_unread_extensions(&doc, &warnings)
+	testing.expect_value(t, len(warnings), 0)
+}

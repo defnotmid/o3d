@@ -2217,3 +2217,53 @@ test_software_render_out :: proc(t: ^testing.T) {
 	short := software_render(&b, &scene, &g, nil, W, H, out = mine[:10])
 	testing.expect(t, raw_data(short) == raw_data(b.own), "a short buffer: its own")
 }
+
+// Transmission: a clear thin quad (no lights: only what it lets through)
+// before a red wall shows the wall's red at the wall's brightness, an
+// absorbing one darker and toward the attenuation colour; over nothing it
+// lets the empty frame through (alpha 0); a transmissive draw listed first
+// is ordered after the opaque draws it sees.
+@(test)
+test_transmission :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 16
+	s: Software
+	defer software_destroy(&s)
+	at :: proc(px: []u8, x, y: int) -> [4]u8 {
+		i := (y * W + x) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	frame :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, wall: bool, glass: Material) -> []u8 {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, fov = 30, near = 0.1, far = 20}
+		if wall {
+			red := MATERIAL_DEFAULT
+			red.color, red.flags = {0.8, 0.1, 0.1}, {.Basic}
+			append(&scene.draws, Draw{plane(g, 8, 8), compose({0, 0, -1}), red})
+		}
+		append(&scene.draws, Draw{plane(g, 1.5, 1.5), compose({0, 0, 1}), glass})
+		return software_render(s, scene, g, nil, W, W)
+	}
+	clear_glass := MATERIAL_DEFAULT
+	clear_glass.roughness, clear_glass.transmission = 0.1, 1
+	wall := at(frame(&s, &scene, &g, true, {}), 0, 0)
+	through := at(frame(&s, &scene, &g, true, clear_glass), W / 2, W / 2)
+	testing.expectf(t, abs(int(through.r) - int(wall.r)) <= 8 && through.g <= wall.g + 8 && through.a == 255, "through clear glass %v, the wall %v", through, wall)
+	tinted := clear_glass
+	tinted.thickness, tinted.attenuation_color, tinted.attenuation_distance = 1, {0.5, 0.5, 1}, 0.5
+	dark := at(frame(&s, &scene, &g, true, tinted), W / 2, W / 2)
+	testing.expectf(t, dark.r < through.r - 40, "absorbed: %v, clear %v", dark, through)
+	empty := at(frame(&s, &scene, &g, false, clear_glass), W / 2, W / 2)
+	testing.expectf(t, empty.a < 16, "over nothing: %v", empty)
+
+	order: [dynamic]int
+	defer delete(order)
+	_ = frame(&s, &scene, &g, true, clear_glass)
+	scene.draws.material[0], scene.draws.material[1] = scene.draws.material[1], scene.draws.material[0]
+	view, proj := camera_matrices(scene.camera, W, W)
+	snapshot := draw_order(&scene, &g, nil, view, proj, &order)
+	testing.expectf(t, snapshot == 1 && len(order) == 2 && order[0] == 1 && order[1] == 0, "opaque first, then transmissive: %v at %d", order, snapshot)
+}

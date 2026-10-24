@@ -48,6 +48,9 @@ static const uint FLAG_ADDITIVE = 131072;
 static const uint FLAG_PREMULTIPLIED = 262144;
 static const uint FLAG_VERTEX_COLORS = 524288;
 static const uint FLAG_TRIPLANAR = 1048576;
+static const uint FLAG_CLEARCOAT = 2097152;
+static const uint FLAG_SHEEN = 4194304;
+static const uint FLAG_TRANSMISSION = 8388608;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -94,6 +97,13 @@ struct Material {
     float4 triplanar;
     float4 to_local[3];
     float4 normal_to_local[3];
+    // o3d.Shading_Layers: the dielectric F0, clear coat and its roughness,
+    // sheen roughness; sheen colour (linear).
+    float4 layers;
+    float4 sheen;
+    // Transmission, thickness (world units), ior; absorption per unit.
+    float4 transmission;
+    float4 attenuation;
 };
 
 // Shading_Light: color, ground linear times intensity (or spot axis + cos_inner/outer);
@@ -125,6 +135,8 @@ struct Lighting {
     float4 frameParams;
     float4 fogColor;
     float4 fogParams;
+    // The camera's view-projection (transmission's refraction).
+    float4x4 viewProj;
     Light lights[MAX_LIGHTS];
 };
 
@@ -154,9 +166,11 @@ struct Joints_VS {
 [[vk::binding(12, 2)]] Sampler2D<float4> alphaMap : register(t12, space2);
 // The shadow pass's alpha map, after its colour map.
 [[vk::binding(1, 2)]] Sampler2D<float4> shadowAlphaMap : register(t1, space2) : register(s1, space2);
-// Particles: the frame's depth (soft particles) after the main pass's
-// samplers, and the rows after it (SPIR-V; on Metal after the uniform
-// buffers, as curveWords).
+// Transmissive draws: the frame drawn before them, mipmapped (premultiplied
+// sRGB), after the main pass's samplers.
+[[vk::binding(13, 2)]] Sampler2D<float4> transmissionMap : register(t13, space2) : register(s13, space2);
+// Particles: the frame's depth (soft particles) in its place, and the rows
+// after it (SPIR-V; on Metal after the uniform buffers, as curveWords).
 [[vk::binding(13, 2)]] Sampler2D<float> sceneDepth : register(t13, space2) : register(s13, space2);
 // A particle quad's row (o3d.Sprite_Row): its colour and opacity, and its
 // probe (pixel x, y, depth; the disc's radius, 0 when not probed).
@@ -169,7 +183,7 @@ struct SpriteRow {
 // SPIR-V's set 2, after the uniform buffers on Metal (slang numbers the
 // buffer from the register; no DXIL for these entries): fs_curves' at
 // [[buffer(2)]], fs_shadow_curves' at [[buffer(1)]].
-[[vk::binding(13, 2)]] StructuredBuffer<uint> curveWords : register(t2, space2);
+[[vk::binding(14, 2)]] StructuredBuffer<uint> curveWords : register(t2, space2);
 [[vk::binding(2, 2)]] StructuredBuffer<uint> shadowCurveWords : register(t1, space2);
 
 struct VS_In {
@@ -372,14 +386,68 @@ float shadow_factor(int idx, float3 world, float3 normal) {
     return lit / 9;
 }
 
-float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao, uint flags) {
+// scene.odin's ggx, env_brdf, charlie, neubelt and ibl_sheen.
+float3 ggx(float3 f0, float alpha, float nl, float nv, float nh, float vh) {
+    float3 fresnel = f0 + (1 - f0) * pow(1 - vh, 5);
+    float a2 = alpha * alpha;
+    float gv = nl * sqrt(a2 + (1 - a2) * nv * nv);
+    float gl = nv * sqrt(a2 + (1 - a2) * nl * nl);
+    float vis = 0.5 / max(gv + gl, 1e-6);
+    float dd = nh * nh * (a2 - 1) + 1;
+    return fresnel * (vis * a2 / (PI * dd * dd));
+}
+
+float3 env_brdf(float3 f0, float roughness, float nv) {
+    float4 c0 = float4(-1, -0.0275, -0.572, 0.022);
+    float4 c1 = float4(1, 0.0425, 1.04, -0.04);
+    float4 rv = roughness * c0 + c1;
+    float a004 = min(rv.x * rv.x, exp2(-9.28 * nv)) * rv.x + rv.y;
+    float2 fab = float2(-1.04, 1.04) * a004 + rv.zw;
+    return f0 * fab.x + fab.y;
+}
+
+float charlie(float roughness, float nh) {
+    float inv = 1 / (roughness * roughness);
+    float sin2h = max(1 - nh * nh, 0.0078125);
+    return (2 + inv) * pow(sin2h, inv * 0.5) / (2 * PI);
+}
+
+float neubelt(float nv, float nl) {
+    return saturate(1 / (4 * (nl + nv - nl * nv)));
+}
+
+float ibl_sheen(float roughness, float nv) {
+    float r2 = roughness * roughness;
+    float a = roughness < 0.25 ? -339.2 * r2 + 161.4 * roughness - 25.9 : -8.48 * r2 + 14.3 * roughness - 9.95;
+    float b = roughness < 0.25 ? 44.0 * r2 - 23.7 * roughness + 3.26 : 1.97 * r2 - 3.27 * roughness + 0.72;
+    float dg = exp(a * nv + b) + (roughness < 0.25 ? 0.0 : 0.1 * (roughness - 0.25));
+    return saturate(dg / PI) * PI;
+}
+
+float3 env_radiance(float3 r, float lod) {
+    float3 rad = envRadianceMap.SampleLevel(equirect_uv(r), lod).rgb;
+    return lighting.envFlags.x == 0u ? linear_rgb(rad) : rad;
+}
+
+float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao, uint flags, out float4 through) {
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
-    float3 f0 = lerp(float3(0.04), base, metalness);
+    float4 ly = material.layers;
+    float3 f0 = lerp(float3(ly.x), base, metalness);
     float roughness = clamp(roughness_in, 0.0525, 1);
     float alpha = roughness * roughness;
     float nv = clamp(dot(n, v), 1e-4, 1);
     float3 o = float3(0);
+    float3 sheen = float3(0);
+    float3 coat = float3(0);
+    through = float4(0);
+    if ((flags & FLAG_TRANSMISSION) != 0) {
+        float4 tr = material.transmission;
+        float3 t = diffuse * exp(material.attenuation.rgb * tr.y);
+        through.rgb = tr.x * (1 - env_brdf(f0, roughness, nv)) * t;
+        through.a = tr.x * (t.r + t.g + t.b) / 3;
+        diffuse *= 1 - tr.x;
+    }
     for (int k = 0; k < lighting.count.x; k++) {
         Light l = lighting.lights[k];
         if (l.kind == LIGHT_AMBIENT) {
@@ -432,35 +500,76 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
         if (nl <= 0) {
             continue;
         }
+        float3 irradiance = light * nl;
         float3 h = normalize(ldir + v);
         float nh = saturate(dot(n, h));
         float vh = saturate(dot(v, h));
-        float3 fresnel = f0 + (1 - f0) * pow(1 - vh, 5);
-        float a2 = alpha * alpha;
-        float gv = nl * sqrt(a2 + (1 - a2) * nv * nv);
-        float gl = nv * sqrt(a2 + (1 - a2) * nl * nl);
-        float vis = 0.5 / max(gv + gl, 1e-6);
-        float dd = nh * nh * (a2 - 1) + 1;
-        float dist_term = a2 / (PI * dd * dd);
-        o += light * nl * (diffuse / PI + fresnel * (vis * dist_term));
+        o += irradiance * (diffuse / PI + ggx(f0, alpha, nl, nv, nh, vh));
+        if ((flags & FLAG_SHEEN) != 0) {
+            sheen += irradiance * material.sheen.rgb * (charlie(ly.w, nh) * neubelt(nv, nl));
+        }
+        if ((flags & FLAG_CLEARCOAT) != 0) {
+            coat += irradiance * ggx(float3(0.04), ly.z * ly.z, nl, nv, nh, vh);
+        }
     }
     if (lighting.envParams.x > 0) {
         float3 r = 2 * dot(n, v) * n - v;
         float3 irr = envIrradianceMap.SampleLevel(equirect_uv(n), 0).rgb;
-        float3 rad = envRadianceMap.SampleLevel(equirect_uv(r), roughness * lighting.envParams.y).rgb;
         if (lighting.envFlags.x == 0u) {
             irr = linear_rgb(irr);
-            rad = linear_rgb(rad);
         }
-        float4 c0 = float4(-1, -0.0275, -0.572, 0.022);
-        float4 c1 = float4(1, 0.0425, 1.04, -0.04);
-        float4 rv = roughness * c0 + c1;
-        float a004 = min(rv.x * rv.x, exp2(-9.28 * nv)) * rv.x + rv.y;
-        float2 fab = float2(-1.04, 1.04) * a004 + rv.zw;
-        float3 spec = f0 * fab.x + fab.y;
-        o += (ao * lighting.envParams.x) * (irr * diffuse * (1 - spec) + rad * spec);
+        float3 rad = env_radiance(r, roughness * lighting.envParams.y);
+        float3 spec = env_brdf(f0, roughness, nv);
+        float k = ao * lighting.envParams.x;
+        o += k * (irr * diffuse * (1 - spec) + rad * spec);
+        if ((flags & FLAG_SHEEN) != 0) {
+            sheen += k * irr * material.sheen.rgb * ibl_sheen(ly.w, nv);
+        }
+        if ((flags & FLAG_CLEARCOAT) != 0) {
+            coat += k * env_radiance(r, ly.z * lighting.envParams.y) * env_brdf(float3(0.04), ly.z, nv);
+        }
+    }
+    if ((flags & FLAG_SHEEN) != 0) {
+        float3 sc = material.sheen.rgb;
+        float k = 1 - 0.157 * max(sc.r, max(sc.g, sc.b));
+        o = o * k + sheen;
+        through.rgb *= k;
+    }
+    if ((flags & FLAG_CLEARCOAT) != 0) {
+        float k = 1 - ly.y * (0.04 + 0.96 * pow(1 - nv, 5));
+        o = o * k + coat * ly.y;
+        through.rgb *= k;
     }
     return o;
+}
+
+// scene.odin's refraction and frame_behind, raster.odin's transmit: the
+// finished colour with the frame behind added, and its alpha.
+float4 transmit(float3 c, float a, float4 through, float3 world, float3 n_in, float roughness) {
+    float3 v = normalize(lighting.eye.xyz - world);
+    float3 n = dot(n_in, v) >= 0 ? n_in : -n_in;
+    float4 tr = material.transmission;
+    float3 ray = refract(-v, n, 1 / tr.z);
+    float rl = length(ray);
+    if (rl > 0) {
+        ray *= tr.y / rl;
+    }
+    float4 cp = mul(lighting.viewProj, float4(world + ray, 1));
+    float w = abs(cp.w) > 1e-6 ? cp.w : 1e-6;
+    float2 uv = saturate(cp.xy / w * 0.5 + 0.5);
+    float lod = log2(max(lighting.frameParams.x, 1)) * clamp(roughness, 0.0525, 1) * saturate(tr.z * 2 - 2);
+    float4 s = transmissionMap.SampleLevel(float2(uv.x, 1 - uv.y), lod);
+    float4 behind = float4(0);
+    if (s.a > 0) {
+        behind = float4(linear_rgb(s.rgb / s.a), 1) * s.a;
+    }
+    float3 o = c + through.rgb * behind.rgb;
+    float ta = 1 - through.a * (1 - behind.a);
+    if (ta < 1) {
+        float3 e = float3(linear_to_srgb(o.r), linear_to_srgb(o.g), linear_to_srgb(o.b));
+        o = linear_rgb(min(e / max(ta, 1e-4), float3(1)));
+    }
+    return float4(o, a * ta);
 }
 
 // The standard material's colour at a fragment (premultiplied sRGB), as
@@ -530,7 +639,9 @@ float3 triplanar_normal(LaneUv at, float3 n) {
     return normalize(material.to_local[0].xyz * b.x + material.to_local[1].xyz * b.y + material.to_local[2].xyz * b.z);
 }
 
-float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
+// TRANSMIT: whether the entry reads transmissionMap (fs_sprite has its
+// depth there instead).
+float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
     float a = material.color.a * saturate(tint.a);
@@ -575,6 +686,9 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
         }
     }
     float3 c;
+    float4 through = float4(0);
+    float3 trans_n = float3(0, 0, 1);
+    float trans_roughness = 1;
     if ((flags & FLAG_SHADOW_ONLY) != 0) {
         // Only the light its shadows take: 1 minus their factors' product.
         float3 sn = normalize(i.normal);
@@ -626,7 +740,9 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
                 n = perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n);
             }
         }
-        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags);
+        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags, through);
+        trans_n = n;
+        trans_roughness = roughness;
     }
     float3 emissive = material.emissive.rgb;
     if ((flags & FLAG_EMISSIVE_MAP) != 0) {
@@ -645,12 +761,17 @@ float4 surface(VS_Out i, bool front, float4 tint = float4(1)) {
         }
         c = lerp(c, lighting.fogColor.rgb, f);
     }
+    if (TRANSMIT && (flags & FLAG_TRANSMISSION) != 0) {
+        float4 t = transmit(c, a, through, i.world, trans_n, trans_roughness);
+        c = t.rgb;
+        a = t.a;
+    }
     return float4(linear_to_srgb(c.r) * a, linear_to_srgb(c.g) * a, linear_to_srgb(c.b) * a, a);
 }
 
 [shader("fragment")]
 float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
-    return surface(i, front);
+    return surface<true>(i, front);
 }
 
 // A view depth from a depth value (o3d.view_depth).
@@ -704,7 +825,7 @@ float4 fs_sprite(VS_Curves_Out i, bool front : SV_IsFrontFace) : SV_Target {
         float behind = view_depth(sceneDepth.SampleLevel(uv, 0));
         row.a *= saturate((behind - view_depth(i.position.z)) / material.softness);
     }
-    return surface(curves_surface_in(i), front, row);
+    return surface<false>(curves_surface_in(i), front, row);
 }
 
 // Sample positions in a pixel (the standard 4x MSAA pattern, software.odin's
@@ -758,7 +879,7 @@ Curves_Out fs_curves(VS_Curves_Out i, bool front : SV_IsFrontFace) {
     uint entry = curveWords[material.curve_table + i.quad];
     uint s = entry & ~CURVE_EVEN_ODD;
     bool even_odd = (entry & CURVE_EVEN_ODD) != 0u;
-    float4 color = surface(curves_surface_in(i), front);
+    float4 color = surface<true>(curves_surface_in(i), front);
     Curves_Out o;
     if ((material.flags & FLAG_BLENDED) != 0) {
         float cov = curves_coverage_affine(curveWords, s, i.uv1, dx, dy, even_odd);

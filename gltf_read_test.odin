@@ -202,11 +202,11 @@ test_gltf_resolve :: proc(t: ^testing.T) {
 test_model_parts :: proc(t: ^testing.T) {
 	tri := [9]f32{0, 0, 0, 1, 0, 0, 0, 1, 0}
 	data := base64.encode(([^]u8)(&tri)[:size_of(tri)], allocator = context.temp_allocator)
-	src := fmt.tprintf(`{{"asset": {{"version": "2.0"}}, "extensionsUsed": ["KHR_materials_transmission"],
+	src := fmt.tprintf(`{{"asset": {{"version": "2.0"}}, "extensionsUsed": ["KHR_materials_anisotropy"],
   "buffers": [{{"uri": "data:application/octet-stream;base64,%s", "byteLength": 36}}],
   "bufferViews": [{{"buffer": 0, "byteLength": 36}}],
   "accessors": [{{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]}}],
-  "materials": [{{"name": "Hull"}}, {{"name": "Steel", "extensions": {{"KHR_materials_transmission": {{"transmissionFactor": 1}}}}}}],
+  "materials": [{{"name": "Hull"}}, {{"name": "Steel", "extensions": {{"KHR_materials_anisotropy": {{"anisotropyStrength": 1}}}}}}],
   "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}, "material": 0}}, {{"attributes": {{"POSITION": 0}}, "material": 1}}]}}],
   "nodes": [{{"name": "Ship", "mesh": 0, "children": [1, 2]}}, {{"name": "Net", "mesh": 0}},
     {{"name": "Wheel", "translation": [2, 0, 0], "children": [3]}}, {{"name": "Hub", "mesh": 0, "matrix": [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 3, 0, 1]}}],
@@ -216,7 +216,7 @@ test_model_parts :: proc(t: ^testing.T) {
 	m, err := gltf_parse(transmute([]u8)src, &geos)
 	defer model_destroy(&m)
 	testing.expect_value(t, err, Gltf_Error.None)
-	testing.expect(t, len(m.warnings) == 1 && m.warnings[0] == `KHR_materials_transmission is not supported: drawn without it (materials "Steel")`, "the material is named")
+	testing.expect(t, len(m.warnings) == 1 && m.warnings[0] == `KHR_materials_anisotropy is not supported: drawn without it (materials "Steel")`, "the material is named")
 
 	ship, net, wheel, hub := model_node(&m, "Ship"), model_node(&m, "Net"), model_node(&m, "Wheel"), model_node(&m, "Hub")
 	steel := model_material(&m, "Steel")

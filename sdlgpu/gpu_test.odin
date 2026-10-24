@@ -126,6 +126,10 @@ test_far_layers_match_software :: proc(t: ^testing.T) {expect_parity(t, "far_lay
 // Triplanar mapping in object and world frames on meshes without uvs.
 @(test)
 test_triplanar_match_software :: proc(t: ^testing.T) {expect_parity(t, "triplanar")}
+@(test)
+test_physical_match_software :: proc(t: ^testing.T) {expect_parity(t, "physical")}
+@(test)
+test_transmission_match_software :: proc(t: ^testing.T) {expect_parity(t, "transmission")}
 
 // ShaderMaterials receiving shadows through shadowAt.
 @(test)

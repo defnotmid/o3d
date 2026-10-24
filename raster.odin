@@ -19,30 +19,33 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	s := job.s
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, s.height)
-	slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 0)
-	if job.bg_tex == 0 {
-		for &c in s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES] {
-			c = job.clear
-		}
-	} else {
-		// The background first, as the GPU draws it: what is drawn then
-		// blends over it or adds to it.
-		inv_w := 2.0 / f32(s.width)
-		inv_h := 2.0 / f32(s.height)
-		for y in y0 ..< y1 {
-			ndc_y := 1 - (f32(y) + 0.5) * inv_h
-			// From the near plane (depth 1) to the far (0).
-			p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
-			p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
-			p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
-			p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
-			ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
-			ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
-			for x in 0 ..< s.width {
-				dir := linalg.normalize(ray0 + f32(x) * ray_step)
-				c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
-				bg := pack(tone_map(c, job.tone_mapping, job.tone_exposure), 1)
-				slice.fill(s.color[(y * s.width + x) * SAMPLES:][:SAMPLES], bg)
+	// The second part of a frame (after its snapshot) draws over the first.
+	if !job.keep {
+		slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 0)
+		if job.bg_tex == 0 {
+			for &c in s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES] {
+				c = job.clear
+			}
+		} else {
+			// The background first, as the GPU draws it: what is drawn then
+			// blends over it or adds to it.
+			inv_w := 2.0 / f32(s.width)
+			inv_h := 2.0 / f32(s.height)
+			for y in y0 ..< y1 {
+				ndc_y := 1 - (f32(y) + 0.5) * inv_h
+				// From the near plane (depth 1) to the far (0).
+				p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
+				p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
+				p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
+				p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
+				ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
+				ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
+				for x in 0 ..< s.width {
+					dir := linalg.normalize(ray0 + f32(x) * ray_step)
+					c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
+					bg := pack(tone_map(c, job.tone_mapping, job.tone_exposure), 1)
+					slice.fill(s.color[(y * s.width + x) * SAMPLES:][:SAMPLES], bg)
+				}
 			}
 		}
 	}
@@ -66,6 +69,25 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 			s.pixels[i * 4 + ch] = u8((acc[ch] + SAMPLES / 2) / SAMPLES)
 		}
 	}
+}
+
+// A transmissive point's colour (finished: tone mapped and fogged) with
+// the frame behind it added as `shade` lets it through, and its alpha: the
+// frame's where it shows (three.js's transmissionAlpha), the colour kept
+// premultiplied as the frame's was where that is under 1.
+@(private = "file")
+transmit :: #force_inline proc "contextless" (job: ^Frame_Job, lit: Vec3, alpha: f32, through: Vec4, world, n_in: Vec3, roughness: f32, ly: ^Shading_Layers) -> (Vec3, f32) {
+	n := n_in if linalg.dot(n_in, job.eye - world) >= 0 else -n_in
+	uv, lod := refraction(world, n, job.eye, roughness, ly, job.view_proj, job.width)
+	behind := frame_behind(sample_lod(&job.s.snapshot, 1, uv, lod))
+	c := lit + through.rgb * behind.rgb
+	a := 1 - through.a * (1 - behind.a)
+	if a < 1 {
+		for &ch in c {
+			ch = srgb_to_linear(min(linear_to_srgb(ch) / max(a, 1e-4), 1))
+		}
+	}
+	return c, alpha * a
 }
 
 // A band of the shadow map: its rows cleared to the far plane (0), then each
@@ -238,9 +260,14 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 					shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 				}
 			}
-			lit := shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows) + m.emissive
+			through: Vec4
+			lit := shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, &m.layers, &through) + m.emissive
 			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, dz, x, y, covered, pack(lit, out_alpha), blend_of(m))
+			alpha := out_alpha
+			if .Transmission in m.flags {
+				lit, alpha = transmit(job, lit, alpha, through, p, n, m.roughness, &m.layers)
+			}
+			write_samples(s, dz, x, y, covered, pack(lit, alpha), blend_of(m))
 		}
 	}
 }
@@ -462,9 +489,14 @@ draw_standard_textured :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shadin
 						n = perturb_normal(n, dp_dx, dp_dy, n_dx, n_dy, map_n)
 					}
 				}
-				lit := shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows) + emissive
+				through: Vec4
+				lit := shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, &m.layers, &through) + emissive
 				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				write_samples(s, dz, x, y, covered, pack(lit, opacity), blend_of(m))
+				alpha := opacity
+				if .Transmission in m.flags {
+					lit, alpha = transmit(job, lit, alpha, through, worlds[l], n, pm.roughness, &m.layers)
+				}
+				write_samples(s, dz, x, y, covered, pack(lit, alpha), blend_of(m))
 			}
 		}
 	}

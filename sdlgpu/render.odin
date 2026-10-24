@@ -84,6 +84,11 @@ Job :: struct {
 	depth_buffer:         ^sdl.GPUTexture,
 	depth_size:           [2]u32,
 	order:                [dynamic]int,
+	// Where in `order` the frame is kept for the transmissive draws after
+	// it (len(order): none), and that snapshot (mipmapped, at its size).
+	snapshot:             int,
+	snapshot_tex:         ^sdl.GPUTexture,
+	snapshot_size:        [2]u32,
 	materials:            [dynamic]o3d.Shading_Material, // per draw
 	blocks:               o3d.Shader_Blocks,
 	expanded:             o3d.Expanded_Draws,
@@ -103,6 +108,7 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 		delete(job.casters[idx])
 	}
 	release_depth(g, job)
+	release_snapshot(g, job)
 	delete(job.depth_draws)
 	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned, &job.sprite_rows}) {
 		if b.buffer != nil {
@@ -228,6 +234,10 @@ make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Mate
 		uv_sets      = m.uv_sets,
 		curve_table  = geo.sprite_table if geo.mode == .Sprites else geo.curve_table,
 		softness     = m.softness,
+		layers       = {m.layers.f0, m.layers.clearcoat, m.layers.clearcoat_roughness, m.layers.sheen_roughness},
+		sheen        = {m.layers.sheen.r, m.layers.sheen.g, m.layers.sheen.b, 0},
+		transmission = {m.layers.transmission, m.layers.thickness, m.layers.ior, 0},
+		attenuation  = {m.layers.attenuation.r, m.layers.attenuation.g, m.layers.attenuation.b, 0},
 	}
 	for s, i in o3d.Texture_Slot {
 		t := m.uv_transforms[s]
@@ -473,6 +483,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	lights: [o3d.MAX_LIGHTS]o3d.Shading_Light
 	nl := o3d.shading_lights(active.lights[:], &lights)
 	o3d.shading_materials(o3d.scene_materials(active), &job.materials, textures)
+	o3d.transmission_scale(job.materials[:len(active.draws)], active.draws.model[:len(active.draws)])
 	o3d.sprite_materials(active, geos, &job.expanded, job.materials[:])
 	ns := o3d.frame_shadows(active, &job.shadows)
 	o3d.shader_blocks(active, shaders, view, proj, job.shadows[:ns], &job.blocks)
@@ -514,6 +525,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	near := active.camera.near if active.camera.near > 0 else 0.1
 	far := active.camera.far if active.camera.far > near else near * 1e4
 	lu.frame_params = {f32(width), f32(height), near, far}
+	lu.view_proj = proj * view
 	if active.fog.kind != .None {
 		fc := o3d.linear(active.fog.color)
 		lu.fog_color = {fc.r, fc.g, fc.b, 0}
@@ -530,7 +542,10 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 			shadowed = u32(l.shadowed),
 		}
 	}
-	o3d.draw_order(active, geos, shaders, view, proj, &job.order, &job.expanded)
+	job.snapshot = o3d.draw_order(active, geos, shaders, view, proj, &job.order, &job.expanded)
+	if job.snapshot < len(job.order) && !ensure_snapshot(g, job, width, height) {
+		return .Out_Of_Memory
+	}
 	for di in job.order {
 		m := &job.materials[di]
 		if m.shader != 0 {
@@ -585,7 +600,6 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		return .Not_Prepared
 	}
 	job.prepared = false
-	scene, geos, shaders := job.scene, job.geos, job.shaders
 	width, height := job.width, job.height
 	for si in 0 ..< job.shadow_count {
 		draw_depth(g, job, job.casters[si][:], job.shadows[si].view_proj, job.shadow_maps[si], job.shadow_depths[si], false, cmd)
@@ -599,21 +613,21 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	}
 
 	// Into the targets' top-left width x height (they may be larger), then
-	// copied to `out`.
+	// copied to `out`. With transmissive draws, in two passes: the frame
+	// before them is kept (resolved, mipmapped) for them to see through.
+	split := job.snapshot < len(job.order)
 	color := sdl.GPUColorTargetInfo{texture = g.color, clear_color = sdl.FColor(job.clear), load_op = .CLEAR, store_op = .STORE}
 	frame := g.color
 	if g.samples != ._1 {
-		color.store_op, color.resolve_texture = .RESOLVE, g.resolved
+		color.store_op, color.resolve_texture = .RESOLVE_AND_STORE if split else .RESOLVE, g.resolved
 		frame = g.resolved
 	}
-	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .STORE if split else .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
 	pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
 	sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
 	sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})
-	bound: ^sdl.GPUGraphicsPipeline
 	if job.background != 0 {
 		sdl.BindGPUGraphicsPipeline(pass, g.bg_pipeline)
-		bound = g.bg_pipeline
 		bg_binding := tex_binding(g, job.background, g.env_sampler)
 		sdl.BindGPUFragmentSamplers(pass, 0, &bg_binding, 1)
 		inv_vp := linalg.inverse(job.view_proj)
@@ -621,6 +635,35 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		sdl.PushGPUFragmentUniformData(cmd, 0, &job.bg_params, size_of(job.bg_params))
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	}
+	if split {
+		draw_list(g, job, pass, cmd, job.order[:job.snapshot], &shadow_maps)
+		sdl.EndGPURenderPass(pass)
+		copy_pass := sdl.BeginGPUCopyPass(cmd)
+		sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = job.snapshot_tex}, width, height, 1, false)
+		sdl.EndGPUCopyPass(copy_pass)
+		sdl.GenerateMipmapsForGPUTexture(cmd, job.snapshot_tex)
+		color.load_op, depth.load_op = .LOAD, .LOAD
+		if g.samples != ._1 {
+			color.store_op = .RESOLVE
+		}
+		depth.store_op = .DONT_CARE
+		pass = sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
+		sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(width), h = f32(height), min_depth = 0, max_depth = 1})
+		sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(width), h = i32(height)})
+	}
+	draw_list(g, job, pass, cmd, job.order[job.snapshot if split else 0:], &shadow_maps)
+	sdl.EndGPURenderPass(pass)
+	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = out}, width, height, 1, false)
+	sdl.EndGPUCopyPass(copy_pass)
+	return nil
+}
+
+// The draws `order` (the job's) into the open main pass.
+@(private = "file")
+draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCommandBuffer, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture) {
+	scene, geos, shaders := job.scene, job.geos, job.shaders
+	bound: ^sdl.GPUGraphicsPipeline
 	sdl.PushGPUFragmentUniformData(cmd, 1, &job.lighting, size_of(job.lighting))
 	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	bound_vb: ^sdl.GPUBuffer
@@ -631,7 +674,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		bound_vb = g.vertices.buffer
 		bound_ib = g.indices.buffer
 	}
-	for di in job.order {
+	for di in order {
 		d := &scene.draws[di]
 		geo, _ := o3d.geometry_get_any(geos, &job.expanded, d.geometry) // draw_order kept only draws with geometry
 		dyn := d.geometry >= o3d.DYNAMIC_GEO_BIT
@@ -728,10 +771,14 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 			{texture = shadow_maps[2], sampler = g.shadow_sampler},
 			{texture = shadow_maps[3], sampler = g.shadow_sampler},
 			tex_binding(g, m.alpha_map),
-			// Sprites: the frame's depth (soft particles).
+			// Sprites: the frame's depth (soft particles); transmissive
+			// draws: the frame's snapshot.
 			{texture = job.depth_map if job.depth && job.depth_map != nil else g.dummy_shadow, sampler = g.shadow_sampler},
 		}
-		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], 14 if sprite else 13)
+		if !sprite {
+			samplers[13] = {texture = job.snapshot_tex if .Transmission in m.flags && job.snapshot_tex != nil else g.dummy_texture, sampler = g.frame_sampler}
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], 14)
 		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m, geo)
@@ -768,11 +815,6 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 		}
 	}
-	sdl.EndGPURenderPass(pass)
-	copy_pass := sdl.BeginGPUCopyPass(cmd)
-	sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = out}, width, height, 1, false)
-	sdl.EndGPUCopyPass(copy_pass)
-	return nil
 }
 // The frame's depth map from the job's last render of a scene with
 // `Scene.depth` (R32F, `width x height` of that render, rows from the top;

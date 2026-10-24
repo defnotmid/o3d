@@ -195,6 +195,28 @@ Material :: struct {
 	// projections hand over as the normal turns (the weights' power; 0: 4).
 	projection_scale:    f32,
 	projection_sharpness: f32,
+	// MeshPhysicalMaterial's (glTF's KHR_materials_ior, _clearcoat,
+	// _sheen): the index of refraction (0: 1.5), which sets a dielectric's
+	// reflectance; a clear coat over the surface (0 to 1: none to full,
+	// GGX with its own roughness, F0 0.04); sheen, a cloth's or velvet's
+	// rim (sRGB, black: none; Charlie distribution with its roughness).
+	ior:                 f32,
+	clearcoat:           f32,
+	clearcoat_roughness: f32,
+	sheen_color:         Vec3, // sRGB
+	sheen_roughness:     f32,
+	// Transmission (KHR_materials_transmission, _volume): how much light
+	// passes through (0 to 1), seen through the surface as the frame drawn
+	// before it (the opaque draws), refracted by the ior through
+	// `thickness` (in the model's units; 0: thin), blurred by roughness,
+	// tinted by the colour and absorbed toward `attenuation_color` (sRGB)
+	// over `attenuation_distance` (0: none). three.js's
+	// MeshPhysicalMaterial: transmissive draws come after the other opaque
+	// ones, which they see; they do not see each other or transparent draws.
+	transmission:        f32,
+	thickness:           f32,
+	attenuation_color:   Vec3,
+	attenuation_distance: f32,
 	shader:              Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
 	uniforms:            Uniform_Range,
@@ -1387,9 +1409,11 @@ depth_image :: proc "contextless" (c: Camera, depths: []f32, width, height: int,
 
 // The order to draw in: the draws that can be seen (with geometry, and a
 // compiled shader if they ask for one, the bounding sphere at least partly
-// in the view), the opaque ones as listed, then the blended ones farthest
-// from the camera first.
-draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, proj: Mat4, order: ^[dynamic]int, exp: ^Expanded_Draws = nil) {
+// in the view), the opaque ones as listed, the transmissive ones, then the
+// blended ones farthest from the camera first. `snapshot` is where the
+// frame drawn so far is kept for transmissive draws to see through: the
+// first transmissive one's place (len(order): none).
+draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, proj: Mat4, order: ^[dynamic]int, exp: ^Expanded_Draws = nil) -> (snapshot: int) {
 	clear(order)
 	n := len(scene.draws)
 	materials := scene_materials(scene)
@@ -1397,15 +1421,26 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	geometries := scene.draws.geometry[:n]
 	view_proj := proj * view
 	for m, i in materials {
-		if !blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
+		if !blended(m) && !transmissive(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
+			append(order, i)
+		}
+	}
+	snapshot = len(order)
+	for m, i in materials {
+		if !blended(m) && transmissive(m) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
 			append(order, i)
 		}
 	}
 	first := len(order)
+	transmissive_blended := false
 	for m, i in materials {
 		if blended(m) && (m.shader == 0 || shader_get(shaders, m.shader) != nil) && draw_seen(geos, geometries[i], models[i], view_proj, scene_draw_joints(scene, i), scene_draw_morphs(scene, i), exp) {
 			append(order, i)
+			transmissive_blended ||= transmissive(m)
 		}
+	}
+	if snapshot == first && !transmissive_blended {
+		snapshot = len(order)
 	}
 	// The view z of the model's origin: view's row 2 by its translation.
 	depth :: #force_inline proc "contextless" (model, view: Mat4) -> f32 {
@@ -1417,6 +1452,54 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 			back[j], back[j - 1] = back[j - 1], back[j]
 		}
 	}
+	return
+}
+
+// Whether a material sees the frame behind it (`Material.transmission`,
+// the standard material's; not particles').
+transmissive :: #force_inline proc "contextless" (m: Material) -> bool {
+	return m.transmission > 0 && m.shader == 0 && m.mode != .Sprites && .Basic not_in m.flags && .Toon not_in m.flags && .Shadow_Only not_in m.flags
+}
+
+// Each transmissive draw's thickness in world units: its material's times
+// the mean of its model's axis scales (three.js scales the ray by each).
+transmission_scale :: proc "contextless" (materials: []Shading_Material, models: []Mat4) {
+	for &m, i in materials {
+		if .Transmission in m.flags {
+			md := models[i]
+			sx := linalg.length(Vec3{md[0, 0], md[1, 0], md[2, 0]})
+			sy := linalg.length(Vec3{md[0, 1], md[1, 1], md[2, 1]})
+			sz := linalg.length(Vec3{md[0, 2], md[1, 2], md[2, 2]})
+			m.layers.thickness *= (sx + sy + sz) / 3
+		}
+	}
+}
+
+// Where a transmissive point sees the frame behind it (three.js's
+// getIBLVolumeRefraction): the view refracted into the surface by the ior,
+// out `thickness` later, projected to the frame (uv, v up), and the level
+// to read there (the frame's mips, blurrier as it is rougher and refracts
+// more).
+refraction :: #force_inline proc "contextless" (world, n, eye: Vec3, roughness: f32, ly: ^Shading_Layers, view_proj: Mat4, width: int) -> (uv: Vec2, lod: f32) {
+	v := linalg.normalize(eye - world)
+	ray := linalg.refract(-v, n, 1 / ly.ior)
+	if l := linalg.length(ray); l > 0 {
+		ray *= ly.thickness / l
+	}
+	c := view_proj * Vec4{world.x + ray.x, world.y + ray.y, world.z + ray.z, 1}
+	w := c.w if abs(c.w) > 1e-6 else 1e-6
+	uv = linalg.clamp(c.xy / w * 0.5 + 0.5, 0, 1)
+	lod = math.log2(f32(max(width, 1))) * clamp(roughness, 0.0525, 1) * clamp(ly.ior * 2 - 2, 0, 1)
+	return
+}
+
+// The frame behind a transmissive point, from its snapshot's texel
+// (premultiplied sRGB): linear light, premultiplied, and its alpha.
+frame_behind :: #force_inline proc "contextless" (c: Vec4) -> Vec4 {
+	if c.a <= 0 {
+		return {}
+	}
+	return Vec4{srgb_to_linear(c.r / c.a), srgb_to_linear(c.g / c.a), srgb_to_linear(c.b / c.a), 1} * c.a
 }
 
 // Whether a sphere (world centre and radius) is at least partly inside the
@@ -1592,7 +1675,28 @@ Shading_Material :: struct {
 	shader_maps:   [SHADER_MAPS]Texture_Id,
 	// Triplanar (`.Triplanar`): repeats per unit and the weights' power.
 	projection_scale, projection_sharpness: f32,
+	layers:        Shading_Layers,
 }
+
+// The physical material's terms (`Material.ior`, `.clearcoat`, `.sheen_*`),
+// clamped as three.js does; the clear coat and sheen are read when their
+// flags are set.
+Shading_Layers :: struct {
+	f0:                  f32, // a dielectric's reflectance from the ior (0.04 at 1.5)
+	clearcoat:           f32,
+	clearcoat_roughness: f32,
+	sheen_roughness:     f32,
+	sheen:               Vec3, // linear
+	transmission:        f32,
+	// World units (the material's times its draw's scale: `transmission_scale`).
+	thickness:           f32,
+	ior:                 f32,
+	// Absorption per world unit (log of the attenuation colour over its
+	// distance; 0: none).
+	attenuation:         Vec3,
+}
+
+SHADING_LAYERS_NONE :: Shading_Layers{f0 = 0.04, ior = 1.5}
 
 // Bit values are the shader's FLAG_* constants (o3d_test checks).
 Shading_Flag :: enum u8 {
@@ -1624,6 +1728,9 @@ Shading_Flag :: enum u8 {
 	Vertex_Colors,
 	// Maps projected along three axes (`Material.projection`).
 	Triplanar,
+	Clearcoat,
+	Sheen,
+	Transmission,
 }
 
 Shading_Flags :: bit_set[Shading_Flag; u32]
@@ -1737,8 +1844,35 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 		if .Additive in m.flags {
 			f += {.Additive}
 		}
+		ior := m.ior if m.ior > 0 else 1.5
+		r := (ior - 1) / (ior + 1)
+		layers := Shading_Layers {
+			f0                  = r * r,
+			clearcoat           = clamp(m.clearcoat, 0, 1),
+			clearcoat_roughness = clamp(m.clearcoat_roughness, 0.0525, 1),
+			sheen_roughness     = clamp(m.sheen_roughness, 0.07, 1),
+			sheen               = linear(m.sheen_color),
+			transmission        = clamp(m.transmission, 0, 1),
+			thickness           = max(m.thickness, 0),
+			ior                 = ior,
+		}
+		if m.attenuation_distance > 0 {
+			c := linear(m.attenuation_color)
+			layers.attenuation = {math.ln(max(c.r, 1e-4)), math.ln(max(c.g, 1e-4)), math.ln(max(c.b, 1e-4))} / m.attenuation_distance
+		}
+		if .Basic not_in f && .Toon not_in f && m.shader == 0 {
+			if layers.clearcoat > 0 {
+				f += {.Clearcoat}
+			}
+			if layers.sheen != {} {
+				f += {.Sheen}
+			}
+			if transmissive(m) {
+				f += {.Transmission}
+			}
+		}
 		if .Shadow_Only in m.flags && m.shader == 0 {
-			f = (f - TEXTURE_FLAGS - {.Basic, .Toon, .Alpha_Mask, .Curves, .Vertex_Colors}) + {.Shadow_Only, .Receive_Shadow}
+			f = (f - TEXTURE_FLAGS - {.Basic, .Toon, .Alpha_Mask, .Curves, .Vertex_Colors, .Clearcoat, .Sheen, .Transmission}) + {.Shadow_Only, .Receive_Shadow}
 		}
 		out[i] = {
 			base          = linear(m.color),
@@ -1763,6 +1897,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			shader_maps   = m.shader_maps,
 			projection_scale     = m.projection_scale if m.projection_scale > 0 else 1,
 			projection_sharpness = m.projection_sharpness if m.projection_sharpness > 0 else 4,
+			layers               = layers,
 		}
 	}
 }
@@ -1790,25 +1925,43 @@ surface :: #force_inline proc "contextless" (m: ^Shading_Material) -> Surface {
 // toward the eye: three.js's MeshStandardMaterial (Lambert diffuse, GGX
 // specular with Smith correlated visibility and Schlick Fresnel) or
 // MeshToonMaterial (`.Toon`: 3-band quantized cel-shading + stepped highlight),
-// direct lights plus ambient, hemisphere and equirectangular environment lighting.
+// direct lights plus ambient, hemisphere and equirectangular environment lighting,
+// with MeshPhysicalMaterial's layers (`layers`, nil: none; the dielectric
+// F0 from its ior, sheen and a clear coat over the rest).
 // `shadow` / `shadows` scale each shadow light's direct light (`shadow_factor`;
 // 1: lit); `ao` scales indirect light (ambient, hemisphere, environment).
-shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}) -> Vec3 {
+//
+// Transmission (`.Transmission`) takes its share of the diffuse light; what
+// it lets through of the frame behind (`refraction`, `frame_behind`) is
+// returned in `through`: rgb the factor on that light (linear, added after
+// tone mapping, as the frame was), a how much of the frame's alpha shows.
+shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}, layers: ^Shading_Layers = nil, through: ^Vec4 = nil) -> Vec3 {
 	base := m.base
 	if .Basic in m.flags {
 		return base
 	}
+	none := SHADING_LAYERS_NONE
+	ly := layers if layers != nil else &none
 	n := n_in
 	v := linalg.normalize(eye - world)
 	if linalg.dot(n, v) < 0 && .Two_Sided in m.flags {
 		n = -n
 	}
 	diffuse := base * (1 - m.metalness)
-	f0 := linalg.lerp(Vec3{0.04, 0.04, 0.04}, base, m.metalness)
+	f0 := linalg.lerp(Vec3(ly.f0), base, m.metalness)
 	roughness := clamp(m.roughness, 0.0525, 1)
 	alpha := roughness * roughness
 	nv := clamp(linalg.dot(n, v), 1e-4, 1)
-	out: Vec3
+	out, sheen, coat: Vec3
+	pass: Vec4
+	if .Transmission in m.flags {
+		// The light through: the base colour absorbed over the thickness,
+		// less what the surface reflects.
+		t := diffuse * linalg.exp(ly.attenuation * ly.thickness)
+		pass.rgb = ly.transmission * (1 - env_brdf(f0, roughness, nv)) * t
+		pass.a = ly.transmission * (t.r + t.g + t.b) / 3
+		diffuse *= 1 - ly.transmission
+	}
 	for &l in lights {
 		switch l.kind {
 		case .Ambient:
@@ -1864,29 +2017,91 @@ shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shadi
 			h := linalg.normalize(ldir + v)
 			nh := clamp(linalg.dot(n, h), 0, 1)
 			vh := clamp(linalg.dot(v, h), 0, 1)
-			// Schlick Fresnel, Smith-GGX correlated visibility, GGX distribution.
-			fresnel := f0 + (1 - f0) * math.pow(1 - vh, 5)
-			a2 := alpha * alpha
-			gv := nl * math.sqrt(a2 + (1 - a2) * nv * nv)
-			gl := nv * math.sqrt(a2 + (1 - a2) * nl * nl)
-			vis := 0.5 / max(gv + gl, 1e-6)
-			dd := nh * nh * (a2 - 1) + 1
-			dist := a2 / (math.PI * dd * dd)
-			out += irradiance * (diffuse / math.PI + fresnel * (vis * dist))
+			out += irradiance * (diffuse / math.PI + ggx(f0, alpha, nl, nv, nh, vh))
+			if .Sheen in m.flags {
+				sheen += irradiance * ly.sheen * (charlie(ly.sheen_roughness, nh) * neubelt(nv, nl))
+			}
+			if .Clearcoat in m.flags {
+				cr := ly.clearcoat_roughness
+				coat += irradiance * ggx(0.04, cr * cr, nl, nv, nh, vh)
+			}
 		}
 	}
 	if env.radiance != 0 {
 		r := 2 * linalg.dot(n, v) * n - v
 		irr := sample_lod_linear(env.textures, env.irradiance, equirect_uv(n), 0)
 		rad := sample_lod_linear(env.textures, env.radiance, equirect_uv(r), roughness * env.max_lod)
-		c0 :: Vec4{-1, -0.0275, -0.572, 0.022}
-		c1 :: Vec4{1, 0.0425, 1.04, -0.04}
-		rv := roughness * c0 + c1
-		a004 := min(rv.x * rv.x, linalg.exp2(-9.28 * nv)) * rv.x + rv.y
-		fab := Vec2{-1.04, 1.04} * a004 + rv.zw
-		spec := f0 * fab.x + fab.y
+		spec := env_brdf(f0, roughness, nv)
 		out += (ao * env.intensity) * (irr * diffuse * (1 - spec) + rad * spec)
+		if .Sheen in m.flags {
+			sheen += (ao * env.intensity) * irr * ly.sheen * ibl_sheen(ly.sheen_roughness, nv)
+		}
+		if .Clearcoat in m.flags {
+			cr := ly.clearcoat_roughness
+			coat += (ao * env.intensity) * sample_lod_linear(env.textures, env.radiance, equirect_uv(r), cr * env.max_lod) * env_brdf(0.04, cr, nv)
+		}
+	}
+	if .Sheen in m.flags {
+		k := 1 - 0.157 * max(ly.sheen.r, ly.sheen.g, ly.sheen.b)
+		out = out * k + sheen
+		pass.rgb *= k
+	}
+	if .Clearcoat in m.flags {
+		k := 1 - ly.clearcoat * (0.04 + 0.96 * math.pow(1 - nv, 5))
+		out = out * k + coat * ly.clearcoat
+		pass.rgb *= k
+	}
+	if through != nil {
+		through^ = pass
 	}
 	return out
+}
+
+// GGX specular (Schlick Fresnel to 1, Smith-GGX correlated visibility,
+// GGX distribution) of reflectance `f0` and alpha (roughness squared).
+@(private = "file")
+ggx :: #force_inline proc "contextless" (f0: Vec3, alpha, nl, nv, nh, vh: f32) -> Vec3 {
+	fresnel := f0 + (1 - f0) * math.pow(1 - vh, 5)
+	a2 := alpha * alpha
+	gv := nl * math.sqrt(a2 + (1 - a2) * nv * nv)
+	gl := nv * math.sqrt(a2 + (1 - a2) * nl * nl)
+	vis := 0.5 / max(gv + gl, 1e-6)
+	dd := nh * nh * (a2 - 1) + 1
+	return fresnel * (vis * a2 / (math.PI * dd * dd))
+}
+
+// Karis's analytic environment BRDF (three.js's EnvironmentBRDF, F90 1).
+@(private = "file")
+env_brdf :: #force_inline proc "contextless" (f0: Vec3, roughness, nv: f32) -> Vec3 {
+	c0 :: Vec4{-1, -0.0275, -0.572, 0.022}
+	c1 :: Vec4{1, 0.0425, 1.04, -0.04}
+	rv := roughness * c0 + c1
+	a004 := min(rv.x * rv.x, linalg.exp2(-9.28 * nv)) * rv.x + rv.y
+	fab := Vec2{-1.04, 1.04} * a004 + rv.zw
+	return f0 * fab.x + fab.y
+}
+
+// Sheen: the Charlie distribution and Neubelt's visibility (three.js's
+// D_Charlie, V_Neubelt), and its fit for environment light (IBLSheenBRDF,
+// times pi: o3d's irradiance maps hold three.js's irradiance over pi).
+@(private = "file")
+charlie :: #force_inline proc "contextless" (roughness, nh: f32) -> f32 {
+	inv := 1 / (roughness * roughness)
+	sin2h := max(1 - nh * nh, 0.0078125)
+	return (2 + inv) * math.pow(sin2h, inv * 0.5) / (2 * math.PI)
+}
+
+@(private = "file")
+neubelt :: #force_inline proc "contextless" (nv, nl: f32) -> f32 {
+	return clamp(1 / (4 * (nl + nv - nl * nv)), 0, 1)
+}
+
+@(private = "file")
+ibl_sheen :: #force_inline proc "contextless" (roughness, nv: f32) -> f32 {
+	r2 := roughness * roughness
+	a := -339.2 * r2 + 161.4 * roughness - 25.9 if roughness < 0.25 else -8.48 * r2 + 14.3 * roughness - 9.95
+	b := 44.0 * r2 - 23.7 * roughness + 3.26 if roughness < 0.25 else 1.97 * r2 - 3.27 * roughness + 0.72
+	dg := math.exp(a * nv + b) + (0 if roughness < 0.25 else 0.1 * (roughness - 0.25))
+	return clamp(dg / math.PI, 0, 1) * math.PI
 }
 

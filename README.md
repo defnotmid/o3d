@@ -43,7 +43,16 @@ What is known about three.js carries over:
   cut too), per-slot UV transforms `*_transform`
   (`offset`, `rotation`, `scale`, `tex_coord` 0 or 1 selecting `uv` or `uv1`),
   and the booleans as a bit set: `flags = {.Transparent, .Alpha_Mask,
-  .Flat_Shading, .No_Size_Attenuation}`), ShadowMaterial (`.Shadow_Only`:
+  .Flat_Shading, .No_Size_Attenuation}`) with MeshPhysicalMaterial's
+  layers: `ior` (a dielectric's reflectance), `clearcoat` and
+  `clearcoat_roughness` (a second GGX lobe over the rest), `sheen_color` and
+  `sheen_roughness` (cloth's Charlie lobe), and `transmission` with
+  `thickness`, `attenuation_color` and `attenuation_distance` (glass:
+  the frame drawn before the transmissive draws, kept with its mipmaps, seen
+  through them refracted by the ior, blurred by roughness and absorbed over
+  the thickness; three.js's transmission pass, so they see the opaque draws
+  but not each other or the transparent ones, and over the empty background
+  they leave it see-through), ShadowMaterial (`.Shadow_Only`:
   only the shadows it receives, `color` at `opacity` times the light they
   take, blended over what is behind: shadows on a backdrop or a video
   without a visible ground), MeshBasicMaterial (`.Basic`),
@@ -359,7 +368,9 @@ includes ovg's `shaders/curves.slang` from there too.
   with `alphaCutoff` default 0.5, `BLEND`; `occlusionTexture` red channel +
   `strength`; `KHR_materials_unlit`; `KHR_materials_emissive_strength`;
   `KHR_texture_transform` `offset`, `rotation`, `scale` and `texCoord` 0 or
-  1 per texture reference) into `Material`, punctual lights
+  1 per texture reference; the factors of `KHR_materials_ior`,
+  `_clearcoat`, `_sheen`, `_transmission` and `_volume`, not their
+  textures) into `Material`, punctual lights
   (`KHR_lights_punctual`: directional, point, and spot lights with `color`,
   `intensity`, `range`, and cone angles `innerConeAngle` / `outerConeAngle`)
   into `Model.lights`, the node hierarchy into a topologically sorted `#soa`
@@ -388,17 +399,18 @@ includes ovg's `shaders/curves.slang` from there too.
   o3d does not implement, loading fails with
   `Gltf_Error.Unsupported_Extension` and records the extension name in
   `Model.unsupported_extension`. Optional extensions listed only in
-  `extensionsUsed` (`KHR_materials_ior`, `KHR_materials_transmission`,
-  `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
-  `KHR_materials_specular`, `KHR_materials_iridescence`,
-  `KHR_materials_anisotropy`, …) are drawn without, as
+  `extensionsUsed` (`KHR_materials_specular`, `KHR_materials_iridescence`,
+  `KHR_materials_anisotropy`, `KHR_materials_dispersion`, …) are drawn
+  without, as
   the spec allows, each with a line in `Model.warnings` naming the
   materials that have it. Remaining unsupported required extensions (rejected with
   `.Unsupported_Extension`): `KHR_draco_mesh_compression`,
   `KHR_texture_basisu`, and any other extension outside
   `KHR_materials_unlit`, `KHR_materials_emissive_strength`,
   `KHR_texture_transform`, `KHR_mesh_quantization`, `KHR_lights_punctual`,
-  `EXT_meshopt_compression` and `EXT_texture_webp` (gltfpack or glTF-Transform
+  `EXT_meshopt_compression`, `EXT_texture_webp`, `KHR_materials_ior`,
+  `KHR_materials_clearcoat`, `KHR_materials_sheen`,
+  `KHR_materials_transmission` and `KHR_materials_volume` (gltfpack or glTF-Transform
   turn a Draco file into a meshopt one). A compressed view that does not
   decode fails the file with `Gltf_Error.Invalid_Compression`. Also not
   imported: glTF cameras.
@@ -731,11 +743,10 @@ For models people download:
 1. **Compressed models and remaining glTF extensions:** decoders for Draco
    (`KHR_draco_mesh_compression`) and KTX2 / Basis textures
    (`KHR_texture_basisu`), which today fail cleanly with
-   `Gltf_Error.Unsupported_Extension` when required; and optional PBR
-   extensions (`KHR_materials_transmission`, `KHR_materials_ior`,
-   `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
-   `KHR_materials_specular`), which today are ignored when listed in
-   `extensionsUsed`.
+   `Gltf_Error.Unsupported_Extension` when required; the textures of the
+   physical extensions (clear coat, sheen, transmission and thickness maps;
+   their factors are read); and `KHR_materials_specular`, ignored when
+   listed in `extensionsUsed`.
 
 For typical three.js scenes:
 

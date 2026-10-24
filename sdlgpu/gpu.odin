@@ -102,6 +102,8 @@ GPU :: struct {
 	dummy_texture:            ^sdl.GPUTexture,
 	linear_sampler:           ^sdl.GPUSampler,
 	env_sampler:              ^sdl.GPUSampler,
+	// Mipmapped, clamped: a frame's snapshot for transmissive draws.
+	frame_sampler:            ^sdl.GPUSampler,
 	// Per shader (its id - 1): ShaderMaterials' GPU shaders and pipelines,
 	// made the first time a frame draws with them.
 	custom:                   [dynamic]Custom,
@@ -161,8 +163,13 @@ Material_Uniforms :: struct {
 	// frame's world-to-local rows and normals-to-local rows.
 	triplanar:                          [4]f32,
 	to_local, normal_to_local:          [3][4]f32,
+	// o3d.Shading_Layers: f0, clear coat, its roughness, sheen roughness;
+	// sheen colour.
+	layers, sheen:                      [4]f32,
+	// Transmission, thickness (world units), ior; absorption per unit.
+	transmission, attenuation:          [4]f32,
 }
-#assert(size_of(Material_Uniforms) == 400)
+#assert(size_of(Material_Uniforms) == 464)
 
 Light_Uniforms :: struct {
 	color, ground, vector: [4]f32,
@@ -186,6 +193,8 @@ Lighting_Uniforms :: struct {
 	frame_params:  [4]f32,
 	fog_color:     [4]f32,
 	fog_params:    [4]f32,
+	// The camera's view-projection (transmission's refraction).
+	view_proj:     o3d.Mat4,
 	lights:        [o3d.MAX_LIGHTS]Light_Uniforms,
 }
 
@@ -242,10 +251,10 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	}
 	g.vert = sdl.CreateGPUShader(g.device, {code_size = len(vert_code), code = raw_data(vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_storage_buffers = 1, num_uniform_buffers = 1})
 	g.skinned_vert = sdl.CreateGPUShader(g.device, {code_size = len(skinned_vert_code), code = raw_data(skinned_vert_code), entrypoint = skinned_vs_entry, format = format, stage = .VERTEX, num_storage_buffers = 1, num_uniform_buffers = 2})
-	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 13, num_uniform_buffers = 2})
+	g.frag = sdl.CreateGPUShader(g.device, {code_size = len(frag_code), code = raw_data(frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 14, num_uniform_buffers = 2})
 	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT, num_samplers = 2, num_uniform_buffers = 1})
 	g.curves_vert = sdl.CreateGPUShader(g.device, {code_size = len(curves_vert_code), code = raw_data(curves_vert_code), entrypoint = curves_vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
-	g.curves_frag = sdl.CreateGPUShader(g.device, {code_size = len(curves_code), code = raw_data(curves_code), entrypoint = curves_entry, format = format, stage = .FRAGMENT, num_samplers = 13, num_storage_buffers = 1, num_uniform_buffers = 2})
+	g.curves_frag = sdl.CreateGPUShader(g.device, {code_size = len(curves_code), code = raw_data(curves_code), entrypoint = curves_entry, format = format, stage = .FRAGMENT, num_samplers = 14, num_storage_buffers = 1, num_uniform_buffers = 2})
 	g.sprite_frag = sdl.CreateGPUShader(g.device, {code_size = len(sprite_code), code = raw_data(sprite_code), entrypoint = sprite_entry, format = format, stage = .FRAGMENT, num_samplers = 14, num_storage_buffers = 1, num_uniform_buffers = 2})
 	g.shadow_curves_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_curves_code), code = raw_data(shadow_curves_code), entrypoint = shadow_curves_entry, format = format, stage = .FRAGMENT, num_samplers = 2, num_storage_buffers = 1, num_uniform_buffers = 1})
 	g.bg_vert = sdl.CreateGPUShader(g.device, {code_size = len(bg_vert_code), code = raw_data(bg_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
@@ -288,12 +297,13 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.shadow_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .NEAREST, mag_filter = .NEAREST, mipmap_mode = .NEAREST, address_mode_u = .CLAMP_TO_EDGE, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE})
 	g.linear_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .REPEAT, address_mode_v = .REPEAT, address_mode_w = .REPEAT, max_lod = f32(o3d.MAX_MIPS)})
 	g.env_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .REPEAT, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE, max_lod = f32(o3d.MAX_MIPS)})
+	g.frame_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .CLAMP_TO_EDGE, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE, max_lod = f32(o3d.MAX_MIPS)})
 	g.dummy_texture = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = 1, height = 1, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 	g.morph_deltas.capacity = 64 << 10
 	g.morph_deltas.buffer = sdl.CreateGPUBuffer(g.device, {usage = {.GRAPHICS_STORAGE_READ}, size = g.morph_deltas.capacity})
 	g.curve_words.capacity = 64 << 10
 	g.curve_words.buffer = sdl.CreateGPUBuffer(g.device, {usage = {.GRAPHICS_STORAGE_READ}, size = g.curve_words.capacity})
-	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.dummy_texture == nil || g.morph_deltas.buffer == nil || g.curve_words.buffer == nil {
+	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.frame_sampler == nil || g.dummy_texture == nil || g.morph_deltas.buffer == nil || g.curve_words.buffer == nil {
 		return .Device
 	}
 	// 1x1 fallback shadow and colour textures, cleared, bound for unused slots.
@@ -341,6 +351,9 @@ destroy :: proc(g: ^GPU) {
 	}
 	if g.env_sampler != nil {
 		sdl.ReleaseGPUSampler(g.device, g.env_sampler)
+	}
+	if g.frame_sampler != nil {
+		sdl.ReleaseGPUSampler(g.device, g.frame_sampler)
 	}
 	for &c in g.custom {
 		release_custom(g, &c)
@@ -699,6 +712,31 @@ release_depth :: proc(g: ^GPU, job: ^Job) {
 		sdl.ReleaseGPUTexture(g.device, job.depth_buffer)
 	}
 	job.depth_map, job.depth_buffer, job.depth_size = nil, nil, {}
+}
+
+// A job's snapshot of its frame before the transmissive draws, with a
+// full mip chain (o3d.texture_grow's), at the frame's size.
+@(private)
+ensure_snapshot :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
+	if job.snapshot_size == {width, height} && job.snapshot_tex != nil {
+		return true
+	}
+	release_snapshot(g, job)
+	levels: u32 = 1
+	for w, h := width, height; w > 1 || h > 1; w, h = max(w >> 1, 1), max(h >> 1, 1) {
+		levels += 1
+	}
+	job.snapshot_tex = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = levels})
+	job.snapshot_size = {width, height}
+	return job.snapshot_tex != nil
+}
+
+@(private)
+release_snapshot :: proc(g: ^GPU, job: ^Job) {
+	if job.snapshot_tex != nil {
+		sdl.ReleaseGPUTexture(g.device, job.snapshot_tex)
+	}
+	job.snapshot_tex, job.snapshot_size = nil, {}
 }
 
 @(private)
