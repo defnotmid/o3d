@@ -53,6 +53,8 @@ Gltf_Error :: enum u8 {
 	// extensionsRequired names an extension o3d does not implement;
 	// `Model.unsupported_extension` has its name.
 	Unsupported_Extension,
+	// A view's compressed data (EXT_meshopt_compression) does not decode.
+	Invalid_Compression,
 	// A `Max` limit (limits.odin) was passed; `Model.warnings` says which.
 	Limit,
 }
@@ -73,6 +75,7 @@ GLTF_ERROR_TEXT := [Gltf_Error]string {
 	.Buffer_Io             = "a buffer file it names could not be read",
 	.Invalid               = "an accessor, view or index points past its data",
 	.Unsupported_Extension = "requires an unsupported glTF extension",
+	.Invalid_Compression   = "compressed data that does not decode",
 	.Limit                 = "too large to read (a limit was reached)",
 }
 

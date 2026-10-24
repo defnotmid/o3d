@@ -853,7 +853,7 @@ test_gltf_unsupported_extensions :: proc(t: ^testing.T) {
 	geos: Geometries
 	defer geometries_destroy(&geos)
 
-	for ext in ([]string{"KHR_draco_mesh_compression", "EXT_meshopt_compression", "KHR_texture_basisu"}) {
+	for ext in ([]string{"KHR_draco_mesh_compression", "KHR_texture_basisu"}) {
 		src := fmt.tprintf(`{{"asset":{{"version":"2.0"}},"extensionsUsed":[%q],"extensionsRequired":[%q]}}`, ext, ext)
 		m, err := gltf_parse(transmute([]u8)src, &geos)
 		defer model_destroy(&m)

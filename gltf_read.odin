@@ -53,6 +53,17 @@ Gltf_Buffer_View :: struct {
 	stride:         int,
 }
 
+// A view stored compressed (EXT_meshopt_compression): its bytes decode
+// from `length` bytes at `offset` in `buffer` into the view, which is its
+// own span of the decoded buffer (the last in `buffers`).
+Gltf_Meshopt :: struct {
+	view, buffer:   i32,
+	offset, length: int,
+	count, stride:  int,
+	mode:           Meshopt_Mode,
+	filter:         Meshopt_Filter,
+}
+
 Gltf_Accessor :: struct {
 	view:       i32, // -1: all zeros (or only the sparse values)
 	sparse:     i32, // -1, or into `Gltf_Document.sparse`
@@ -235,6 +246,7 @@ Gltf_Document :: struct {
 	buffers:             [][]u8,
 	buffer_lengths:      []int,
 	views:               []Gltf_Buffer_View,
+	meshopt:             [dynamic]Gltf_Meshopt,
 	accessors:           []Gltf_Accessor,
 	sparse:              [dynamic]Gltf_Sparse,
 	images:              []Gltf_Image,
@@ -286,6 +298,8 @@ GLTF_EXTENSIONS := [?]string {
 	"KHR_texture_transform",
 	"KHR_mesh_quantization",
 	"KHR_lights_punctual",
+	"EXT_meshopt_compression",
+	"EXT_texture_webp",
 }
 
 // Reads a `.gltf` or `.glb` in memory into `doc` (destroy it, error or not):
@@ -699,11 +713,6 @@ gltf_parse_root :: proc(r: ^Gltf_Reader, root: json.Object) {
 		fail(r, .Limit)
 		return
 	}
-	doc.buffers = make([][]u8, len(buffers))
-	doc.buffer_lengths = make([]int, len(buffers))
-	for v, i in buffers {
-		doc.buffer_lengths[i] = get_size(r, as_object(r, v), "byteLength")
-	}
 	doc.views = make([]Gltf_Buffer_View, len(views))
 	doc.accessors = make([]Gltf_Accessor, len(accessors))
 	doc.images = make([]Gltf_Image, len(images))
@@ -715,6 +724,7 @@ gltf_parse_root :: proc(r: ^Gltf_Reader, root: json.Object) {
 	doc.animations = make([]Gltf_Animation, len(animations))
 	doc.scenes = make([]Gltf_Range, len(scenes))
 	doc.lights = make([]Gltf_Light, len(lights))
+	doc.meshopt = make([dynamic]Gltf_Meshopt)
 	doc.sparse = make([dynamic]Gltf_Sparse)
 	doc.primitives = make([dynamic]Gltf_Primitive)
 	doc.attributes = make([dynamic]Gltf_Attribute)
@@ -725,6 +735,7 @@ gltf_parse_root :: proc(r: ^Gltf_Reader, root: json.Object) {
 	doc.floats = make([dynamic]f32)
 	doc.strings = make([dynamic]string)
 
+	decoded := 0
 	for v, i in views {
 		o := as_object(r, v)
 		doc.views[i] = {
@@ -736,6 +747,20 @@ gltf_parse_root :: proc(r: ^Gltf_Reader, root: json.Object) {
 		if doc.views[i].buffer < 0 {
 			fail(r)
 		}
+		if exts, has_exts := get_object(r, o, "extensions"); has_exts {
+			if mo, has := get_object(r, exts, "EXT_meshopt_compression"); has {
+				parse_meshopt(r, mo, i32(i), len(buffers), &decoded)
+			}
+		}
+	}
+	// The decoded views' buffer after the file's, when there are any.
+	doc.buffers = make([][]u8, len(buffers) + (1 if len(doc.meshopt) > 0 else 0))
+	doc.buffer_lengths = make([]int, len(doc.buffers))
+	for v, i in buffers {
+		doc.buffer_lengths[i] = get_size(r, as_object(r, v), "byteLength")
+	}
+	if len(doc.meshopt) > 0 {
+		doc.buffer_lengths[len(buffers)] = decoded
 	}
 	for v, i in accessors {
 		parse_accessor(r, as_object(r, v), &doc.accessors[i])
@@ -747,7 +772,14 @@ gltf_parse_root :: proc(r: ^Gltf_Reader, root: json.Object) {
 		doc.images[i].uri = strings.clone(uri, r.a)
 	}
 	for v, i in textures {
-		doc.textures[i] = get_index(r, as_object(r, v), "source", len(images))
+		o := as_object(r, v)
+		doc.textures[i] = get_index(r, o, "source", len(images))
+		// WebP decodes like any image: its source over the fallback.
+		if exts, has_exts := get_object(r, o, "extensions"); has_exts {
+			if webp, has := get_object(r, exts, "EXT_texture_webp"); has {
+				doc.textures[i] = get_index(r, webp, "source", len(images))
+			}
+		}
 	}
 	for v, i in materials {
 		parse_material(r, as_object(r, v), &doc.materials[i])
@@ -857,6 +889,58 @@ parse_accessor :: proc(r: ^Gltf_Reader, o: json.Object, acc: ^Gltf_Accessor) {
 	}
 	acc.sparse = i32(len(r.doc.sparse))
 	append(&r.doc.sparse, s)
+}
+
+// A compressed view's source and how it decodes; the view becomes the next
+// span of the decoded buffer (index `buffers`, `decoded` bytes so far,
+// spans 4-byte aligned).
+@(private = "file")
+parse_meshopt :: proc(r: ^Gltf_Reader, o: json.Object, view: i32, buffers: int, decoded: ^int) {
+	m := Gltf_Meshopt {
+		view   = view,
+		buffer = get_index(r, o, "buffer", buffers),
+		offset = get_size(r, o, "byteOffset"),
+		length = get_size(r, o, "byteLength"),
+		count  = get_size(r, o, "count"),
+		stride = get_size(r, o, "byteStride"),
+	}
+	mode, _ := get_string(r, o, "mode")
+	switch mode {
+	case "ATTRIBUTES":
+		m.mode = .Attributes
+	case "TRIANGLES":
+		m.mode = .Triangles
+	case "INDICES":
+		m.mode = .Indices
+	case:
+		fail(r)
+	}
+	filter, has_filter := get_string(r, o, "filter")
+	switch filter {
+	case "NONE":
+	case "OCTAHEDRAL":
+		m.filter = .Octahedral
+	case "QUATERNION":
+		m.filter = .Quaternion
+	case "EXPONENTIAL":
+		m.filter = .Exponential
+	case:
+		if has_filter {
+			fail(r)
+		}
+	}
+	if m.buffer < 0 || m.stride <= 0 || m.stride > 256 || m.filter != .None && m.mode != .Attributes {
+		fail(r)
+	}
+	size := m.count * m.stride
+	if r.err != nil || !budget_take(&r.doc.budget, .Gltf_Buffer_Bytes, size) {
+		fail(r, .Limit if r.err == nil else r.err)
+		return
+	}
+	v := &r.doc.views[view]
+	v.buffer, v.offset, v.length = i32(buffers), decoded^, size
+	decoded^ = (decoded^ + size + 3) & ~int(3)
+	append(&r.doc.meshopt, m)
 }
 
 @(private = "file")
@@ -1206,6 +1290,38 @@ gltf_load_buffers :: proc(r: ^Gltf_Reader, root: json.Object, bin: []u8, has_bin
 			if r.err != nil {
 				return
 			}
+		}
+	}
+	if len(doc.meshopt) == 0 {
+		return
+	}
+	decoded, alloc_err := make([]u8, doc.buffer_lengths[len(buffers)], r.a)
+	if alloc_err != nil {
+		fail(r, .Out_Of_Memory)
+		return
+	}
+	doc.buffers[len(buffers)] = decoded
+	for m in doc.meshopt {
+		data := doc.buffers[m.buffer]
+		if data == nil || !fits(len(data), m.offset, 1, 0, m.length) {
+			fail(r, .Invalid)
+			return
+		}
+		src := data[m.offset:][:m.length]
+		v := doc.views[m.view]
+		dst := decoded[v.offset:][:v.length]
+		ok: bool
+		switch m.mode {
+		case .Attributes:
+			ok = meshopt_decode_vertices(dst, src, m.count, m.stride) && meshopt_unfilter(dst, m.count, m.stride, m.filter)
+		case .Triangles:
+			ok = meshopt_decode_triangles(dst, src, m.count, m.stride)
+		case .Indices:
+			ok = meshopt_decode_indices(dst, src, m.count, m.stride)
+		}
+		if !ok {
+			fail(r, .Invalid_Compression)
+			return
 		}
 	}
 }

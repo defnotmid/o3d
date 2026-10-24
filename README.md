@@ -347,11 +347,15 @@ includes ovg's `shaders/curves.slang` from there too.
   `model_material` as durable ids, and
   unpack meshes (`POSITION`, `NORMAL`, `TEXCOORD_0`, `TEXCOORD_1`,
   `JOINTS_0`, `WEIGHTS_0` with weights normalized, including normalized and
-  non-normalized integer attributes from `KHR_mesh_quantization`, plus morph
+  non-normalized integer attributes from `KHR_mesh_quantization`, and views
+  compressed with `EXT_meshopt_compression` (meshoptimizer's attribute,
+  triangle and index-sequence codecs and its octahedral, quaternion and
+  exponential filters, as gltfpack and glTF-Transform write them; decoded
+  once into a buffer of the document's), plus morph
   target `POSITION` and `NORMAL` deltas — `TANGENT` deltas are ignored as
   tangents are derived from screen derivatives) into `Geometries`, mesh
   default `weights` and `extras.targetNames` into `Model`, images into
-  `Textures`, metallic-roughness materials (`alphaMode`: `OPAQUE`, `MASK`
+  `Textures` (WebP ones by `EXT_texture_webp`), metallic-roughness materials (`alphaMode`: `OPAQUE`, `MASK`
   with `alphaCutoff` default 0.5, `BLEND`; `occlusionTexture` red channel +
   `strength`; `KHR_materials_unlit`; `KHR_materials_emissive_strength`;
   `KHR_texture_transform` `offset`, `rotation`, `scale` and `texCoord` 0 or
@@ -387,15 +391,17 @@ includes ovg's `shaders/curves.slang` from there too.
   `extensionsUsed` (`KHR_materials_ior`, `KHR_materials_transmission`,
   `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
   `KHR_materials_specular`, `KHR_materials_iridescence`,
-  `KHR_materials_anisotropy`, `EXT_texture_webp`, …) are drawn without, as
+  `KHR_materials_anisotropy`, …) are drawn without, as
   the spec allows, each with a line in `Model.warnings` naming the
   materials that have it. Remaining unsupported required extensions (rejected with
   `.Unsupported_Extension`): `KHR_draco_mesh_compression`,
-  `EXT_meshopt_compression`, `KHR_texture_basisu`, `EXT_texture_webp`, and
-  any other extension outside `KHR_materials_unlit`,
-  `KHR_materials_emissive_strength`, `KHR_texture_transform`,
-  `KHR_mesh_quantization`, and `KHR_lights_punctual`. Also not imported: glTF
-  cameras.
+  `KHR_texture_basisu`, and any other extension outside
+  `KHR_materials_unlit`, `KHR_materials_emissive_strength`,
+  `KHR_texture_transform`, `KHR_mesh_quantization`, `KHR_lights_punctual`,
+  `EXT_meshopt_compression` and `EXT_texture_webp` (gltfpack or glTF-Transform
+  turn a Draco file into a meshopt one). A compressed view that does not
+  decode fails the file with `Gltf_Error.Invalid_Compression`. Also not
+  imported: glTF cameras.
 - **3MF (`threemf.odin`):** `threemf_load` and `threemf_parse` read `.3mf`
   (3D Manufacturing Format) ZIP archives (`3D/3dmodel.model` via `_rels/.rels`,
   plus production-extension sub-model `.model` parts) into the same flat
@@ -723,9 +729,8 @@ most important first.
 For models people download:
 
 1. **Compressed models and remaining glTF extensions:** decoders for Draco
-   (`KHR_draco_mesh_compression`), meshopt (`EXT_meshopt_compression`),
-   KTX2 / Basis textures (`KHR_texture_basisu`) and WebP textures
-   (`EXT_texture_webp`), which today fail cleanly with
+   (`KHR_draco_mesh_compression`) and KTX2 / Basis textures
+   (`KHR_texture_basisu`), which today fail cleanly with
    `Gltf_Error.Unsupported_Extension` when required; and optional PBR
    extensions (`KHR_materials_transmission`, `KHR_materials_ior`,
    `KHR_materials_volume`, `KHR_materials_clearcoat`, `KHR_materials_sheen`,
@@ -739,11 +744,7 @@ For typical three.js scenes:
 
 For onimite:
 
-3. **Textures that change every frame:** a video clip or a group's 2D
-   drawing mapped onto a surface. Today a texture is added once
-   (`texture_add`); this needs an update path the host fills per frame
-   (on the GPU: a texture the host renders into).
-4. **Exact extrusion caps**, optional: extrusions' caps as exact shapes
+3. **Exact extrusion caps**, optional: extrusions' caps as exact shapes
    (unbevelled first; a bevelled cap is an offset outline). Opaque caps
    draw by sample, which equals the mesh, so this waits on a need.
 
