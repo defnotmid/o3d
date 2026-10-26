@@ -150,249 +150,249 @@ float curves_solve_monotone_0(float a_0, float b_0, float c_1, float v_0)
 }
 
 
-#line 467
+#line 470
 int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 {
 
-#line 467
+#line 470
     bool _S7;
     if((p_0.x) >= (curves_f_0(words_3, s_2 + 10U)))
     {
 
-#line 468
+#line 471
         _S7 = true;
 
-#line 468
+#line 471
     }
     else
     {
 
-#line 468
+#line 471
         _S7 = (p_0.y) < 0.0f;
 
-#line 468
+#line 471
     }
 
-#line 468
+#line 471
     if(_S7)
     {
 
-#line 468
+#line 471
         _S7 = true;
 
-#line 468
+#line 471
     }
     else
     {
 
-#line 468
+#line 471
         _S7 = (p_0.y) >= (curves_f_0(words_3, s_2 + 11U));
 
-#line 468
+#line 471
     }
 
-#line 468
+#line 471
     if(_S7)
     {
 
-#line 468
+#line 471
         return int(0);
     }
 
-#line 469
+#line 472
     Curves_Span_0 g_2 = curves_span_0(words_3, s_2, p_0, 0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 469
+#line 472
     thread Curves_Span_0 _S8 = g_2;
 
-#line 469
+#line 472
     uint _S9 = curves_cell_0(s_2, &_S8, g_2.i0_0, g_2.j0_0);
 
 
     int _S10 = int(words_3[_S9 + 2U]);
-    uint _S11 = s_2 + words_3[_S9 + 3U];
-    uint _S12 = _S9 + 1U;
+    uint _S11 = _S9 + 1U;
 
-#line 474
-    uint _S13 = words_3[_S12] >> 16U;
+#line 476
+    uint _S12 = s_2 + words_3[_S9] + words_3[_S11];
+    uint _S13 = words_3[_S9 + 3U];
 
-#line 474
+#line 477
     uint k_0 = 0U;
 
-#line 474
+#line 477
     int w_0 = _S10;
     for(;;)
     {
 
-#line 475
+#line 478
         if(k_0 < _S13)
         {
         }
         else
         {
 
-#line 475
+#line 478
             break;
         }
 
-#line 476
-        uint _S14 = _S11 + 2U * k_0;
+#line 479
+        uint _S14 = _S12 + 2U * k_0;
 
-#line 476
+#line 479
         if((curves_f_0(words_3, _S14)) <= (p_0.y))
         {
 
-#line 476
+#line 479
             w_0 = w_0 + int(words_3[_S14 + 1U]);
 
-#line 476
+#line 479
         }
 
-#line 475
+#line 478
         k_0 = k_0 + 1U;
 
-#line 475
+#line 478
     }
 
 
     uint _S15 = s_2 + words_3[s_2 + 6U];
     uint _S16 = s_2 + words_3[_S9];
-    uint _S17 = words_3[_S12] & 65535U;
+    uint _S17 = words_3[_S11];
 
-#line 480
+#line 483
     k_0 = 0U;
     for(;;)
     {
 
-#line 481
+#line 484
         if(k_0 < _S17)
         {
         }
         else
         {
 
-#line 481
+#line 484
             break;
         }
 
-#line 482
+#line 485
         uint c_2 = _S15 + 6U * words_3[_S16 + k_0];
         float2 p1_0 = curves_point_0(words_3, c_2, p_0);
         float2 p2_0 = curves_point_0(words_3, c_2 + 2U, p_0);
         float2 p3_0 = curves_point_0(words_3, c_2 + 4U, p_0);
         float _S18 = p1_0.y;
 
-#line 486
+#line 489
         float _S19 = p3_0.y;
         float _S20 = max(_S18, _S19);
         if(0.0f < (min(_S18, _S19)))
         {
 
-#line 488
+#line 491
             _S7 = true;
 
-#line 488
+#line 491
         }
         else
         {
 
-#line 488
+#line 491
             _S7 = 0.0f >= _S20;
 
-#line 488
+#line 491
         }
 
-#line 488
+#line 491
         bool _S21;
 
-#line 488
+#line 491
         if(_S7)
         {
 
-#line 488
+#line 491
             _S21 = true;
 
-#line 488
+#line 491
         }
         else
         {
 
-#line 488
+#line 491
             _S21 = (max(p1_0.x, p3_0.x)) <= 0.0f;
 
-#line 488
+#line 491
         }
 
-#line 488
+#line 491
         if(_S21)
         {
 
-#line 488
+#line 491
             k_0 = k_0 + 1U;
 
-#line 481
+#line 484
             continue;
         }
 
-#line 489
+#line 492
         float _S22 = p2_0.y;
 
-#line 489
+#line 492
         float t_0 = curves_solve_monotone_0(_S18 - 2.0f * _S22 + _S19, 2.0f * (_S22 - _S18), _S18, 0.0f);
         float _S23 = p1_0.x;
 
-#line 490
+#line 493
         float _S24 = p2_0.x;
 
-#line 490
+#line 493
         int w_1;
 
-#line 490
+#line 493
         if((((_S23 - 2.0f * _S24 + p3_0.x) * t_0 + 2.0f * (_S24 - _S23)) * t_0 + _S23) > 0.0f)
         {
 
-#line 491
+#line 494
             if(_S19 > _S18)
             {
 
-#line 491
+#line 494
                 w_1 = int(1);
 
-#line 491
+#line 494
             }
             else
             {
 
-#line 491
+#line 494
                 w_1 = int(-1);
 
-#line 491
+#line 494
             }
 
-#line 491
+#line 494
             w_1 = w_0 + w_1;
 
-#line 490
+#line 493
         }
         else
         {
 
-#line 490
+#line 493
             w_1 = w_0;
 
-#line 490
+#line 493
         }
 
-#line 490
+#line 493
         w_0 = w_1;
 
-#line 481
+#line 484
         k_0 = k_0 + 1U;
 
-#line 481
+#line 484
     }
 
-#line 494
+#line 497
     return w_0;
 }
 
