@@ -14,6 +14,7 @@ import sdl "vendor:sdl3"
 
 import o3d ".."
 import "deps:oksl"
+import "deps:ovg/curves"
 
 VERT_SPV :: #load("../shaders/o3d.vert.spv")
 SKINNED_VERT_SPV :: #load("../shaders/o3d.skinned_vert.spv")
@@ -25,6 +26,9 @@ SHADOW_SPV :: #load("../shaders/o3d.shadow.spv")
 SHADOW_MSL :: #load("../shaders/o3d.shadow.msl")
 CURVES_VERT_SPV :: #load("../shaders/o3d.curves_vert.spv")
 CURVES_VERT_MSL :: #load("../shaders/o3d.curves_vert.msl")
+// The curve shaders read the words as the ovg they were compiled from lays
+// them out; against another layout they would draw garbage.
+#assert(curves.FORMAT == SHADERS_CURVES_FORMAT, "o3d's curve shaders read another ovg curves.FORMAT: use the ovg this o3d's tag names, or rerun shaders/build.sh against this one")
 CURVES_FRAG_SPV :: #load("../shaders/o3d.curves_frag.spv")
 CURVES_FRAG_MSL :: #load("../shaders/o3d.curves_frag.msl")
 SPRITE_FRAG_SPV :: #load("../shaders/o3d.sprite_frag.spv")

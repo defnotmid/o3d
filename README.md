@@ -316,7 +316,11 @@ as `deps:odecs/image`: clone [oksl](https://github.com/defnotmid/oksl),
 [ovg](https://github.com/defnotmid/ovg) and
 [odecs](https://github.com/defnotmid/odecs) next to o3d, and builds pass
 `-collection:deps=..` (the directory holding them). `shaders/build.sh`
-includes ovg's `shaders/curves.slang` from there too.
+includes ovg's `shaders/curves.slang` from there too, and records the
+curves format it reads (ovg's `curves.FORMAT`) in
+`sdlgpu/curves_format.odin`: o3d_sdlgpu does not compile against an ovg
+of another format (each o3d tag names the ovg it needs), where its curve
+shaders would draw garbage.
 
 - `odin test . -collection:deps=..` and `odin test sdlgpu
   -collection:deps=..`: the CPU and GPU tests. A GPU test fails without a

@@ -8,6 +8,14 @@ cd "$(dirname "$0")"
 
 # ovg's curves.slang (exact shapes' coverage) from its checkout beside o3d.
 FLAGS=(-matrix-layout-column-major -O2 -I . -I ../../ovg/shaders)
+# The layout of the curves words that curves.slang reads (ovg's
+# curves.FORMAT), from the same checkout: o3d_sdlgpu refuses to build
+# against an ovg with another.
+FORMAT=$(sed -n 's/^FORMAT :: \([0-9][0-9]*\).*/\1/p' ../../ovg/curves/curves.odin)
+if [ -z "$FORMAT" ]; then
+	echo "no FORMAT in ../../ovg/curves/curves.odin" >&2
+	exit 1
+fi
 UNITS=(
 	o3d:vert:vs_main
 	o3d:skinned_vert:vs_skinned
@@ -33,4 +41,12 @@ for unit in "${UNITS[@]}"; do
 	spirv-val --target-env vulkan1.2 "$mod.$suffix.spv"
 	echo "  $mod.slang:$entry -> $mod.$suffix.{spv,msl}"
 done
+cat >../sdlgpu/curves_format.odin <<EOF
+package o3d_sdlgpu
+
+// Written by shaders/build.sh: the ovg curves format (curves.FORMAT) the
+// committed curve shaders read.
+SHADERS_CURVES_FORMAT :: $FORMAT
+EOF
+echo "  curves format $FORMAT -> sdlgpu/curves_format.odin"
 

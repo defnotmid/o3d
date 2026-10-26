@@ -235,7 +235,7 @@ curve_set_add :: proc(g: ^Geometries, p: ^Path, fill_rule := Fill_Rule.Nonzero, 
 // `font_glyph_shape`, in font units with y down) as a curve set, copied.
 // 0 when the block is too short for its header or fills nothing.
 curve_set_add_words :: proc(g: ^Geometries, words: []u32, origin: Vec2, extent: f32, fill_rule := Fill_Rule.Nonzero) -> Curve_Set_Id {
-	if len(words) < CURVE_HEADER_WORDS || int(words[6]) > len(words) || !(extent > 0) {
+	if len(words) < curves.HEADER || int(words[6]) > len(words) || !(extent > 0) {
 		return 0
 	}
 	x0, y0, x1, y1 := curves.bounds(words)
@@ -254,10 +254,6 @@ curve_set_get :: proc "contextless" (g: ^Geometries, id: Curve_Set_Id) -> (Curve
 	}
 	return g.curve_sets[id - 1], true
 }
-
-// The words of ovg curves' header (bounds and offsets), before its cells.
-@(private)
-CURVE_HEADER_WORDS :: 12
 
 // A glyph of a run: curve set `set` with its units' origin at `position`
 // (run units).
