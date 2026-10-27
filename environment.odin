@@ -143,7 +143,7 @@ env_fetch :: #force_inline proc "contextless" (mip: []$T, w, h: int, uv: Vec2) -
 @(private = "file")
 env_store :: #force_inline proc "contextless" (dst: ^$T, c: Vec3) {
 	when T == [4]f16 {
-		dst^ = {f16(min(c.r, 65504)), f16(min(c.g, 65504)), f16(min(c.b, 65504)), 1}
+		dst^ = to_halves({min(c.r, 65504), min(c.g, 65504), min(c.b, 65504), 1})
 	} else {
 		dst^ = {srgb8(c.r), srgb8(c.g), srgb8(c.b), 255}
 	}

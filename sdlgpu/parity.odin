@@ -71,6 +71,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"layer_maps", 240, 180, build_layer_maps},
 	{"transmission_mips", 270, 170, build_transmission_mips},
 	{"reflector", 270, 170, build_reflector},
+	{"depth_of_field", 271, 171, build_depth_of_field},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -2313,5 +2314,19 @@ build_reflector :: proc(a: ^Parity_Assets) -> string {
 	shaded.shader = facets
 	shaded.uniforms = o3d.scene_uniforms(s, {"uTints", {0.9, 0.3, 0.3, 0.3, 0.9, 0.3, 0.3, 0.3, 0.9}})
 	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.35, 0.35, 0.35), o3d.compose({2.0, 0.6, 0.2}, {0.5, 0.7, 0}), shaded})
+	return ""
+}
+
+// The reflector's scene through a lens focused on its metal sphere: the
+// floor and what is nearer or farther blurred more as they are (the
+// mirror's light, additive and transparent draws among them), at an odd
+// size (the last tile and the half copy's last row and column partial).
+build_depth_of_field :: proc(a: ^Parity_Assets) -> string {
+	if e := build_reflector(a); e != "" {
+		return e
+	}
+	c := &a.scene.camera
+	axis := linalg.normalize(c.target - c.position)
+	a.scene.depth_of_field = {focus = linalg.dot(o3d.Vec3{-0.2, 0.4, 0.3} - c.position, axis), blur = 24.0 / 1080}
 	return ""
 }

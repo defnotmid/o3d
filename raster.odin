@@ -9,9 +9,12 @@ import "deps:ovg/curves"
 
 // Phase 3 of the software renderer: each band clears its rows, rasterizes its
 // triangles in drawing order (per pixel when untextured, in 2x2 quads when
-// textured, an exact shape's, or running an oksl ShaderMaterial), and resolves 4x MSAA samples
-// into premultiplied RGBA8 pixels. The equirectangular background is laid
-// into the samples first, as the GPU draws it first.
+// textured, an exact shape's, or running an oksl ShaderMaterial) into its
+// samples' light (half floats, premultiplied by coverage, blended there, as
+// the GPU's frame), and resolves its pixels: the 4 samples averaged, tone
+// mapped and sRGB-encoded once (or kept as light, for a snapshot or the
+// mirror). The equirectangular background is laid into the samples first,
+// as the GPU draws it first.
 
 @(private)
 draw_band :: proc(data: rawptr, band, wi: int) {
@@ -24,14 +27,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	if !job.keep {
 		slice.fill(s.depth[y0 * width * SAMPLES:y1 * width * SAMPLES], 0)
 		if job.bg_tex == 0 {
-			for &c in s.color[y0 * width * SAMPLES:y1 * width * SAMPLES] {
-				c = job.clear
-			}
-			if job.capture {
-				for &c in s.hdr[y0 * width * SAMPLES:y1 * width * SAMPLES] {
-					c = job.clear_light
-				}
-			}
+			slice.fill(s.light[y0 * width * SAMPLES:y1 * width * SAMPLES], job.clear)
 		} else {
 			// The background first, as the GPU draws it: what is drawn then
 			// blends over it or adds to it.
@@ -49,11 +45,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 				for x in 0 ..< width {
 					dir := linalg.normalize(ray0 + f32(x) * ray_step)
 					c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
-					bg := pack(tone_map(c, job.tone_mapping, job.tone_exposure), 1)
-					slice.fill(s.color[(y * width + x) * SAMPLES:][:SAMPLES], bg)
-					if job.capture {
-						slice.fill(s.hdr[(y * width + x) * SAMPLES:][:SAMPLES], rgb9e5(c))
-					}
+					slice.fill(s.light[(y * width + x) * SAMPLES:][:SAMPLES], to_halves({c.r, c.g, c.b, 1}))
 				}
 			}
 		}
@@ -68,39 +60,57 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 		draw_standard(job, refs[r], t, y0, y1)
 		r += 1
 	}
-	// The mirror's pass keeps only its light.
-	if !job.mirrored {
+	// The pixels: their samples' light averaged, kept (the snapshot's or
+	// the reflection's level 0), or tone mapped and encoded as the frame's.
+	if job.capture_into != nil {
 		for i in y0 * width ..< y1 * width {
-			// Two channels a sum: red and blue, green and alpha (4 samples
-			// of 255 fit 16 bits).
-			rb, ga: u32
-			for k in 0 ..< SAMPLES {
-				c := s.color[i * SAMPLES + k]
-				rb += c & 0x00ff00ff
-				ga += (c >> 8) & 0x00ff00ff
-			}
-			s.pixels[i * 4 + 0] = u8(((rb & 0xffff) + SAMPLES / 2) / SAMPLES)
-			s.pixels[i * 4 + 1] = u8(((ga & 0xffff) + SAMPLES / 2) / SAMPLES)
-			s.pixels[i * 4 + 2] = u8(((rb >> 16) + SAMPLES / 2) / SAMPLES)
-			s.pixels[i * 4 + 3] = u8(((ga >> 16) + SAMPLES / 2) / SAMPLES)
+			job.capture_into[i] = to_halves(pixel_light(s, i))
 		}
+		return
 	}
-	if job.capture {
-		// The snapshot's or reflection's level 0: the samples' light
-		// averaged, premultiplied as the colour's alpha (the clear's light
-		// already is).
-		level := job.capture_into
+	if job.light_into != nil {
 		for i in y0 * width ..< y1 * width {
-			light: Vec3
-			alpha: u32
-			for k in 0 ..< SAMPLES {
-				light += rgb9e5_light(s.hdr[i * SAMPLES + k])
-				alpha += s.color[i * SAMPLES + k] >> 24
-			}
-			light *= 1.0 / SAMPLES
-			level[i] = {f16(light.r), f16(light.g), f16(light.b), f16(f32(alpha) / (255 * SAMPLES))}
+			job.light_into[i] = pixel_light(s, i)
 		}
+		return
 	}
+	for i in y0 * width ..< y1 * width {
+		out := output(pixel_light(s, i), job.tone_mapping, job.tone_exposure)
+		copy(s.pixels[i * 4:][:4], out[:])
+	}
+}
+
+// A pixel's light: its samples' averaged (premultiplied; alpha its
+// coverage). Most pixels' four are one light (inside a triangle, or where
+// nothing is drawn): read once, the same mean.
+@(private = "file")
+pixel_light :: #force_inline proc "contextless" (s: ^Software, i: int) -> [4]f32 {
+	px := s.light[i * SAMPLES:][:SAMPLES]
+	first := transmute(u64)px[0]
+	if transmute(u64)px[1] == first && transmute(u64)px[2] == first && transmute(u64)px[3] == first {
+		return from_halves(px[0])
+	}
+	sum: [4]f32
+	for p in px {
+		sum += from_halves(p)
+	}
+	return sum * (1.0 / SAMPLES)
+}
+
+// A pixel of the frame from its light (premultiplied): tone mapped, sRGB
+// premultiplied RGBA8, as the GPU's output pass writes it. Light past what
+// its coverage holds (added light over nothing) stays, as colour past the
+// alpha (up to full), which a premultiplied over adds.
+@(private)
+output :: #force_inline proc "contextless" (light: [4]f32, mode: Tone_Mapping, exposure: f32) -> [4]u8 {
+	a := clamp(light.a, 0, 1)
+	if a <= 0 {
+		return {}
+	}
+	c := tone_map(light.rgb / a, mode, exposure)
+	k := clamp(max(c.r, c.g, c.b), 1, 1 / a)
+	rgb := pack(c / k, a * k)
+	return {u8(rgb), u8(rgb >> 8), u8(rgb >> 16), u8(math.round(a * 255))}
 }
 
 // What a transmissive point sees behind it (`shade`'s `behind`), its
@@ -115,7 +125,7 @@ behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n_in: Vec
 		// The mirror has no snapshot: the environment shows through.
 		return {}
 	}
-	return frame_behind(&job.s.snapshot, uv, lod)
+	return frame_behind(job.snapshot, &job.snapshot_tex, uv, lod)
 }
 
 // What a reflective point at pixel (x, y) reads of the frame's reflection
@@ -141,62 +151,13 @@ clipped :: #force_inline proc "contextless" (job: ^Frame_Job, p: Vec3) -> bool {
 	return linalg.dot(job.clip.xyz, p) + job.clip.w < 0
 }
 
-// A finished colour with transmission's alpha under 1 (the frame behind
-// showing): kept premultiplied as the frame's was, so `pack` multiplying
-// by the alpha gives back what three.js writes.
+// A shaded point's light as the frame keeps it: premultiplied by its
+// material's alpha, coverage that alpha times transmission's (`through`:
+// what shows behind glass is in `c` already, as the GPU writes it).
 @(private = "file")
-see_through :: #force_inline proc "contextless" (c: Vec3, a: f32) -> Vec3 {
-	if a >= 1 {
-		return c
-	}
-	out: Vec3
-	for ch, i in c {
-		out[i] = srgb_to_linear(min(linear_to_srgb(ch) / max(a, 1e-4), 1))
-	}
-	return out
-}
-
-// A colour's linear light for the snapshot or the mirror, fogged and not
-// tone mapped, premultiplied by its `alpha` (the material's, before
-// transmission's), when the pass keeps one (else 0).
-@(private = "file")
-snapshot_light :: #force_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3, alpha: f32) -> u32 {
-	if !job.capture {
-		return 0
-	}
-	return capture_light(job, lit, world, alpha)
-}
-
-// Out of line: the frame's shading loops stay as they were without it.
-@(private = "file")
-capture_light :: #force_no_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3, alpha: f32) -> u32 {
-	return rgb9e5(finish_color(lit, world, job.eye, .None, 1, job.fog, job.fog_color) * clamp(alpha, 0, 1))
-}
-
-// RGB9E5: three 9-bit mantissas with a shared 5-bit exponent, a sample's
-// linear light in 32 bits (0 to 65408).
-@(private)
-rgb9e5 :: proc "contextless" (c: Vec3) -> u32 {
-	MAX :: 65408.0
-	r, g, b := clamp(c.r, 0, MAX), clamp(c.g, 0, MAX), clamp(c.b, 0, MAX)
-	top := max(r, g, b)
-	if !(top > 0) {
-		return 0
-	}
-	e := max(int(math.floor(math.log2(top))), -16) + 16
-	scale := math.ldexp(f32(1), 24 - e)
-	if math.floor(top * scale + 0.5) >= 512 {
-		e += 1
-		scale *= 0.5
-	}
-	m := Vec3{math.floor(r * scale + 0.5), math.floor(g * scale + 0.5), math.floor(b * scale + 0.5)}
-	return u32(m.r) | u32(m.g) << 9 | u32(m.b) << 18 | u32(e) << 27
-}
-
-@(private)
-rgb9e5_light :: #force_inline proc "contextless" (v: u32) -> Vec3 {
-	scale := math.ldexp(f32(1), int(v >> 27) - 24)
-	return Vec3{f32(v & 511), f32((v >> 9) & 511), f32((v >> 18) & 511)} * scale
+light_of :: #force_inline proc "contextless" (c: Vec3, alpha, through: f32) -> [4]f32 {
+	a := clamp(alpha, 0, 1)
+	return {c.r * a, c.g * a, c.b * a, a * through}
 }
 
 // A band of the shadow map: its rows cleared to the far plane (0), then each
@@ -399,9 +360,8 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			} else {
 				lit = shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, m.layers.f0, mp)
 			}
-			hdr := snapshot_light(job, lit, p, out_alpha)
-			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, width, dz, x, y, covered, pack(see_through(lit, a), out_alpha * a), blend_of(m), hdr)
+			lit = fogged(lit, p, job.eye, job.fog, job.fog_color)
+			write_samples(s, width, dz, x, y, covered, light_of(lit, out_alpha, a), blend_of(m))
 		}
 	}
 }
@@ -438,8 +398,8 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 			for si in 0 ..< job.shadow_count {
 				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 			}
-			lit := finish_color(m.base, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, width, dz, x, y, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m), 0)
+			lit := fogged(m.base, p, job.eye, job.fog, job.fog_color)
+			write_samples(s, width, dz, x, y, covered, light_of(lit, m.opacity * (1 - mask), 1), blend_of(m))
 		}
 	}
 }
@@ -656,9 +616,8 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				} else {
 					lit = shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, m.layers.f0, mp)
 				}
-				hdr := snapshot_light(job, lit, worlds[l], opacity)
-				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				write_samples(s, width, dz, x, y, covered, pack(see_through(lit, a), opacity * a), blend_of(m), hdr)
+				lit = fogged(lit, worlds[l], job.eye, job.fog, job.fog_color)
+				write_samples(s, width, dz, x, y, covered, light_of(lit, opacity, a), blend_of(m))
 			}
 		}
 	}
@@ -934,10 +893,12 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		dz := depth_plane(t, edge(t.p[0].xy, t.p[1].xy, t.p[2].xy))
 		for l in q.shaded[qi] {
 			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
+			// Its output is light (three.js's in a render target), premultiplied
+			// when blended, as the GPU's SRC_ALPHA blend multiplies it.
 			c := q.colours[qi * 4 + l]
-			// Its light premultiplied as the blend multiplies it.
-			hdr := rgb9e5(c.rgb * (clamp(c.a, 0, 1) if blend != .Opaque else 1)) if job.capture else 0
-			write_samples(s, width, dz, x, y, q.covered[qi][l], pack_raw(c, blend != .Opaque), blend, hdr)
+			a := clamp(c.a, 0, 1)
+			k: f32 = a if blend != .Opaque else 1
+			write_samples(s, width, dz, x, y, q.covered[qi][l], {c.r * k, c.g * k, c.b * k, a}, blend)
 		}
 	}
 	return taken
@@ -995,13 +956,13 @@ coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (
 	return
 }
 
-// A pixel's colour into its covered samples that pass the depth test:
-// replacing them (depth written), blended over them or added to them
-// (premultiplied colour added, alpha over; depth kept). Kept, its light
-// `hdr` (premultiplied) likewise, blended in linear light as the GPU's
-// half-float target blends it.
+// A pixel's light (premultiplied) into its covered samples that pass the
+// depth test: replacing them (depth written), over them, or added to them
+// (light added, alpha over; depth kept), in half floats as the GPU's
+// target blends.
 @(private = "file")
-write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask, col: u32, blend: Blend, hdr: u32) {
+write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask, light: [4]f32, blend: Blend) {
+	px := to_halves(light)
 	for k in covered {
 		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
 		i := (y * width + x) * SAMPLES + k
@@ -1010,36 +971,15 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz:
 		}
 		switch blend {
 		case .Opaque:
-			s.color[i] = col
+			s.light[i] = px
 			s.depth[i] = z
-			if s.capture {
-				s.hdr[i] = hdr
-			}
 		case .Over:
-			if s.capture {
-				blend_light(s, i, hdr, col >> 24)
-			}
-			s.color[i] = over(col, s.color[i])
+			s.light[i] = to_halves(light + from_halves(s.light[i]) * (1 - light.a))
 		case .Add:
-			dst := s.color[i]
-			out := over(col, dst) & 0xff000000
-			for sh in ([3]u32{0, 8, 16}) {
-				out |= min(((col >> sh) & 0xff) + ((dst >> sh) & 0xff), 255) << sh
-			}
-			s.color[i] = out
-			if s.capture {
-				blend_light(s, i, hdr, 0)
-			}
+			dst := from_halves(s.light[i])
+			s.light[i] = to_halves({light.r + dst.r, light.g + dst.g, light.b + dst.b, light.a + dst.a * (1 - light.a)})
 		}
 	}
-}
-
-// A blended sample's light over the one kept (`over`: the alpha it covers
-// with, 0 to 255; 0 adds): only the mirror's pass blends what it keeps.
-// Out of line, so the frame's writes stay as small as they were.
-@(private = "file")
-blend_light :: #force_no_inline proc "contextless" (s: ^Software, i: int, hdr, over: u32) {
-	s.hdr[i] = rgb9e5(rgb9e5_light(hdr) + rgb9e5_light(s.hdr[i]) * (1 - f32(over) / 255))
 }
 
 // A triangle's screen depth as a plane: at its first corner, and per pixel
@@ -1091,7 +1031,7 @@ inside :: #force_inline proc "contextless" (t: Tri, p: Vec2, area: f32) -> bool 
 
 // Linear colour to sRGB premultiplied RGBA8.
 @(private = "file")
-pack :: proc "contextless" (c: Vec3, alpha: f32) -> u32 {
+pack :: #force_inline proc "contextless" (c: Vec3, alpha: f32) -> u32 {
 	// Clamped as the GPU's 8-bit target clamps: out of range, a channel
 	// would spill into the next.
 	k := clamp(alpha, 0, 1)
@@ -1100,33 +1040,6 @@ pack :: proc "contextless" (c: Vec3, alpha: f32) -> u32 {
 	b := u32(math.round(linear_to_srgb(c.b) * k * 255))
 	a := u32(math.round(k * 255))
 	return r | g << 8 | b << 16 | a << 24
-}
-
-// A ShaderMaterial's output as written (no conversion) to RGBA8,
-// premultiplied when it is blended (as the GPU's SRC_ALPHA blend does).
-@(private = "file")
-pack_raw :: proc "contextless" (c: [4]f32, blend: bool) -> u32 {
-	a := clamp(c.a, 0, 1)
-	m: f32 = a if blend else 1
-	out: u32
-	for ch in 0 ..< 3 {
-		out |= u32(math.round(clamp(c[ch], 0, 1) * m * 255)) << (8 * u32(ch))
-	}
-	return out | u32(math.round(a * 255)) << 24
-}
-
-// Premultiplied `src` over `dst` (in the stored sRGB values, as the GPU's
-// fixed-function blend on an UNORM target does).
-@(private = "file")
-over :: proc "contextless" (src, dst: u32) -> u32 {
-	inv := 255 - (src >> 24)
-	out: u32
-	for sh in ([4]u32{0, 8, 16, 24}) {
-		s := (src >> sh) & 0xff
-		d := (dst >> sh) & 0xff
-		out |= min(s + (d * inv + 127) / 255, 255) << sh
-	}
-	return out
 }
 
 // The pixels the host bound to external texture `id` for the software

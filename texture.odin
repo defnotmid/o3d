@@ -81,9 +81,59 @@ texture_add_hdr :: proc(t: ^Textures, pixels: []f32, width, height: int) -> Text
 halves :: proc "contextless" (dst: [][4]f16, src: []f32) #no_bounds_check {
 	for &px, i in dst {
 		for c in 0 ..< 4 {
-			px[c] = f16(clamp(src[i * 4 + c], -65504, 65504))
+			px[c] = to_half(clamp(src[i * 4 + c], -65504, 65504))
 		}
 	}
+}
+
+// Half floats to floats and back by their bits, exactly (to the nearest,
+// ties to even; F. Giesen's): Odin's casts call a library routine on CPUs
+// without F16C, which made reading half floats the software renderer's
+// largest cost.
+@(private)
+from_half :: #force_inline proc "contextless" (h: f16) -> f32 {
+	MAGIC :: f32(1.0 / 16384) // 2^-14: a subnormal's scale, renormalized
+	SHIFTED_EXP :: u32(0x7c00) << 13
+	u := u32(transmute(u16)h)
+	o := (u & 0x7fff) << 13
+	exp := o & SHIFTED_EXP
+	o += (127 - 15) << 23
+	if exp == SHIFTED_EXP {
+		o += (128 - 16) << 23 // inf, NaN
+	} else if exp == 0 {
+		o += 1 << 23 // zero, subnormal
+		o = transmute(u32)(transmute(f32)o - MAGIC)
+	}
+	return transmute(f32)(o | (u & 0x8000) << 16)
+}
+
+@(private)
+to_half :: #force_inline proc "contextless" (f: f32) -> f16 {
+	DENORM_MAGIC :: f32(0.5) // ((127 - 15) + (23 - 10) + 1) << 23
+	u := transmute(u32)f
+	sign := u & 0x80000000
+	u ~= sign
+	o: u32
+	if u >= (127 + 16) << 23 {
+		o = 0x7e00 if u > 255 << 23 else 0x7c00 // NaN, inf
+	} else if u < 113 << 23 {
+		o = transmute(u32)(transmute(f32)u + DENORM_MAGIC) - transmute(u32)DENORM_MAGIC // subnormal, zero
+	} else {
+		mant_odd := (u >> 13) & 1
+		u = u - ((127 - 15) << 23) + 0xfff
+		o = (u + mant_odd) >> 13
+	}
+	return transmute(f16)u16(o | sign >> 16)
+}
+
+@(private)
+from_halves :: #force_inline proc "contextless" (h: [4]f16) -> [4]f32 {
+	return {from_half(h[0]), from_half(h[1]), from_half(h[2]), from_half(h[3])}
+}
+
+@(private)
+to_halves :: #force_inline proc "contextless" (c: [4]f32) -> [4]f16 {
+	return {to_half(c[0]), to_half(c[1]), to_half(c[2]), to_half(c[3])}
 }
 
 // A texture's levels laid out at the end of `table` (texels or
@@ -222,8 +272,8 @@ downsample_mip_hdr :: proc "contextless" (src: [][4]f16, sw, sh: int, dst: [][4]
 		row1 := min(y * 2 + 1, sh - 1) * sw
 		for x in 0 ..< dw {
 			x0, x1 := min(x * 2, sw - 1), min(x * 2 + 1, sw - 1)
-			sum := linalg.array_cast(src[row0 + x0], f32) + linalg.array_cast(src[row0 + x1], f32) + linalg.array_cast(src[row1 + x0], f32) + linalg.array_cast(src[row1 + x1], f32)
-			dst[y * dw + x] = linalg.array_cast(sum * 0.25, f16)
+			sum := from_halves(src[row0 + x0]) + from_halves(src[row0 + x1]) + from_halves(src[row1 + x0]) + from_halves(src[row1 + x1])
+			dst[y * dw + x] = to_halves(sum * 0.25)
 		}
 	}
 }
@@ -245,9 +295,9 @@ downsample_mip_hdr_blit :: proc "contextless" (src: [][4]f16, sw, sh: int, dst: 
 		y0, y1, wy := tap(y, sh, dh)
 		for x in 0 ..< dw {
 			x0, x1, wx := tap(x, sw, dw)
-			top := linalg.lerp(linalg.array_cast(src[y0 * sw + x0], f32), linalg.array_cast(src[y0 * sw + x1], f32), wx)
-			bottom := linalg.lerp(linalg.array_cast(src[y1 * sw + x0], f32), linalg.array_cast(src[y1 * sw + x1], f32), wx)
-			dst[y * dw + x] = linalg.array_cast(linalg.lerp(top, bottom, wy), f16)
+			top := linalg.lerp(from_halves(src[y0 * sw + x0]), from_halves(src[y0 * sw + x1]), wx)
+			bottom := linalg.lerp(from_halves(src[y1 * sw + x0]), from_halves(src[y1 * sw + x1]), wx)
+			dst[y * dw + x] = to_halves(linalg.lerp(top, bottom, wy))
 		}
 	}
 }
@@ -389,8 +439,8 @@ sample_mip_hdr :: proc "contextless" (mip: [][4]f16, w, h: int, uv: Vec2, clamp_
 		iy1 = 0 if iy0 + 1 >= h else iy0 + 1
 	}
 	row0, row1 := iy0 * w, iy1 * w
-	top := linalg.lerp(linalg.array_cast(mip[row0 + ix0], f32), linalg.array_cast(mip[row0 + ix1], f32), wt.x)
-	bottom := linalg.lerp(linalg.array_cast(mip[row1 + ix0], f32), linalg.array_cast(mip[row1 + ix1], f32), wt.x)
+	top := linalg.lerp(from_halves(mip[row0 + ix0]), from_halves(mip[row0 + ix1]), wt.x)
+	bottom := linalg.lerp(from_halves(mip[row1 + ix0]), from_halves(mip[row1 + ix1]), wt.x)
 	return linalg.lerp(top, bottom, wt.y)
 }
 

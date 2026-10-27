@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compiles o3d.slang, background.slang and depth.slang to the SPIR-V (Vulkan) and MSL
+# Compiles o3d.slang, background.slang, depth.slang and post.slang to the SPIR-V (Vulkan) and MSL
 # (Metal) blobs the SDL_GPU backend #loads. Only needed after editing a
 # shader; the outputs are committed. DXIL (D3D12) is produced when slangc's
 # dxc works; Windows otherwise runs on Vulkan.
@@ -29,6 +29,12 @@ UNITS=(
 	background:frag:fs_main
 	depth:vert:vs_main
 	depth:frag:fs_main
+	post:vert:vs_main
+	post:output:fs_output
+	post:focus_tiles:fs_focus_tiles
+	post:focus_near:fs_focus_near
+	post:focus_half:fs_focus_half
+	post:focus:fs_focus
 )
 for unit in "${UNITS[@]}"; do
 	IFS=: read -r mod suffix entry <<<"$unit"

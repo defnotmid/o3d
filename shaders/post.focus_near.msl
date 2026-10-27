@@ -1,0 +1,125 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float output_0 [[color(0)]];
+};
+
+
+#line 12 "post.slang"
+struct Post_FS_0
+{
+    float4 tone_0;
+    float4 lens_0;
+    float4 camera_0;
+    float4 frame_0;
+};
+
+
+#line 19
+struct KernelContext_0
+{
+    Post_FS_0 constant* post_0;
+    texture2d<float, access::sample> tileMap_texture_0;
+    sampler tileMap_sampler_0;
+};
+
+
+#line 92
+[[fragment]] pixelOutput_0 fs_focus_near(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> tileMap_texture_1 [[texture(2)]], sampler tileMap_sampler_1 [[sampler(2)]])
+{
+
+#line 92
+    thread KernelContext_0 kernelContext_0;
+
+#line 92
+    (&kernelContext_0)->post_0 = post_1;
+
+#line 92
+    (&kernelContext_0)->tileMap_texture_0 = tileMap_texture_1;
+
+#line 92
+    (&kernelContext_0)->tileMap_sampler_0 = tileMap_sampler_1;
+    int2 _S1 = int2(position_0.xy);
+    int2 _S2 = int2(post_1->frame_0.zw);
+    int reach_0 = int(post_1->lens_0.w);
+
+    int _S3 = _S1.y;
+
+#line 97
+    int _S4 = max(_S3 - reach_0, int(0));
+
+#line 97
+    float m_0 = 0.0f;
+
+#line 97
+    int y_0 = _S4;
+
+#line 97
+    for(;;)
+    {
+
+#line 97
+        if(y_0 < (min(_S3 + reach_0 + int(1), _S2.y)))
+        {
+        }
+        else
+        {
+
+#line 97
+            break;
+        }
+
+#line 98
+        int _S5 = _S1.x;
+
+#line 98
+        int x_0 = max(_S5 - reach_0, int(0));
+
+#line 98
+        for(;;)
+        {
+
+#line 98
+            if(x_0 < (min(_S5 + reach_0 + int(1), _S2.x)))
+            {
+            }
+            else
+            {
+
+#line 98
+                break;
+            }
+
+#line 99
+            float _S6 = max(m_0, (((&kernelContext_0)->tileMap_texture_0).sample(((&kernelContext_0)->tileMap_sampler_0), ((float2(float(x_0), float(y_0)) + float2(0.5f) ) / float2(_S2)), level((0.0f))).x));
+
+#line 98
+            int _S7 = x_0 + int(1);
+
+#line 98
+            m_0 = _S6;
+
+#line 98
+            x_0 = _S7;
+
+#line 98
+        }
+
+#line 97
+        y_0 = y_0 + int(1);
+
+#line 97
+    }
+
+#line 97
+    pixelOutput_0 _S8 = { m_0 };
+
+#line 102
+    return _S8;
+}
+

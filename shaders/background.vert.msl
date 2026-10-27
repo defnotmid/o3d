@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 3343 "core.meta.slang"
+#line 21 "background.slang"
 struct vs_main_Result_0
 {
     float4 position_0 [[position]];
@@ -11,21 +11,21 @@ struct vs_main_Result_0
 };
 
 
-#line 3343
+#line 21
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 3343
+#line 21
 struct Background_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_vp_0;
 };
 
 
-#line 17 "background.slang"
+#line 17
 struct KernelContext_0
 {
     Background_VS_natural_0 constant* bg_vs_0;

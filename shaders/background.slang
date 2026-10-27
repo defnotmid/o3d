@@ -1,4 +1,4 @@
-// Fullscreen equirectangular background pass for SDL_GPU, compiled by
+// Fullscreen equirectangular background pass for SDL_GPU (its light), compiled by
 // build.sh to SPIR-V (Vulkan) and MSL (Metal). Drawn with 3 vertices via
 // SV_VertexID (no vertex buffer), unprojecting the camera ray per corner and
 // sampling the background texture (or its prefiltered radiance pyramid when
@@ -10,8 +10,8 @@ struct Background_VS {
 };
 
 struct Background_FS {
-    float4 params; // x = intensity, y = lod, z = tone_mapping, w = tone_exposure
-    uint4 flags; // x: the map is linear (HDR), not sRGB-encoded; y: drawing the transmission snapshot (linear out)
+    float4 params; // x = intensity, y = lod
+    uint4 flags; // x: the map is linear (HDR), not sRGB-encoded
 };
 
 [[vk::binding(0, 1)]] ConstantBuffer<Background_VS> bg_vs : register(b0, space1);
@@ -42,11 +42,7 @@ float4 fs_main(VS_Out i) : SV_Target {
     if (bg_fs.flags.x == 0u) {
         bg = linear_rgb(bg);
     }
-    bg *= bg_fs.params.x;
-    if (bg_fs.flags.y != 0u) {
-        return float4(bg, 1);
-    }
-    bg = tone_map(bg, uint(bg_fs.params.z), bg_fs.params.w);
-    return float4(linear_to_srgb(bg.r), linear_to_srgb(bg.g), linear_to_srgb(bg.b), 1);
+    // Light, as the draws over it write theirs.
+    return float4(bg * bg_fs.params.x, 1);
 }
 

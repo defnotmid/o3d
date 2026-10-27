@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 240 "o3d.slang"
+#line 241 "o3d.slang"
 struct VS_Out_0
 {
     float4 position_0;
@@ -53,114 +53,114 @@ struct KernelContext_0
 };
 
 
-#line 1096
+#line 1083
 float shadow_depth_0(const VS_Out_0 thread* i_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1097
+#line 1084
     if(((kernelContext_0->material_0->flags_0) & 2048U) != 0U)
     {
 
-#line 1097
+#line 1084
         uint mask_slot_0;
 
 
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
-#line 1100
+#line 1087
             mask_slot_0 = 0U;
 
-#line 1100
+#line 1087
         }
         else
         {
 
-#line 1100
+#line 1087
             mask_slot_0 = 6U;
 
-#line 1100
+#line 1087
         }
 
-#line 1100
+#line 1087
         float2 raw_0;
         if((((kernelContext_0->material_0->uv_sets_0) >> mask_slot_0) & 1U) != 0U)
         {
 
-#line 1101
+#line 1088
             raw_0 = i_0->uv1_0;
 
-#line 1101
+#line 1088
         }
         else
         {
 
-#line 1101
+#line 1088
             raw_0 = i_0->uv_0;
 
-#line 1101
+#line 1088
         }
         float a_0 = kernelContext_0->material_0->color_1.w;
 
-#line 1102
+#line 1089
         float a_1;
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
             float3 _S1 = float3(raw_0, 1.0f);
 
-#line 1106
+#line 1093
             a_1 = a_0 * ((kernelContext_0->colorMap_texture_0).sample((kernelContext_0->colorMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[0U].xyz, _S1), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[1U].xyz, _S1))), level((0.0f)))).w;
 
-#line 1103
+#line 1090
         }
         else
         {
 
-#line 1103
+#line 1090
             a_1 = a_0;
 
-#line 1103
+#line 1090
         }
 
-#line 1109
+#line 1096
         if(((kernelContext_0->material_0->flags_0) & 16384U) != 0U)
         {
 
             float3 _S2 = float3(raw_0, 1.0f);
 
-#line 1112
+#line 1099
             a_1 = a_1 * ((kernelContext_0->shadowAlphaMap_texture_0).sample((kernelContext_0->shadowAlphaMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[12U].xyz, _S2), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[13U].xyz, _S2))), level((0.0f)))).y;
 
-#line 1109
+#line 1096
         }
 
-#line 1115
+#line 1102
         if(a_1 < (kernelContext_0->material_0->alpha_cutoff_0))
         {
 
-#line 1116
+#line 1103
             discard_fragment();
 
-#line 1115
+#line 1102
         }
 
-#line 1097
+#line 1084
     }
 
-#line 1119
+#line 1106
     return i_0->position_0.z;
 }
 
 
-#line 1119
+#line 1106
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 1119
+#line 1106
 struct pixelInput_0
 {
     float3 world_1 [[user(TEXCOORD)]];
@@ -171,53 +171,53 @@ struct pixelInput_0
 };
 
 
-#line 1123
+#line 1110
 [[fragment]] pixelOutput_0 fs_shadow(pixelInput_0 _S3 [[stage_in]], float4 position_1 [[position]], Material_0 constant* material_1 [[buffer(0)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> shadowAlphaMap_texture_1 [[texture(1)]], sampler shadowAlphaMap_sampler_1 [[sampler(1)]])
 {
 
-#line 1123
+#line 1110
     thread KernelContext_0 kernelContext_1;
 
-#line 1123
+#line 1110
     (&kernelContext_1)->material_0 = material_1;
 
-#line 1123
+#line 1110
     (&kernelContext_1)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 1123
+#line 1110
     (&kernelContext_1)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 1123
+#line 1110
     (&kernelContext_1)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
 
-#line 1123
+#line 1110
     (&kernelContext_1)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
 
-#line 1123
+#line 1110
     thread VS_Out_0 _S4;
 
-#line 1123
+#line 1110
     (&_S4)->position_0 = position_1;
 
-#line 1123
+#line 1110
     (&_S4)->world_0 = _S3.world_1;
 
-#line 1123
+#line 1110
     (&_S4)->normal_0 = _S3.normal_1;
 
-#line 1123
+#line 1110
     (&_S4)->uv_0 = _S3.uv_1;
 
-#line 1123
+#line 1110
     (&_S4)->uv1_0 = _S3.uv1_1;
 
-#line 1123
+#line 1110
     (&_S4)->color_0 = _S3.color_2;
 
-#line 1123
+#line 1110
     float _S5 = shadow_depth_0(&_S4, &kernelContext_1);
 
-#line 1123
+#line 1110
     pixelOutput_0 _S6 = { _S5 };
     return _S6;
 }

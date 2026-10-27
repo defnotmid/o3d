@@ -69,6 +69,60 @@ Fog :: struct {
 	density:   f32, // Exp2 (0 defaults to 0.00025)
 }
 
+// Depth of field (fframes-three-d's Focus; three.js's BokehPass): what is
+// not at `focus` blurs, a pixel by blur * |1 - focus / depth| (the depth
+// along the camera's axis of the nearest opaque surface there; where
+// nothing is drawn, infinitely far), at most `max_blur`, gathered from the
+// frame's light before it is tone mapped, as fframes gathers it: a
+// golden-angle spiral out to the largest blur near the pixel (per 16-pixel
+// tile), each sample counting where its own blur reaches back, one behind
+// a sharp pixel blurring into it no more than twice that pixel's blur;
+// samples past 6 pixels read a half-size copy. None with no blur.
+Depth_Of_Field :: struct {
+	focus:    f32, // the sharp distance along the camera's axis
+	// The blur radius of what is infinitely far behind the focus, and the
+	// most any pixel blurs, as shares of the frame's height (fframes' blur
+	// pixels / 1080; max 0: fframes', 1.6 blur up to 40/1080; at most
+	// FOCUS_MAX_BLUR).
+	blur:     f32,
+	max_blur: f32,
+}
+
+// A frame's depth of field in pixels (`focus_of`).
+Focus :: struct {
+	focus, blur, max_blur: f32,
+}
+
+// The gather's tiles (their largest blur) and the radius past which it
+// reads the half-size copy, in pixels; the most any pixel blurs, a share
+// of the frame's height (its samples grow with the square of its blur: a
+// bound on a frame's time, above fframes' 40/1080).
+FOCUS_TILE :: 16
+FOCUS_INNER :: 6
+FOCUS_MAX_BLUR :: 1.0 / 16
+
+// A scene's depth of field on a frame `height` pixels tall.
+focus_of :: proc "contextless" (d: Depth_Of_Field, height: int) -> (f: Focus, ok: bool) {
+	if !(d.blur > 0) {
+		return
+	}
+	h := f32(height)
+	f.focus, f.blur = d.focus, d.blur * h
+	f.max_blur = min(d.max_blur * h if d.max_blur > 0 else min(1.6 * f.blur, 40 * h / 1080), h * FOCUS_MAX_BLUR)
+	return f, true
+}
+
+// A pixel's key from its depth (the frame's: reversed, 0 where nothing is):
+// 1 / its distance along the camera's axis, 0 where nothing is.
+focus_key :: #force_inline proc "contextless" (c: Camera, depth: f32) -> f32 {
+	return 1 / view_depth(c, depth) if depth > 0 else 0
+}
+
+// A pixel's blur radius from its key.
+focus_blur :: #force_inline proc "contextless" (f: Focus, key: f32) -> f32 {
+	return min(f.blur * abs(1 - f.focus * key), f.max_blur)
+}
+
 // A plane mirroring the scene (three.js's Reflector, as fframes-three-d
 // draws it): before the frame, the scene is drawn mirrored in it, at
 // `scale` of the frame's size, leaving out what is behind it, the
@@ -275,6 +329,9 @@ Material :: struct {
 	// a ShaderMaterial, a particle or a shadow catcher); transmission takes
 	// its place where both are set.
 	reflection:          f32,
+	// The environment's light on this material, diffuse and reflected, as
+	// a share of the scene's (three.js's envMapIntensity; 0 means 1).
+	env_intensity:       f32,
 	shader:              Shader_Id,
 	// The shader's uniforms, from `scene_uniforms`.
 	uniforms:            Uniform_Range,
@@ -373,10 +430,10 @@ Scene :: struct {
 	background_blurriness: f32, // 0..1
 	// What the frame is cleared to under everything (three.js's
 	// scene.background as a Color, or the renderer's clear colour): sRGB
-	// and alpha, written as is (not tone-mapped or fogged). The default,
-	// alpha 0, leaves the frame transparent where nothing is drawn, to
-	// composite over; alpha 1 makes it opaque. A `background` texture
-	// covers it.
+	// and alpha, its light tone-mapped with the frame's (not fogged). The
+	// default, alpha 0, leaves the frame transparent where nothing is
+	// drawn, to composite over; alpha 1 makes it opaque. A `background`
+	// texture covers it.
 	background_color:      Vec4,
 	// Tone mapping (default .None) and exposure (0 means 1), plus scene fog.
 	tone_mapping:          Tone_Mapping,
@@ -385,6 +442,7 @@ Scene :: struct {
 	// The plane mirroring the scene for materials' `reflection` (none with
 	// a zero normal).
 	reflector:             Reflector,
+	depth_of_field:        Depth_Of_Field,
 	// Also draw the frame's depth (`software_depth`, `o3d_sdlgpu.depth` /
 	// `read_depth`): per pixel, the depth both renderers test (reversed: 1
 	// near, 0 far, 0 where nothing is) of the nearest opaque draw at its centre, as
@@ -430,6 +488,7 @@ scene_clear :: proc(s: ^Scene) {
 	s.tone_mapping_exposure = 0
 	s.fog = {}
 	s.reflector = {}
+	s.depth_of_field = {}
 	s.depth = false
 	clear(&s.lights)
 	clear(&s.draws)
@@ -1024,6 +1083,8 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	out.tone_mapping = scene.tone_mapping
 	out.tone_mapping_exposure = scene.tone_mapping_exposure
 	out.fog = scene.fog
+	out.reflector = scene.reflector
+	out.depth_of_field = scene.depth_of_field
 	out.depth = scene.depth
 	append(&out.lights, ..scene.lights[:])
 	append(&out.uniforms, ..scene.uniforms[:])
@@ -1363,10 +1424,10 @@ sprite_materials :: proc "contextless" (scene: ^Scene, geos: ^Geometries, exp: ^
 	}
 }
 
-// Whether a frame needs its depth drawn: asked for, soft particles or
-// probed ones.
+// Whether a frame needs its depth drawn: asked for, depth of field, soft
+// particles or probed ones.
 needs_depth :: proc "contextless" (scene: ^Scene) -> bool {
-	if scene.depth {
+	if scene.depth || scene.depth_of_field.blur > 0 {
 		return true
 	}
 	for m in scene.draws.material[:len(scene.draws)] {
@@ -1561,29 +1622,29 @@ refraction :: #force_inline proc "contextless" (world, n, eye: Vec3, roughness: 
 	return uv, lod, linalg.length(ray)
 }
 
-// The frame behind a transmissive point: the snapshot (texture 1 of `t`,
-// linear and premultiplied, not tone mapped) at `uv` (v up), clamped at
-// its edges, by three.js's textureBicubic: a cubic B-spline at mips
-// floor(lod) and floor(lod) + 1, four bilinear taps each, mixed by the
-// fraction.
-frame_behind :: proc "contextless" (t: ^Textures, uv: Vec2, lod: f32) -> Vec4 {
-	tex, ok := texture_get(t, 1)
-	if !ok || !tex.hdr {
+// The frame behind a transmissive point: the snapshot (`texels`, its
+// levels as `tex` lays them out from its first texel: light,
+// premultiplied, not tone mapped, as floats) at `uv` (v up), clamped at its
+// edges, by three.js's textureBicubic: a cubic B-spline at mips floor(lod)
+// and floor(lod) + 1, four bilinear taps each, mixed by the fraction.
+@(private)
+frame_behind :: proc "contextless" (texels: [][4]f32, tex: ^Texture, uv: Vec2, lod: f32) -> Vec4 {
+	if texels == nil {
 		return {}
 	}
 	l := clamp(lod, 0, f32(tex.levels - 1))
 	f := math.floor(l)
-	c := frame_bicubic(t, &tex, int(f), uv)
+	c := frame_bicubic(texels, tex, int(f), uv)
 	if l > f {
-		c = linalg.lerp(c, frame_bicubic(t, &tex, int(f) + 1, uv), l - f)
+		c = linalg.lerp(c, frame_bicubic(texels, tex, int(f) + 1, uv), l - f)
 	}
 	return c
 }
 
 @(private = "file")
-frame_bicubic :: proc "contextless" (t: ^Textures, tex: ^Texture, level: int, uv: Vec2) -> Vec4 {
+frame_bicubic :: proc "contextless" (texels: [][4]f32, tex: ^Texture, level: int, uv: Vec2) -> Vec4 {
 	w, h := int(max(tex.width >> u32(level), 1)), int(max(tex.height >> u32(level), 1))
-	mip := t.hdr_texels[tex.mips[level]:][:w * h]
+	mip := texels[tex.mips[level] - tex.first_texel:][:w * h]
 	// In texels from the top left (row 0 is the frame's top).
 	st := Vec2{uv.x * f32(w), (1 - uv.y) * f32(h)} + 0.5
 	i := linalg.floor(st)
@@ -1597,15 +1658,15 @@ frame_bicubic :: proc "contextless" (t: ^Textures, tex: ^Texture, level: int, uv
 // top left), clamped at the edges, its weights as the GPU's filter rounds
 // them.
 @(private = "file")
-hdr_tap :: #force_inline proc "contextless" (mip: [][4]$E, w, h: int, q: Vec2) -> Vec4 {
+hdr_tap :: #force_inline proc "contextless" (mip: [][4]f32, w, h: int, q: Vec2) -> Vec4 {
 	p := q - 0.5
 	p0 := linalg.floor(p)
 	wt := linalg.array_cast(linalg.clamp(linalg.array_cast(linalg.round((p - p0) * f32(BILINEAR_SCALE)), i32), 0, BILINEAR_SCALE), f32) * (1.0 / BILINEAR_SCALE)
 	x0, y0 := int(p0.x), int(p0.y)
 	x1, y1 := clamp(x0 + 1, 0, w - 1), clamp(y0 + 1, 0, h - 1)
 	x0, y0 = clamp(x0, 0, w - 1), clamp(y0, 0, h - 1)
-	top := linalg.lerp(linalg.array_cast(mip[y0 * w + x0], f32), linalg.array_cast(mip[y0 * w + x1], f32), wt.x)
-	bottom := linalg.lerp(linalg.array_cast(mip[y1 * w + x0], f32), linalg.array_cast(mip[y1 * w + x1], f32), wt.x)
+	top := linalg.lerp(mip[y0 * w + x0], mip[y0 * w + x1], wt.x)
+	bottom := linalg.lerp(mip[y1 * w + x0], mip[y1 * w + x1], wt.x)
 	return linalg.lerp(top, bottom, wt.y)
 }
 
@@ -1829,15 +1890,8 @@ shading_lights :: proc(lights: []Light, out: ^[MAX_LIGHTS]Shading_Light) -> int 
 	return n
 }
 
-// The frame's clear (`Scene.background_color`) as both renderers write
-// it: premultiplied sRGB bytes.
-background_clear :: proc "contextless" (scene: ^Scene) -> [4]u8 {
-	c := linalg.clamp(scene.background_color, 0, 1)
-	return {u8(math.round(c.r * c.a * 255)), u8(math.round(c.g * c.a * 255)), u8(math.round(c.b * c.a * 255)), u8(math.round(c.a * 255))}
-}
-
-// The clear in the transmission snapshot: the background colour's linear
-// light, premultiplied, and its alpha.
+// The frame's clear (`Scene.background_color`) as both renderers keep it:
+// its light, premultiplied, and its alpha.
 background_clear_light :: proc "contextless" (scene: ^Scene) -> Vec4 {
 	c := linalg.clamp(scene.background_color, 0, 1)
 	return {srgb_to_linear(c.r) * c.a, srgb_to_linear(c.g) * c.a, srgb_to_linear(c.b) * c.a, c.a}
@@ -1869,14 +1923,13 @@ fog_factor :: #force_inline proc "contextless" (fog: Fog, dist: f32) -> f32 {
 	return 0
 }
 
-// Applies tone mapping and fog in linear space before sRGB encoding, matching
-// `fs_main` in shaders/o3d.slang.
-finish_color :: #force_inline proc "contextless" (c, world, eye: Vec3, tone_mapping: Tone_Mapping, exposure: f32, fog: Fog, fog_color_linear: Vec3) -> Vec3 {
-	out := tone_map(c, tone_mapping, exposure)
-	if fog.kind != .None {
-		out = linalg.lerp(out, fog_color_linear, fog_factor(fog, linalg.length(world - eye)))
+// A point's light toward the eye through the scene's fog (linear: the
+// frame is tone mapped after, as `surface` in shaders/o3d.slang).
+fogged :: #force_inline proc "contextless" (c, world, eye: Vec3, fog: Fog, fog_color_linear: Vec3) -> Vec3 {
+	if fog.kind == .None {
+		return c
 	}
-	return out
+	return linalg.lerp(c, fog_color_linear, fog_factor(fog, linalg.length(world - eye)))
 }
 
 // The materials in shading form, one per draw: linear colours, the opacity
@@ -1914,6 +1967,7 @@ Shading_Material :: struct {
 	projection_scale, projection_sharpness: f32,
 	layers:        Shading_Layers,
 	reflection:    f32, // 0 to 1 (`.Reflection`)
+	env_intensity: f32, // times the scene's
 }
 
 // The physical material's terms (`Material.ior`, `.clearcoat`, `.sheen_*`),
@@ -2229,6 +2283,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			projection_sharpness = m.projection_sharpness if m.projection_sharpness > 0 else 4,
 			layers               = layers,
 			reflection           = clamp(m.reflection, 0, 1) if .Reflection in f else 0,
+			env_intensity        = m.env_intensity if m.env_intensity > 0 else 1,
 		}
 	}
 }
@@ -2242,14 +2297,15 @@ toon_step :: #force_inline proc "contextless" (edge0, edge1, x: f32) -> f32 {
 // What `shade` reads of a material at a point: its own, or as its maps
 // change it there.
 Surface :: struct {
-	base:      Vec3, // linear
-	metalness: f32,
-	roughness: f32,
-	flags:     Shading_Flags,
+	base:          Vec3, // linear
+	metalness:     f32,
+	roughness:     f32,
+	flags:         Shading_Flags,
+	env_intensity: f32, // the environment's light on it, times the scene's
 }
 
 surface :: #force_inline proc "contextless" (m: ^Shading_Material) -> Surface {
-	return {m.base, m.metalness, m.roughness, m.flags}
+	return {m.base, m.metalness, m.roughness, m.flags, m.env_intensity}
 }
 
 // The colour (linear) leaving a point of `m` at `world` with normal `n`
@@ -2418,7 +2474,8 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 	}
 	if env.radiance != 0 || mirror != nil {
 		spec := env_brdf(f0, roughness, nv)
-		k := ao * env.intensity
+		env_k := env.intensity * m.env_intensity
+		k := ao * env_k
 		rad: Vec3
 		if env.radiance != 0 {
 			r := 2 * linalg.dot(n, v) * n - v
@@ -2432,7 +2489,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 		if mirror == nil {
 			out_s^ += k * rad * spec
 		} else {
-			out_s^ += ao * mirrored(env.intensity * rad, mirror.spec, mirror.amount) * spec
+			out_s^ += ao * mirrored(env_k * rad, mirror.spec, mirror.amount) * spec
 		}
 		when LAYERED do if coat {
 			coat_rad: Vec3
@@ -2443,7 +2500,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 			if mirror == nil {
 				coat_l += k * coat_rad * env_brdf(0.04, cr, cnv)
 			} else {
-				coat_l += ao * mirrored(env.intensity * coat_rad, mirror.coat, mirror.amount) * env_brdf(0.04, cr, cnv)
+				coat_l += ao * mirrored(env_k * coat_rad, mirror.coat, mirror.amount) * env_brdf(0.04, cr, cnv)
 			}
 		}
 	}

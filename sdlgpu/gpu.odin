@@ -1,7 +1,8 @@
 // SDL_GPU renderer for o3d: Vulkan on Linux and Windows, Metal on macOS.
 // It draws the same scene as the software renderer, with the same shading
-// (shaders/o3d.slang, shaders/background.slang), 4x MSAA resolved into the
-// caller's texture.
+// (shaders/o3d.slang, shaders/background.slang), into light (half floats,
+// 4x MSAA, blended there), resolved, then tone mapped and encoded into the
+// caller's texture (shaders/post.slang).
 //
 // `init` creates a headless device, or borrows the host's (the one its
 // window or 2D canvas uses, so the result composites without a copy).
@@ -43,28 +44,57 @@ DEPTH_VERT_SPV :: #load("../shaders/depth.vert.spv")
 DEPTH_FRAG_SPV :: #load("../shaders/depth.frag.spv")
 DEPTH_VERT_MSL :: #load("../shaders/depth.vert.msl")
 DEPTH_FRAG_MSL :: #load("../shaders/depth.frag.msl")
+POST_VERT_SPV :: #load("../shaders/post.vert.spv")
+OUTPUT_FRAG_SPV :: #load("../shaders/post.output.spv")
+POST_VERT_MSL :: #load("../shaders/post.vert.msl")
+OUTPUT_FRAG_MSL :: #load("../shaders/post.output.msl")
+// Depth of field: the tiles' largest blur, near them, the half-size copy,
+// the gather.
+@(private = "file", rodata)
+FOCUS_FRAGS_SPV := [Focus_Pass][]u8 {
+	.Tiles  = #load("../shaders/post.focus_tiles.spv"),
+	.Near   = #load("../shaders/post.focus_near.spv"),
+	.Half   = #load("../shaders/post.focus_half.spv"),
+	.Gather = #load("../shaders/post.focus.spv"),
+}
+@(private = "file", rodata)
+FOCUS_FRAGS_MSL := [Focus_Pass][]u8 {
+	.Tiles  = #load("../shaders/post.focus_tiles.msl"),
+	.Near   = #load("../shaders/post.focus_near.msl"),
+	.Half   = #load("../shaders/post.focus_half.msl"),
+	.Gather = #load("../shaders/post.focus.msl"),
+}
+@(private = "file", rodata)
+FOCUS_ENTRIES := [Focus_Pass]cstring {
+	.Tiles  = "fs_focus_tiles",
+	.Near   = "fs_focus_near",
+	.Half   = "fs_focus_half",
+	.Gather = "fs_focus",
+}
 
+Focus_Pass :: enum u8 {
+	Tiles,
+	Near,
+	Half,
+	Gather,
+}
+
+// The frame as the caller gets it, and textures: sRGB-encoded bytes,
+// premultiplied.
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
-// The transmission snapshot: linear light, premultiplied (three.js's
-// HalfFloat transmission target).
-SNAPSHOT_FORMAT :: sdl.GPUTextureFormat.R16G16B16A16_FLOAT
+// The frame as it is drawn, the transmission snapshot and the reflection:
+// light, premultiplied by coverage (three.js's HalfFloat targets).
+LIGHT_FORMAT :: sdl.GPUTextureFormat.R16G16B16A16_FLOAT
 
-Snapshot_Kind :: enum u8 {
+// What a draw is drawn by: the standard material's shaders, skinned, an
+// exact shape's (curves) or a particle's.
+Draw_Kind :: enum u8 {
 	Standard,
 	Skinned,
 	Curves,
 	Sprite,
 }
 
-// The pass a draw is drawn in: the frame's, the transmission snapshot's
-// (opaque draws, linear light) or the mirror's (`o3d.mirror_view`: linear
-// light, blended as the frame's, through a mirrored camera, so front faces
-// turn clockwise).
-Pass :: enum u8 {
-	Main,
-	Snapshot,
-	Mirror,
-}
 // The shadow map holds depth as a colour, so every backend can sample it.
 SHADOW_FORMAT :: sdl.GPUTextureFormat.R32_FLOAT
 // The host's image of the frame's depth as distance (`record_depth_into`).
@@ -84,41 +114,38 @@ GPU :: struct {
 	bg_vert, bg_frag:         ^sdl.GPUShader,
 	samples:                  sdl.GPUSampleCount,
 	depth_format:             sdl.GPUTextureFormat,
-	// By the material's side, then its blend (`o3d.blend_of`).
-	pipelines:                [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
-	skinned_pipelines:        [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	// Exact shapes and glyph runs (`.Curves`): their vertex shader (each
-	// vertex's quad), fragment shader (coverage from the quad's curve set
-	// in `curve_words`: by area blended, by sample opaque) and pipelines,
-	// as `pipelines`.
+	// vertex's quad) and fragment shader (coverage from the quad's curve set
+	// in `curve_words`: by area blended, by sample opaque); particle quads'
+	// fragment shader (the curves' vertex shader gives its quad index).
 	curves_vert:              ^sdl.GPUShader,
 	curves_frag:              ^sdl.GPUShader,
-	curve_pipelines:          [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
-	// Particle quads: the curves' vertex shader (its quad index).
 	sprite_frag:              ^sdl.GPUShader,
-	sprite_pipelines:         [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
+	// The draws' pipelines into the frame's light, by kind, the material's
+	// side and its blend (`o3d.blend_of`); the mirror's (front faces
+	// clockwise), made when a frame first needs them.
+	pipelines:                [Draw_Kind][o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
+	mirror_pipelines:         [Draw_Kind][o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	bg_pipeline:              ^sdl.GPUGraphicsPipeline,
-	// The transmission snapshot's pass (opaque draws in linear light, into
-	// SNAPSHOT_FORMAT): its pipelines, by kind and side, and targets at
-	// `capacity`, made when a frame first needs them.
-	snapshot_pipelines:       [Snapshot_Kind][o3d.Side]^sdl.GPUGraphicsPipeline,
-	snapshot_bg_pipeline:     ^sdl.GPUGraphicsPipeline,
-	snapshot_color:           ^sdl.GPUTexture,
-	snapshot_resolved:        ^sdl.GPUTexture,
-	// The mirror's pass: its pipelines (into SNAPSHOT_FORMAT, front faces
-	// clockwise) by kind, side and blend, made when a frame first needs
-	// them; it draws into the snapshot's targets.
-	mirror_pipelines:         [Snapshot_Kind][o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
+	// The frame's output: its light tone mapped and sRGB-encoded; or
+	// blurred by its depth of field (shaders/post.slang), its last pass
+	// the output.
+	post_vert, output_frag:   ^sdl.GPUShader,
+	output_pipeline:          ^sdl.GPUGraphicsPipeline,
+	focus_frags:              [Focus_Pass]^sdl.GPUShader,
+	focus_pipelines:          [Focus_Pass]^sdl.GPUGraphicsPipeline,
 	// The frame's depth as distance into the host's image.
 	depth_vert, depth_frag:   ^sdl.GPUShader,
 	depth_pipeline:           ^sdl.GPUGraphicsPipeline,
-	// The multisampled colour and depth targets, at `size`.
 	// The frame's targets, at `capacity`: a frame draws into their top-left
 	// width x height and is copied out, so frames of other sizes (several
 	// views, a view whose size animates) reuse them; they only grow. `color`
-	// is multisampled when `samples` is, resolved into `resolved`.
+	// (light) is multisampled when `samples` is, resolved into `resolved`;
+	// every pass draws there (the snapshot's, the mirror's, the frame's),
+	// the frame's output into `output`.
 	color, depth:             ^sdl.GPUTexture,
 	resolved:                 ^sdl.GPUTexture,
+	output:                   ^sdl.GPUTexture,
 	capacity:                 [2]u32,
 	vertices:                 Pool_Buffer,
 	skin_vertices:            Pool_Buffer,
@@ -172,8 +199,7 @@ External_Texture :: struct {
 Custom :: struct {
 	vert, frag: ^sdl.GPUShader,
 	pipelines:  [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
-	// Opaque, into the transmission snapshot; into the mirror.
-	snapshot_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
+	// Through the mirror.
 	mirror_pipelines:   [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	made:       bool,
 	failed:     bool,
@@ -205,7 +231,9 @@ Material_Uniforms :: struct {
 	triplanar:                          [4]f32,
 	to_local, normal_to_local:          [3][4]f32,
 	// o3d.Shading_Layers: f0, clear coat, its roughness, sheen roughness;
-	// sheen colour; the normal map's x, y scale and the coat normal map's;
+	// sheen colour, w the environment's intensity on it
+	// (o3d.Shading_Material.env_intensity); the normal map's x, y scale and
+	// the coat normal map's;
 	// transmission, thickness (the model's units), ior; the model's axis
 	// scales; absorption per unit; x: o3d.Shading_Material.layer_slots.
 	layers, sheen, normal_scales:       [4]f32,
@@ -213,6 +241,25 @@ Material_Uniforms :: struct {
 	layer_info:                         [4]u32,
 }
 #assert(size_of(Material_Uniforms) == 736)
+
+// The post passes' uniforms (shaders/post.slang's Post_FS): the tone mapping,
+// exposure, the light texture's size; the focus, blur and its most
+// (pixels), the tiles a blur reaches; the camera's near, far, orthographic;
+// the frame's size, its tiles across and down.
+Post_Uniforms :: struct {
+	tone, lens, camera, frame: [4]f32,
+}
+
+// The post passes' maps, in their slots (post.slang's).
+Post_Maps :: enum u8 {
+	Light,
+	Depth,
+	Tiles,
+	Half,
+	Half_Keys,
+}
+
+Post_Bindings :: [Post_Maps]^sdl.GPUTexture
 
 Light_Uniforms :: struct {
 	color, ground, vector: [4]f32,
@@ -228,10 +275,9 @@ Lighting_Uniforms :: struct {
 	shadow_matrix: [o3d.MAX_SHADOWS]o3d.Mat4,
 	// Map size (0: no shadow), bias, normal bias.
 	shadow_params: [o3d.MAX_SHADOWS][4]f32,
-	// Environment intensity (0: no environment), max radiance mip level, tone exposure, fog density.
+	// Environment intensity (0: no environment), max radiance mip level, 0, fog density.
 	env_params:    [4]f32,
-	// x: the environment's maps are linear (HDR), not sRGB-encoded; y: the camera is orthographic;
-	// z: drawing the transmission snapshot (linear light out).
+	// x: the environment's maps are linear (HDR), not sRGB-encoded; y: the camera is orthographic.
 	env_flags:     [4]u32,
 	// The frame's width and height, the camera's near and far.
 	frame_params:  [4]f32,
@@ -274,14 +320,16 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	}
 	// slangc names the SPIR-V entry points "main" and keeps the names for Metal.
 	formats := sdl.GetGPUShaderFormats(g.device)
-	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code, curves_vert_code, curves_code, shadow_curves_code, sprite_code, depth_vert_code, depth_frag_code: []u8
+	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code, curves_vert_code, curves_code, shadow_curves_code, sprite_code, depth_vert_code, depth_frag_code, post_vert_code, output_code: []u8
 	format: sdl.GPUShaderFormat
 	vs_entry, skinned_vs_entry, fs_entry, shadow_entry, curves_vs_entry, curves_entry, shadow_curves_entry, sprite_entry: cstring
+	output_entry: cstring = "main"
 	switch {
 	case .SPIRV in formats:
 		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_SPV, SKINNED_VERT_SPV, FRAG_SPV, SHADOW_SPV
 		bg_vert_code, bg_frag_code = BG_VERT_SPV, BG_FRAG_SPV
 		depth_vert_code, depth_frag_code = DEPTH_VERT_SPV, DEPTH_FRAG_SPV
+		post_vert_code, output_code = POST_VERT_SPV, OUTPUT_FRAG_SPV
 		curves_vert_code, curves_code, shadow_curves_code, sprite_code = CURVES_VERT_SPV, CURVES_FRAG_SPV, SHADOW_CURVES_SPV, SPRITE_FRAG_SPV
 		format = {.SPIRV}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "main", "main", "main", "main"
@@ -290,10 +338,12 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_MSL, SKINNED_VERT_MSL, FRAG_MSL, SHADOW_MSL
 		bg_vert_code, bg_frag_code = BG_VERT_MSL, BG_FRAG_MSL
 		depth_vert_code, depth_frag_code = DEPTH_VERT_MSL, DEPTH_FRAG_MSL
+		post_vert_code, output_code = POST_VERT_MSL, OUTPUT_FRAG_MSL
 		curves_vert_code, curves_code, shadow_curves_code, sprite_code = CURVES_VERT_MSL, CURVES_FRAG_MSL, SHADOW_CURVES_MSL, SPRITE_FRAG_MSL
 		format = {.MSL}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "vs_main", "vs_skinned", "fs_main", "fs_shadow"
 		curves_vs_entry, curves_entry, shadow_curves_entry, sprite_entry = "vs_curves", "fs_curves", "fs_shadow_curves", "fs_sprite"
+		output_entry = "fs_output"
 	case:
 		return .Device
 	}
@@ -309,7 +359,17 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.bg_frag = sdl.CreateGPUShader(g.device, {code_size = len(bg_frag_code), code = raw_data(bg_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
 	g.depth_vert = sdl.CreateGPUShader(g.device, {code_size = len(depth_vert_code), code = raw_data(depth_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX})
 	g.depth_frag = sdl.CreateGPUShader(g.device, {code_size = len(depth_frag_code), code = raw_data(depth_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
-	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.curves_vert == nil || g.curves_frag == nil || g.sprite_frag == nil || g.shadow_curves_frag == nil || g.bg_vert == nil || g.bg_frag == nil || g.depth_vert == nil || g.depth_frag == nil {
+	g.post_vert = sdl.CreateGPUShader(g.device, {code_size = len(post_vert_code), code = raw_data(post_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX})
+	g.output_frag = sdl.CreateGPUShader(g.device, {code_size = len(output_code), code = raw_data(output_code), entrypoint = output_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
+	for pass in Focus_Pass {
+		code := FOCUS_FRAGS_SPV[pass] if format == {.SPIRV} else FOCUS_FRAGS_MSL[pass]
+		entry := cstring("main") if format == {.SPIRV} else FOCUS_ENTRIES[pass]
+		g.focus_frags[pass] = sdl.CreateGPUShader(g.device, {code_size = len(code), code = raw_data(code), entrypoint = entry, format = format, stage = .FRAGMENT, num_samplers = len(Post_Maps), num_uniform_buffers = 1})
+		if g.focus_frags[pass] == nil {
+			return .Shader
+		}
+	}
+	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.shadow_frag == nil || g.curves_vert == nil || g.curves_frag == nil || g.sprite_frag == nil || g.shadow_curves_frag == nil || g.bg_vert == nil || g.bg_frag == nil || g.depth_vert == nil || g.depth_frag == nil || g.post_vert == nil || g.output_frag == nil {
 		return .Shader
 	}
 	g.depth_format = .D32_FLOAT
@@ -317,19 +377,20 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 		g.depth_format = .D24_UNORM
 	}
 	g.samples = ._4
-	if !sdl.GPUTextureSupportsSampleCount(g.device, COLOR_FORMAT, ._4) || !sdl.GPUTextureSupportsSampleCount(g.device, g.depth_format, ._4) {
+	if !sdl.GPUTextureSupportsSampleCount(g.device, LIGHT_FORMAT, ._4) || !sdl.GPUTextureSupportsSampleCount(g.device, g.depth_format, ._4) {
 		g.samples = ._1
 	}
-	for side in o3d.Side {
-		for blend in o3d.Blend {
-			g.pipelines[side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend, false, false)
-			g.skinned_pipelines[side][blend] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend, false, true)
-			g.curve_pipelines[side][blend] = make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false)
-			g.sprite_pipelines[side][blend] = make_pipeline(g, g.curves_vert, g.sprite_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false)
-			if g.pipelines[side][blend] == nil || g.skinned_pipelines[side][blend] == nil || g.curve_pipelines[side][blend] == nil || g.sprite_pipelines[side][blend] == nil {
-				return .Shader
+	for kind in Draw_Kind {
+		for side in o3d.Side {
+			for blend in o3d.Blend {
+				g.pipelines[kind][side][blend] = make_draw_pipeline(g, kind, side, blend, false)
+				if g.pipelines[kind][side][blend] == nil {
+					return .Shader
+				}
 			}
 		}
+	}
+	for side in o3d.Side {
 		g.shadow_pipelines[side] = make_shadow_pipeline(g, g.vert, g.shadow_frag, side, false)
 		g.shadow_skinned_pipelines[side] = make_shadow_pipeline(g, g.skinned_vert, g.shadow_frag, side, true)
 		g.shadow_curve_pipelines[side] = make_shadow_pipeline(g, g.curves_vert, g.shadow_curves_frag, side, false)
@@ -338,9 +399,19 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 		}
 	}
 	g.bg_pipeline = make_background_pipeline(g)
-	g.depth_pipeline = make_depth_image_pipeline(g)
-	if g.bg_pipeline == nil || g.depth_pipeline == nil {
+	g.depth_pipeline = make_fullscreen_pipeline(g, g.depth_vert, g.depth_frag, DEPTH_IMAGE_FORMAT)
+	g.output_pipeline = make_fullscreen_pipeline(g, g.post_vert, g.output_frag, COLOR_FORMAT)
+	g.focus_pipelines[.Tiles] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Tiles], SHADOW_FORMAT)
+	g.focus_pipelines[.Near] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Near], SHADOW_FORMAT)
+	g.focus_pipelines[.Half] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Half], LIGHT_FORMAT, SHADOW_FORMAT)
+	g.focus_pipelines[.Gather] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Gather], COLOR_FORMAT)
+	if g.bg_pipeline == nil || g.depth_pipeline == nil || g.output_pipeline == nil {
 		return .Shader
+	}
+	for p in g.focus_pipelines {
+		if p == nil {
+			return .Shader
+		}
 	}
 	g.shadow_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .NEAREST, mag_filter = .NEAREST, mipmap_mode = .NEAREST, address_mode_u = .CLAMP_TO_EDGE, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE})
 	g.linear_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .REPEAT, address_mode_v = .REPEAT, address_mode_w = .REPEAT, max_lod = f32(o3d.MAX_MIPS)})
@@ -413,50 +484,31 @@ destroy :: proc(g: ^GPU) {
 		release_custom(g, &c)
 	}
 	delete(g.custom)
-	for side in o3d.Side {
-		for p in g.pipelines[side] {
-			if p != nil {
-				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
-			}
-		}
-		for p in g.skinned_pipelines[side] {
-			if p != nil {
-				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
-			}
-		}
-		for p in g.sprite_pipelines[side] {
-			if p != nil {
-				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
-			}
-		}
-		for p in g.curve_pipelines[side] {
-			if p != nil {
-				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
-			}
-		}
-	}
-	if g.bg_pipeline != nil {
-		sdl.ReleaseGPUGraphicsPipeline(g.device, g.bg_pipeline)
-	}
-	for kind in Snapshot_Kind {
-		for p in g.snapshot_pipelines[kind] {
-			if p != nil {
-				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
-			}
-		}
+	for kind in Draw_Kind {
 		for side in o3d.Side {
-			for p in g.mirror_pipelines[kind][side] {
-				if p != nil {
-					sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+			for blend in o3d.Blend {
+				for p in ([2]^sdl.GPUGraphicsPipeline{g.pipelines[kind][side][blend], g.mirror_pipelines[kind][side][blend]}) {
+					if p != nil {
+						sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+					}
 				}
 			}
 		}
 	}
-	if g.snapshot_bg_pipeline != nil {
-		sdl.ReleaseGPUGraphicsPipeline(g.device, g.snapshot_bg_pipeline)
+	for p in ([]^sdl.GPUGraphicsPipeline{g.bg_pipeline, g.depth_pipeline, g.output_pipeline}) {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
 	}
-	if g.depth_pipeline != nil {
-		sdl.ReleaseGPUGraphicsPipeline(g.device, g.depth_pipeline)
+	for p in g.focus_pipelines {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
+	}
+	for sh in g.focus_frags {
+		if sh != nil {
+			sdl.ReleaseGPUShader(g.device, sh)
+		}
 	}
 	release_targets(g)
 	for p in g.shadow_pipelines {
@@ -480,7 +532,7 @@ destroy :: proc(g: ^GPU) {
 	if g.dummy_shadow != nil {
 		sdl.ReleaseGPUTexture(g.device, g.dummy_shadow)
 	}
-	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.sprite_frag, g.shadow_curves_frag, g.depth_vert, g.depth_frag}) {
+	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.sprite_frag, g.shadow_curves_frag, g.depth_vert, g.depth_frag, g.post_vert, g.output_frag}) {
 		if sh != nil {
 			sdl.ReleaseGPUShader(g.device, sh)
 		}
@@ -562,13 +614,13 @@ SKINNED_ATTRIBUTES := [7]sdl.GPUVertexAttribute {
 // is premultiplied; a ShaderMaterial's (`raw`) is as written, premultiplied
 // by the blend. Through a mirror (`mirrored`) front faces are clockwise.
 @(private = "file")
-make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend: o3d.Blend, raw, skinned: bool, format := COLOR_FORMAT, mirrored := false) -> ^sdl.GPUGraphicsPipeline {
+make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend: o3d.Blend, raw, skinned, mirrored: bool) -> ^sdl.GPUGraphicsPipeline {
 	buffers := [2]sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX},
 		{slot = 1, pitch = size_of(o3d.Skin_Vertex), input_rate = .VERTEX},
 	}
 	color := sdl.GPUColorTargetDescription {
-		format = format,
+		format = LIGHT_FORMAT,
 		blend_state = {
 			enable_blend = blend != .Opaque,
 			src_color_blendfactor = .SRC_ALPHA if raw else .ONE,
@@ -601,11 +653,27 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
 }
 
+// A kind of draw's pipeline (its shaders and vertex streams), into the
+// frame or through the mirror.
+@(private = "file")
+make_draw_pipeline :: proc(g: ^GPU, kind: Draw_Kind, side: o3d.Side, blend: o3d.Blend, mirrored: bool) -> ^sdl.GPUGraphicsPipeline {
+	switch kind {
+	case .Skinned:
+		return make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend, false, true, mirrored)
+	case .Curves:
+		return make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, mirrored)
+	case .Sprite:
+		return make_pipeline(g, g.curves_vert, g.sprite_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, mirrored)
+	case .Standard:
+	}
+	return make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, mirrored)
+}
+
 // The fullscreen background pipeline: 3 vertices via SV_VertexID, no vertex
 // buffer, no depth test or write (drawn first into the cleared target).
 @(private = "file")
-make_background_pipeline :: proc(g: ^GPU, format := COLOR_FORMAT) -> ^sdl.GPUGraphicsPipeline {
-	color := sdl.GPUColorTargetDescription{format = format}
+make_background_pipeline :: proc(g: ^GPU) -> ^sdl.GPUGraphicsPipeline {
+	color := sdl.GPUColorTargetDescription{format = LIGHT_FORMAT}
 	info := sdl.GPUGraphicsPipelineCreateInfo {
 		vertex_shader = g.bg_vert,
 		fragment_shader = g.bg_frag,
@@ -618,47 +686,41 @@ make_background_pipeline :: proc(g: ^GPU, format := COLOR_FORMAT) -> ^sdl.GPUGra
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
 }
 
-// The frame's depth as distance into the host's RGBA16F image: 3 vertices
-// via SV_VertexID, single-sampled, no depth target.
+// A fullscreen pass into single-sampled targets of `formats`, no depth: 3
+// vertices via SV_VertexID (the frame's depth as distance into the host's
+// image, the frame's output, its depth of field's passes).
 @(private = "file")
-make_depth_image_pipeline :: proc(g: ^GPU) -> ^sdl.GPUGraphicsPipeline {
-	color := sdl.GPUColorTargetDescription{format = DEPTH_IMAGE_FORMAT}
+make_fullscreen_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, formats: ..sdl.GPUTextureFormat) -> ^sdl.GPUGraphicsPipeline {
+	colors: [2]sdl.GPUColorTargetDescription
+	for f, i in formats {
+		colors[i] = {format = f}
+	}
 	info := sdl.GPUGraphicsPipelineCreateInfo {
-		vertex_shader = g.depth_vert,
-		fragment_shader = g.depth_frag,
+		vertex_shader = vert,
+		fragment_shader = frag,
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = ._1},
-		target_info = {color_target_descriptions = &color, num_color_targets = 1},
+		target_info = {color_target_descriptions = &colors[0], num_color_targets = u32(len(formats))},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
 }
 
-// A ShaderMaterial's pipeline for a pass, its shaders made from oksl's
-// output the first time (nil: they could not be). `record` only looks it
-// up (`make` false).
+// A ShaderMaterial's pipeline, into the frame's light or through the
+// mirror (`mirrored`), its shaders made from oksl's output the first time
+// (nil: they could not be). `record` only looks it up (`make` false).
 @(private)
-custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: o3d.Blend, make := true, pass := Pass.Main) -> ^sdl.GPUGraphicsPipeline {
+custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: o3d.Blend, make := true, mirrored := false) -> ^sdl.GPUGraphicsPipeline {
 	sh := o3d.shader_get(shaders, id)
 	if sh == nil {
 		return nil
-	}
-	pipeline :: proc(c: ^Custom, side: o3d.Side, blend: o3d.Blend, pass: Pass) -> ^^sdl.GPUGraphicsPipeline {
-		switch pass {
-		case .Snapshot:
-			return &c.snapshot_pipelines[side]
-		case .Mirror:
-			return &c.mirror_pipelines[side][blend]
-		case .Main:
-		}
-		return &c.pipelines[side][blend]
 	}
 	if !make {
 		c := &g.custom[id - 1] if int(id) <= len(g.custom) else nil
 		if c == nil || c.failed {
 			return nil
 		}
-		return pipeline(c, side, blend, pass)^
+		return c.mirror_pipelines[side][blend] if mirrored else c.pipelines[side][blend]
 	}
 	if len(g.custom) < int(id) {
 		resize(&g.custom, int(id))
@@ -693,7 +755,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 	if c.failed {
 		return nil
 	}
-	p := pipeline(c, side, blend, pass)
+	p := &c.mirror_pipelines[side][blend] if mirrored else &c.pipelines[side][blend]
 	if p^ == nil {
 		attrs: [len(o3d.Vertex_Attribute)]sdl.GPUVertexAttribute
 		n := 0
@@ -704,7 +766,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 				n += 1
 			}
 		}
-		p^ = make_pipeline(g, c.vert, c.frag, attrs[:n], side, blend, true, false, COLOR_FORMAT if pass == .Main else SNAPSHOT_FORMAT, pass == .Mirror)
+		p^ = make_pipeline(g, c.vert, c.frag, attrs[:n], side, blend, true, false, mirrored)
 	}
 	return p^
 }
@@ -716,9 +778,6 @@ release_custom :: proc(g: ^GPU, c: ^Custom) {
 			if p != nil {
 				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
 			}
-		}
-		if c.snapshot_pipelines[side] != nil {
-			sdl.ReleaseGPUGraphicsPipeline(g.device, c.snapshot_pipelines[side])
 		}
 		for p in c.mirror_pipelines[side] {
 			if p != nil {
@@ -819,7 +878,7 @@ ensure_snapshot :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
 	for w, h := width, height; w > 1 || h > 1; w, h = max(w >> 1, 1), max(h >> 1, 1) {
 		levels += 1
 	}
-	job.snapshot_tex = sdl.CreateGPUTexture(g.device, {type = .D2, format = SNAPSHOT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = levels})
+	job.snapshot_tex = sdl.CreateGPUTexture(g.device, {type = .D2, format = LIGHT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = levels})
 	job.snapshot_size = {width, height}
 	return job.snapshot_tex != nil
 }
@@ -840,9 +899,42 @@ ensure_reflection :: proc(g: ^GPU, job: ^Job, width, height, levels: u32) -> boo
 		return true
 	}
 	release_reflection(g, job)
-	job.reflection_tex = sdl.CreateGPUTexture(g.device, {type = .D2, format = SNAPSHOT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = levels})
+	job.reflection_tex = sdl.CreateGPUTexture(g.device, {type = .D2, format = LIGHT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = levels})
 	job.reflection_size = {width, height, levels}
 	return job.reflection_tex != nil
+}
+
+// A job's depth of field tables at a frame's size: its tiles' largest blur
+// and the largest near them (R32F), the half-size copy's light and keys.
+@(private)
+ensure_focus :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
+	if job.focus_size == {width, height} && job.focus_tables[0] != nil {
+		return true
+	}
+	release_focus(g, job)
+	tiles := [2]u32{(width + o3d.FOCUS_TILE - 1) / o3d.FOCUS_TILE, (height + o3d.FOCUS_TILE - 1) / o3d.FOCUS_TILE}
+	half := [2]u32{(width + 1) / 2, (height + 1) / 2}
+	sizes := [4][2]u32{tiles, tiles, half, half}
+	formats := [4]sdl.GPUTextureFormat{SHADOW_FORMAT, SHADOW_FORMAT, LIGHT_FORMAT, SHADOW_FORMAT}
+	for &t, i in job.focus_tables {
+		t = sdl.CreateGPUTexture(g.device, {type = .D2, format = formats[i], usage = {.SAMPLER, .COLOR_TARGET}, width = sizes[i].x, height = sizes[i].y, layer_count_or_depth = 1, num_levels = 1})
+		if t == nil {
+			return false
+		}
+	}
+	job.focus_size = {width, height}
+	return true
+}
+
+@(private)
+release_focus :: proc(g: ^GPU, job: ^Job) {
+	for &t in job.focus_tables {
+		if t != nil {
+			sdl.ReleaseGPUTexture(g.device, t)
+		}
+		t = nil
+	}
+	job.focus_size = {}
 }
 
 @(private)
@@ -866,89 +958,31 @@ release_shadow_slot :: proc(g: ^GPU, job: ^Job, idx: int) {
 
 @(private = "file")
 release_targets :: proc(g: ^GPU) {
-	if g.color != nil {
-		sdl.ReleaseGPUTexture(g.device, g.color)
-	}
-	if g.depth != nil {
-		sdl.ReleaseGPUTexture(g.device, g.depth)
-	}
-	if g.resolved != nil {
-		sdl.ReleaseGPUTexture(g.device, g.resolved)
-	}
-	for t in ([]^sdl.GPUTexture{g.snapshot_color, g.snapshot_resolved}) {
+	for t in ([]^sdl.GPUTexture{g.color, g.depth, g.resolved, g.output}) {
 		if t != nil {
 			sdl.ReleaseGPUTexture(g.device, t)
 		}
 	}
-	g.color, g.depth, g.resolved, g.capacity = nil, nil, nil, {}
-	g.snapshot_color, g.snapshot_resolved = nil, nil
+	g.color, g.depth, g.resolved, g.output, g.capacity = nil, nil, nil, nil, {}
 }
 
-// The transmission snapshot's pass: its pipelines (once) and targets
-// (`ensure_linear_targets`).
-@(private)
-ensure_snapshot_pass :: proc(g: ^GPU) -> bool {
-	if g.snapshot_bg_pipeline == nil {
-		for side in o3d.Side {
-			g.snapshot_pipelines[.Standard][side] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, .Opaque, false, false, SNAPSHOT_FORMAT)
-			g.snapshot_pipelines[.Skinned][side] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, .Opaque, false, true, SNAPSHOT_FORMAT)
-			g.snapshot_pipelines[.Curves][side] = make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, .Opaque, false, false, SNAPSHOT_FORMAT)
-			g.snapshot_pipelines[.Sprite][side] = make_pipeline(g, g.curves_vert, g.sprite_frag, STANDARD_ATTRIBUTES[:], side, .Opaque, false, false, SNAPSHOT_FORMAT)
-		}
-		g.snapshot_bg_pipeline = make_background_pipeline(g, SNAPSHOT_FORMAT)
-	}
-	for kind in Snapshot_Kind {
-		for p in g.snapshot_pipelines[kind] {
-			if p == nil {
-				return false
-			}
-		}
-	}
-	if g.snapshot_bg_pipeline == nil {
-		return false
-	}
-	return ensure_linear_targets(g)
-}
-
-// The mirror's pass: its pipelines (once) and targets
-// (`ensure_linear_targets`).
+// The mirror's pipelines, made the first time a frame has a mirror.
 @(private)
 ensure_mirror_pass :: proc(g: ^GPU) -> bool {
-	if g.mirror_pipelines[.Standard][.Front][.Opaque] == nil {
+	for kind in Draw_Kind {
 		for side in o3d.Side {
 			for blend in o3d.Blend {
-				g.mirror_pipelines[.Standard][side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, SNAPSHOT_FORMAT, true)
-				g.mirror_pipelines[.Skinned][side][blend] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend, false, true, SNAPSHOT_FORMAT, true)
-				g.mirror_pipelines[.Curves][side][blend] = make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, SNAPSHOT_FORMAT, true)
-				g.mirror_pipelines[.Sprite][side][blend] = make_pipeline(g, g.curves_vert, g.sprite_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, SNAPSHOT_FORMAT, true)
-			}
-		}
-	}
-	for kind in Snapshot_Kind {
-		for side in o3d.Side {
-			for p in g.mirror_pipelines[kind][side] {
-				if p == nil {
+				p := &g.mirror_pipelines[kind][side][blend]
+				if p^ == nil {
+					p^ = make_draw_pipeline(g, kind, side, blend, true)
+				}
+				if p^ == nil {
 					return false
 				}
 			}
 		}
 	}
-	return ensure_linear_targets(g)
-}
-
-// The linear passes' targets at `capacity` (multisampled as the frame's,
-// resolved into `snapshot_resolved`).
-@(private = "file")
-ensure_linear_targets :: proc(g: ^GPU) -> bool {
-	if g.snapshot_color == nil {
-		single := g.samples == ._1
-		size := g.capacity
-		g.snapshot_color = sdl.CreateGPUTexture(g.device, {type = .D2, format = SNAPSHOT_FORMAT, usage = {.COLOR_TARGET} if !single else {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
-		if !single {
-			g.snapshot_resolved = sdl.CreateGPUTexture(g.device, {type = .D2, format = SNAPSHOT_FORMAT, usage = {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
-		}
-	}
-	return g.snapshot_color != nil && (g.samples == ._1 || g.snapshot_resolved != nil)
+	return true
 }
 
 @(private)
@@ -959,13 +993,14 @@ ensure_targets :: proc(g: ^GPU, w, h: u32) -> bool {
 	size := [2]u32{max(w, g.capacity.x), max(h, g.capacity.y)}
 	release_targets(g)
 	single := g.samples == ._1
-	// The texture copied out is the resolve target, or the colour target
-	// itself without multisampling.
-	g.color = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.COLOR_TARGET} if !single else {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
+	// The light read after a pass is the resolve target, or the colour
+	// target itself without multisampling.
+	g.color = sdl.CreateGPUTexture(g.device, {type = .D2, format = LIGHT_FORMAT, usage = {.COLOR_TARGET} if !single else {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
 	if !single {
-		g.resolved = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
+		g.resolved = sdl.CreateGPUTexture(g.device, {type = .D2, format = LIGHT_FORMAT, usage = {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 	}
 	g.depth = sdl.CreateGPUTexture(g.device, {type = .D2, format = g.depth_format, usage = {.DEPTH_STENCIL_TARGET}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = g.samples})
+	g.output = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.COLOR_TARGET, .SAMPLER}, width = size.x, height = size.y, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 	g.capacity = size
-	return g.color != nil && g.depth != nil && (single || g.resolved != nil)
+	return g.color != nil && g.depth != nil && g.output != nil && (single || g.resolved != nil)
 }

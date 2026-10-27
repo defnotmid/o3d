@@ -12,8 +12,10 @@ import "deps:oksl"
 // The CPU renderer: the pixel reference for the GPU's and the path without
 // one. Four samples per pixel (the GPU path's 4x MSAA), a depth per sample,
 // shading once per pixel per triangle at its centre with perspective-correct
-// values, near-plane clipping. Samples hold sRGB premultiplied RGBA8, so the
-// resolve averages what the GPU's does.
+// values, near-plane clipping. Samples hold light in half floats,
+// premultiplied by coverage, as the GPU's frame target does: blended there,
+// a pixel's averaged, then tone mapped and sRGB-encoded once (three.js's
+// EffectComposer with an OutputPass).
 //
 // A frame (and before it, the shadow map, shadow.odin: depth only, one
 // sample per texel) is three phases, each spread over the caller's pool (nil: run on
@@ -56,7 +58,7 @@ shadow_floats :: #force_inline proc "contextless" (masked, curved: bool) -> int 
 
 Software :: struct {
 	width, height: int,
-	color:         []u32, // per sample, RGBA8 sRGB premultiplied
+	light:         [][4]f16, // per sample, premultiplied (alpha: coverage)
 	depth:         []f32, // per sample, 1 near .. 0 far (reversed)
 	pixels:        []u8, // the resolved frame, RGBA8 premultiplied: the caller's `out` or `own`
 	own:           []u8, // the frame when the caller gives none
@@ -90,14 +92,13 @@ Software :: struct {
 	// The host's pixels for external textures (by id - 1), as the GPU's
 	// `texture_set_external` binds its textures: `software_set_external`.
 	externals:     [dynamic]Software_External,
-	// The frame drawn before its transmissive draws, linear (not tone
-	// mapped) with its mipmaps (texture 1), for them to see through: while
-	// that part is drawn (`capture`), each sample's light (RGB9E5) in
-	// `hdr`, resolved by each band into level 0 of `snapshot_tex`.
+	// The frame drawn before its transmissive draws, for them to see
+	// through: its light resolved by each band into level 0 of
+	// `snapshot_tex` (texture 1), mipmapped as the GPU's, then its levels
+	// read as floats (`snapshot_light`).
 	snapshot:      Textures,
 	snapshot_tex:  Texture,
-	hdr:           []u32,
-	capture:       bool,
+	snapshot_light: [dynamic][4]f32,
 	// The scene mirrored in its reflector (`mirror_view`), drawn first in
 	// the same samples at its size, its light resolved into level 0 of
 	// `reflection_tex` (texture 1), mipmapped as the GPU's, then its levels
@@ -105,6 +106,10 @@ Software :: struct {
 	reflection:    Textures,
 	reflection_tex: Texture,
 	reflection_light: [dynamic][4]f32,
+	// With depth of field: the frame's light per pixel, resolved by the
+	// bands, and the gather's tables (depth_of_field.odin).
+	frame:         [dynamic][4]f32,
+	focus:         Focus_Tables,
 }
 
 // An external texture's pixels for the software renderer: RGBA8 (sRGB
@@ -115,13 +120,15 @@ Software_External :: struct {
 }
 
 software_destroy :: proc(s: ^Software) {
-	delete(s.color)
+	delete(s.light)
 	delete(s.depth)
 	delete(s.own)
 	textures_destroy(&s.snapshot)
+	delete(s.snapshot_light)
 	textures_destroy(&s.reflection)
 	delete(s.reflection_light)
-	delete(s.hdr)
+	delete(s.frame)
+	focus_tables_destroy(&s.focus)
 	delete(s.order)
 	delete(s.materials)
 	shader_blocks_destroy(&s.blocks)
@@ -239,10 +246,10 @@ worker_destroy :: proc(w: ^Worker) {
 // holds the material textures (nil: none).
 software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, width, height: int, pool: ^thread.Pool = nil, textures: ^Textures = nil, out: []u8 = nil) -> []u8 {
 	if s.width != width || s.height != height {
-		delete(s.color)
+		delete(s.light)
 		delete(s.depth)
 		s.width, s.height = width, height
-		s.color = make([]u32, width * height * SAMPLES)
+		s.light = make([][4]f16, width * height * SAMPLES)
 		s.depth = make([]f32, width * height * SAMPLES)
 	}
 	if len(out) >= width * height * 4 {
@@ -292,8 +299,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		bg_tex        = bg_tex,
 		bg_intensity  = bg_intensity,
 		bg_lod        = bg_lod,
-		clear         = transmute(u32)background_clear(active),
-		clear_light   = rgb9e5(background_clear_light(active).rgb),
+		clear         = to_halves(background_clear_light(active)),
 		eye           = active.camera.position,
 		shadows       = shadows,
 		shadow_count  = ns,
@@ -330,7 +336,6 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		// plane clipped, cleared to nothing (the environment shows there).
 		mirror_order(active, geos, shaders, s.materials[:], mv.view, proj, &s.order, &s.expanded)
 		shader_blocks(active, shaders, mv.view, proj, shadows[:ns], &s.mirror_blocks, mv.eye)
-		ensure_hdr(s)
 		clear(&s.reflection.list)
 		clear(&s.reflection.hdr_texels)
 		s.reflection_tex = texture_grow(&s.reflection.hdr_texels, mv.width, mv.height)
@@ -339,22 +344,12 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		mj := job
 		mj.view_proj, mj.width, mj.height, mj.depth_only = proj * mv.view, mv.width, mv.height, false
 		mj.eye, mj.mirrored, mj.clip, mj.blocks = mv.eye, true, mv.plane, &s.mirror_blocks
-		mj.bg_tex, mj.clear, mj.clear_light = 0, 0, 0
-		mj.capture, mj.capture_into = true, s.reflection.hdr_texels[s.reflection_tex.mips[0]:][:mv.width * mv.height]
-		s.capture = true
+		mj.bg_tex, mj.clear = 0, {}
+		mj.capture_into = s.reflection.hdr_texels[s.reflection_tex.mips[0]:][:mv.width * mv.height]
 		run_pass(s, active, geos, &mj, pool, draw_band, 0, len(s.order))
-		s.capture = false
 		texture_finish(&s.reflection, &s.reflection_tex, blit = true)
-		// A read takes eight texels (four at each of two levels): their half
-		// floats converted once.
-		tex := &s.reflection_tex
-		last := tex.levels - 1
-		used := int(tex.mips[last] - tex.first_texel) + int(max(tex.width >> last, 1) * max(tex.height >> last, 1))
-		table_grow_non_zero(&s.reflection_light, used)
-		for c, i in s.reflection.hdr_texels[tex.first_texel:][:used] {
-			s.reflection_light[i] = linalg.array_cast(c, f32)
-		}
-		job.reflection, job.reflection_tex, job.reflection_last = s.reflection_light[:used], tex^, f32(last)
+		job.reflection, job.reflection_tex = light_levels(&s.reflection, &s.reflection_tex, &s.reflection_light), s.reflection_tex
+		job.reflection_last = f32(mv.levels - 1)
 	}
 	snapshot := draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
 	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
@@ -362,32 +357,44 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.inv_vp = linalg.inverse(job.view_proj)
 	}
 	if snapshot < len(s.order) {
-		// The frame so far, resolved and mipmapped, for the transmissive
-		// draws after it.
-		ensure_hdr(s)
+		// The frame so far, its light resolved and mipmapped, for the
+		// transmissive draws after it.
 		clear(&s.snapshot.list)
 		clear(&s.snapshot.hdr_texels)
 		s.snapshot_tex = texture_grow(&s.snapshot.hdr_texels, width, height)
 		s.snapshot_tex.hdr = true
-		s.capture, job.capture = true, true
 		job.capture_into = s.snapshot.hdr_texels[s.snapshot_tex.mips[0]:][:width * height]
 		run_pass(s, active, geos, &job, pool, draw_band, 0, snapshot)
-		s.capture, job.capture = false, false
+		job.capture_into = nil
 		// Mipmapped as the GPU's snapshot is (three.js's too).
 		texture_finish(&s.snapshot, &s.snapshot_tex, blit = true)
+		job.snapshot, job.snapshot_tex = light_levels(&s.snapshot, &s.snapshot_tex, &s.snapshot_light), s.snapshot_tex
 		job.keep = true
 	}
+	focus, blurred := focus_of(active.depth_of_field, height)
+	if blurred {
+		table_grow_non_zero(&s.frame, width * height)
+		job.light_into = s.frame[:width * height]
+	}
 	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))
+	if blurred {
+		depth_of_field(s, focus, active.camera, active.tone_mapping, active.tone_mapping_exposure, pool)
+	}
 	return s.pixels
 }
 
-// Each sample's light for a pass that keeps it, at the frame's size.
+// A mipmapped texture's levels (from its first texel, as `tex` lays them
+// out) as floats, into `out`: a bicubic or trilinear read takes 16 or 8
+// texels, so their half floats are converted once.
 @(private = "file")
-ensure_hdr :: proc(s: ^Software) {
-	if len(s.hdr) != s.width * s.height * SAMPLES {
-		delete(s.hdr)
-		s.hdr = make([]u32, s.width * s.height * SAMPLES)
+light_levels :: proc(t: ^Textures, tex: ^Texture, out: ^[dynamic][4]f32) -> [][4]f32 {
+	last := tex.levels - 1
+	used := int(tex.mips[last] - tex.first_texel) + int(max(tex.width >> last, 1) * max(tex.height >> last, 1))
+	table_grow_non_zero(out, used)
+	for c, i in t.hdr_texels[tex.first_texel:][:used] {
+		out[i] = from_halves(c)
 	}
+	return out[:used]
 }
 
 // The frame's depth per pixel from the last `software_render` of a scene
@@ -442,8 +449,7 @@ Frame_Job :: struct {
 	bg_tex:        Texture_Id,
 	bg_intensity:  f32,
 	bg_lod:        f32,
-	clear:         u32, // a colour sample: background_clear
-	clear_light:   u32, // its snapshot sample (RGB9E5; alpha from `clear`)
+	clear:         [4]f16, // a sample's light where nothing is: background_clear_light
 	inv_vp:        Mat4,
 	eye:           Vec3,
 	shadows:       [MAX_SHADOWS]Shadow,
@@ -464,11 +470,15 @@ Frame_Job :: struct {
 	bands:         int,
 	// Over what the pass before drew (no clear, no background).
 	keep:          bool,
-	// Keeping the linear light for the snapshot or the mirror
-	// (`Software.capture`), resolved into `capture_into` (level 0, the
-	// pass's size).
-	capture:       bool,
+	// The pass's pixels kept as light, into a level 0 at its size (the
+	// snapshot's, the reflection's), or the frame's for its depth of field
+	// (`light_into`), not tone mapped into its pixels.
 	capture_into:  [][4]f16,
+	light_into:    [][4]f32,
+	// The frame's snapshot for the transmissive draws (nil: none): its
+	// levels' light, laid out as `snapshot_tex`.
+	snapshot:      [][4]f32,
+	snapshot_tex:  Texture,
 	// The mirror's pass (`mirror_view`): front faces turn, transmissive
 	// draws see nothing behind them, what is behind `clip` is left out (a
 	// zero plane: nothing), and the frame's pixels are not written.
@@ -777,7 +787,7 @@ emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, d
 // (worker 0) and up to a pool thread per item (worker 1 + its task), each
 // claiming the next item until none is left; the caller waits for the
 // tasks to finish (they may start after the items ran out).
-@(private = "file")
+@(private)
 parallel :: proc(pool: ^thread.Pool, count: int, data: rawptr, work: proc(data: rawptr, i, worker: int)) {
 	Parallel :: struct {
 		count:   int,

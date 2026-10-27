@@ -312,10 +312,10 @@ test_software_shader_material :: proc(t: ^testing.T) {
 		i := (y * W + x) * 4
 		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
 	}
-	// Green from uColor in the middle; nothing drawn in the corner (the
-	// broken shader's box behind would cover it).
+	// Green from uColor (light) in the middle; nothing drawn in the corner
+	// (the broken shader's box behind would cover it).
 	c := at(px, W / 2, W / 2)
-	testing.expectf(t, c[3] == 255 && c[1] > 150 && c[0] < 120, "centre %v", c)
+	testing.expectf(t, c[3] == 255 && c[1] > 200 && c[0] < 140, "centre %v", c)
 	testing.expect_value(t, at(px, 2, 2), [4]u8{0, 0, 0, 0})
 	pool: thread.Pool
 	thread.pool_init(&pool, context.allocator, 4)
@@ -1526,9 +1526,9 @@ test_particle_opacity_clamped :: proc(t: ^testing.T) {
 	}
 }
 
-// Additive particles over a background, as the GPU draws them: the
-// background under them at full strength (not dimmed by their alpha) and
-// the sum clamped at 255 (it wrapped: red to 0, green/blue specks).
+// Additive particles over a background, as the GPU draws them: their light
+// added to the background's at full strength (not dimmed by their alpha),
+// the sum clamped at full (it wrapped once: red to 0, green/blue specks).
 @(test)
 test_additive_over_background :: proc(t: ^testing.T) {
 	g: Geometries
@@ -1553,14 +1553,26 @@ test_additive_over_background :: proc(t: ^testing.T) {
 		px := software_render(&s, &scene, &g, nil, W, W, nil, &textures)
 		i := (W / 2 * W + W / 2) * 4
 		c := [4]u8{px[i], px[i + 1], px[i + 2], px[i + 3]}
-		want := [4]u8{255, 250, 225, 255} if n == 1 else {255, 255, 255, 255}
+		want := added(sky_px, {200, 200, 200}, n)
 		testing.expectf(t, c == want, "%d added over the sky: %v, want %v", n, c, want)
 	}
 }
 
+// sRGB bytes' light added, `n` times `b` over `a`, back in sRGB bytes
+// (clamped at full).
+@(private = "file")
+added :: proc(a: [4]u8, b: [3]u8, n: int) -> (out: [4]u8) {
+	for c in 0 ..< 3 {
+		l := srgb_to_linear(f32(a[c]) / 255) + f32(n) * srgb_to_linear(f32(b[c]) / 255)
+		out[c] = u8(math.round(linear_to_srgb(min(l, 1)) * 255))
+	}
+	out[3] = a[3]
+	return
+}
+
 // An additive mesh (any material, not only particles): drawn with the
 // transparent ones, so an opaque plane behind it listed after it is under
-// it, and its colour added to that plane's and to the sky's, clamped.
+// it, and its light added to that plane's and to the sky's, clamped.
 @(test)
 test_additive_mesh :: proc(t: ^testing.T) {
 	g: Geometries
@@ -1586,8 +1598,8 @@ test_additive_mesh :: proc(t: ^testing.T) {
 		i := (y * W + x) * 4
 		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
 	}
-	testing.expectf(t, at(px, W / 2, W / 2) == {255, 200, 200, 255}, "added to the plane behind: %v", at(px, W / 2, W / 2))
-	testing.expectf(t, at(px, W / 2, 9) == {255, 250, 225, 255}, "added to the sky: %v", at(px, W / 2, 9))
+	testing.expectf(t, at(px, W / 2, W / 2) == added({255, 0, 0, 255}, {200, 200, 200}, 1), "added to the plane behind: %v", at(px, W / 2, W / 2))
+	testing.expectf(t, at(px, W / 2, 9) == added(sky_px, {200, 200, 200}, 1), "added to the sky: %v", at(px, W / 2, 9))
 	testing.expectf(t, at(px, 1, 1) == {100, 50, 25, 255}, "the sky: %v", at(px, 1, 1))
 }
 
@@ -1691,7 +1703,10 @@ test_vertex_colors :: proc(t: ^testing.T) {
 	m.flags += {.Transparent}
 	append(&scene.draws, Draw{q, compose({0, 0, 0}), m})
 	px = software_render(&s, &scene, &g, nil, W, W)
-	testing.expectf(t, near(at(px, 0, W / 2), {255, 0, 0, 255}, 24), "opaque at the left: %v", at(px, 0, W / 2))
+	// The left pixels' centres are 1/128 of the way to the clear blue: the
+	// white shows through by 1/128 and the blue adds as much, in light.
+	leak, blue := u8(math.round(linear_to_srgb(1.0 / 128) * 255)), u8(math.round(linear_to_srgb(2.0 / 128) * 255))
+	testing.expectf(t, near(at(px, 0, W / 2), {255, leak, blue, 255}, 3), "opaque at the left: %v, want %v", at(px, 0, W / 2), [4]u8{255, leak, blue, 255})
 	testing.expectf(t, near(at(px, W - 1, W / 2), {255, 255, 255, 255}, 24), "clear at the right: %v", at(px, W - 1, W / 2))
 	// Without the flag: the material's colour.
 	ortho(&scene)
@@ -2322,6 +2337,74 @@ test_reflector :: proc(t: ^testing.T) {
 	testing.expect(t, !ok, "behind it")
 }
 
+// Depth of field: none without blur (the frame as drawn); with it, a quad
+// at the focus as sharp as without, far stripes behind it blurred (their
+// neighbouring pixels nearly alike).
+@(test)
+test_depth_of_field :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+	W, H :: 128, 96
+	stripes: [64 * 4]u8
+	for x in 0 ..< 64 {
+		v: u8 = 255 if x % 2 == 0 else 0
+		stripes[x * 4], stripes[x * 4 + 1], stripes[x * 4 + 2], stripes[x * 4 + 3] = v, v, v, 255
+	}
+	far := MATERIAL_DEFAULT
+	far.color_map, far.flags = texture_add(&textures, stripes[:], 64, 1), {.Basic}
+	near := MATERIAL_DEFAULT
+	near.color, near.flags = {1, 0, 0}, {.Basic}
+	frame :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, textures: ^Textures, far, near: Material, dof: Depth_Of_Field) -> []u8 {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 0}, target = {0, 0, -1}, fov = 50, near = 0.1, far = 100}
+		scene.depth_of_field = dof
+		append(&scene.draws, Draw{plane(g, 40, 40), compose({0, 0, -20}), far})
+		append(&scene.draws, Draw{plane(g, 0.6, 0.6), compose({0, 0, -2}), near})
+		return slice.clone(software_render(s, scene, g, nil, W, H, nil, textures), context.temp_allocator)
+	}
+	contrast :: proc(px: []u8, y: int) -> (sum: int) {
+		for x in 0 ..< W - 1 {
+			sum += abs(int(px[(y * W + x) * 4]) - int(px[(y * W + x + 1) * 4]))
+		}
+		return
+	}
+	sharp := frame(&s, &scene, &g, &textures, far, near, {})
+	testing.expect(t, slice.equal(frame(&s, &scene, &g, &textures, far, near, {focus = 2}), sharp), "no blur, no depth of field")
+	// Stripes 3 pixels wide, blurred by 5 (fframes' default cap, 40/1080
+	// of the height, is under 4 pixels here).
+	blurred := frame(&s, &scene, &g, &textures, far, near, {focus = 2, blur = 0.06, max_blur = 0.06})
+	centre := (H / 2 * W + W / 2) * 4
+	testing.expectf(t, slice.equal(blurred[centre:][:4], sharp[centre:][:4]), "at the focus: %v, sharp %v", blurred[centre:][:4], sharp[centre:][:4])
+	testing.expectf(t, contrast(blurred, 4) * 4 < contrast(sharp, 4), "the far stripes blurred: %d, sharp %d", contrast(blurred, 4), contrast(sharp, 4))
+}
+
+// A scene expanded (here for its points) keeps its settings: the
+// reflector was left behind once.
+@(test)
+test_expanded_settings :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	exp: Expanded_Draws
+	defer expanded_draws_destroy(&exp)
+	scene_clear(&scene)
+	scene.reflector = {point = {0, 1, 0}, normal = {0, 1, 0}, scale = 0.7}
+	dots := MATERIAL_DEFAULT
+	dots.mode = .Points
+	append(&scene.draws, Draw{points(&g, {{0, 0, 0}, {1, 0, 0}}), compose(), dots})
+	view, proj := camera_matrices(scene.camera, 32, 32)
+	active := expand_draws(&exp, &scene, &g, view, proj, 32, 32)
+	testing.expect(t, active != &scene, "expanded")
+	testing.expect_value(t, active.reflector, scene.reflector)
+}
+
 // The geometries three.js makes as LatheGeometry, RingGeometry,
 // CircleGeometry, RoundedBoxGeometry and a part of a SphereGeometry: their
 // counts and a vertex each, as three.js r186 gives them.
@@ -2366,22 +2449,49 @@ test_three_geometries :: proc(t: ^testing.T) {
 	testing.expect(t, rounded_box(&g, 2, 1, 1.5, 3, 0.2) == rounded_box(&g, 2, 1, 1.5, 3, 0.2), "kept by its key")
 }
 
-// RGB9E5, the transmission snapshot's sample: within half a step of the
-// largest channel, zero and negatives to 0, the top clamped.
+// The bit conversions of half floats: every half reads as Odin's cast
+// reads it; floats across every exponent (subnormal results, ties,
+// overflow) round to the nearest half, ties to the even one (IEEE's; Odin's
+// cast rounds ties up), and every half makes itself again.
 @(test)
-test_rgb9e5 :: proc(t: ^testing.T) {
-	for c in ([]Vec3{{1, 0.5, 0.25}, {0.001, 0.002, 0.0005}, {300, 2, 0}, {0.18, 0.18, 0.18}, {12.5, 40, 3}}) {
-		got := rgb9e5_light(rgb9e5(c))
-		step := max(c.r, c.g, c.b) / 256
-		testing.expectf(t, abs(got.r - c.r) <= step && abs(got.g - c.g) <= step && abs(got.b - c.b) <= step, "%v -> %v", c, got)
+test_half_conversions :: proc(t: ^testing.T) {
+	bad := 0
+	for h in 0 ..< 1 << 16 {
+		v := transmute(f16)u16(h)
+		want, got := f32(v), from_half(v)
+		if transmute(u32)want != transmute(u32)got && !(want != want && got != got) {
+			bad += 1
+		}
+		if got == got && transmute(u16)to_half(got) != u16(h) {
+			bad += 1
+		}
 	}
-	testing.expect_value(t, rgb9e5({}), 0)
-	testing.expect_value(t, rgb9e5({-1, -2, -3}), 0)
-	testing.expect(t, rgb9e5_light(rgb9e5({1e9, 0, 0})).r <= 65408, "clamped")
+	testing.expectf(t, bad == 0, "%d halves read or made wrong", bad)
+	bad = 0
+	for i := u64(0); i < 1 << 31; i += 127 {
+		f := transmute(f32)u32(i)
+		if f != f {
+			continue
+		}
+		if f >= 65520 {
+			testing.expect(t, transmute(u16)to_half(f) == 0x7c00, "past the largest half, infinity")
+			continue
+		}
+		h := transmute(u16)to_half(f)
+		d := abs(f64(from_half(transmute(f16)h)) - f64(f))
+		for n in ([2]u16{h - 1, h + 1}) {
+			if h == 0 && n == 0xffff || n >= 0x7c00 {
+				continue
+			}
+			dn := abs(f64(from_half(transmute(f16)n)) - f64(f))
+			if dn < d || dn == d && h & 1 != 0 {
+				bad += 1
+			}
+		}
+	}
+	testing.expectf(t, bad == 0, "%d floats rounded wrong", bad)
 }
 
-// The layers' maps in at most LAYER_TEXTURES textures: a map sharing one
-// takes its slot, a map in a third texture is dropped; maps of a layer
 // that is off are not read.
 @(test)
 test_layer_map_slots :: proc(t: ^testing.T) {

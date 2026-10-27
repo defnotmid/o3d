@@ -1,0 +1,305 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 12 "post.slang"
+struct Post_FS_0
+{
+    float4 tone_0;
+    float4 lens_0;
+    float4 camera_0;
+    float4 frame_0;
+};
+
+
+#line 1095 "core"
+struct KernelContext_0
+{
+    Post_FS_0 constant* post_0;
+    texture2d<float, access::sample> lightMap_texture_0;
+    sampler lightMap_sampler_0;
+};
+
+
+#line 51 "post.slang"
+float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 52
+    return ((kernelContext_0->lightMap_texture_0).sample((kernelContext_0->lightMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->tone_0.zw), level((0.0f))));
+}
+
+
+#line 34 "common.slang"
+float3 tone_map_0(float3 c_0, uint mode_0, float exposure_0)
+{
+
+#line 35
+    if(mode_0 == 0U)
+    {
+
+#line 36
+        return c_0;
+    }
+
+#line 36
+    float exp_val_0;
+
+    if(exposure_0 > 0.0f)
+    {
+
+#line 38
+        exp_val_0 = exposure_0;
+
+#line 38
+    }
+    else
+    {
+
+#line 38
+        exp_val_0 = 1.0f;
+
+#line 38
+    }
+    float3 v_0 = c_0 * float3(exp_val_0) ;
+    if(mode_0 == 1U)
+    {
+
+#line 41
+        return saturate(v_0);
+    }
+    if(mode_0 == 2U)
+    {
+
+#line 44
+        return saturate(v_0 / (float3(1.0f)  + v_0));
+    }
+    if(mode_0 == 3U)
+    {
+
+#line 47
+        float3 x_0 = max(v_0 - float3(0.00400000018998981f) , float3(0.0f) );
+        float3 _S1 = float3(6.19999980926513672f)  * x_0;
+        return pow(x_0 * (_S1 + float3(0.5f) ) / (x_0 * (_S1 + float3(1.70000004768371582f) ) + float3(0.05999999865889549f) ), float3(2.20000004768371582f) );
+    }
+    if(mode_0 == 4U)
+    {
+
+#line 52
+        float3 v_1 = v_0 * float3(1.66666662693023682f) ;
+
+        float _S2 = v_1.x;
+
+#line 54
+        float _S3 = v_1.y;
+
+#line 54
+        float _S4 = v_1.z;
+
+#line 53
+        float3 v_2 = float3(0.59719002246856689f * _S2 + 0.35457998514175415f * _S3 + 0.04822999984025955f * _S4, 0.07599999755620956f * _S2 + 0.9083399772644043f * _S3 + 0.01565999910235405f * _S4, 0.0284000001847744f * _S2 + 0.1338299959897995f * _S3 + 0.83776998519897461f * _S4);
+
+#line 60
+        float3 v_3 = (v_2 * (v_2 + float3(0.02457859925925732f) ) - float3(0.0000905370034161f) ) / (v_2 * (float3(0.98372900485992432f)  * v_2 + float3(0.43295100331306458f) ) + float3(0.23808099329471588f) );
+
+        float _S5 = v_3.x;
+
+#line 62
+        float _S6 = v_3.y;
+
+#line 62
+        float _S7 = v_3.z;
+
+
+
+        return saturate(float3(1.60475003719329834f * _S5 - 0.53108000755310059f * _S6 - 0.07366999983787537f * _S7, -0.10208000242710114f * _S5 + 1.10812997817993164f * _S6 - 0.00604999996721745f * _S7, -0.00326999998651445f * _S5 - 0.07276000082492828f * _S6 + 1.0760200023651123f * _S7));
+    }
+    if(mode_0 == 5U)
+    {
+        float _S8 = v_0.x;
+
+#line 70
+        float _S9 = v_0.y;
+
+#line 70
+        float _S10 = v_0.z;
+
+
+
+        float3 _S11 = float3(1.00000001335143196e-10f) ;
+
+#line 74
+        float3 r2020_0 = max(float3(0.62740391492843628f * _S8 + 0.32928299903869629f * _S9 + 0.04331310093402863f * _S10, 0.06909730285406113f * _S8 + 0.9195404052734375f * _S9 + 0.01136230025440454f * _S10, 0.01639140024781227f * _S8 + 0.08801329880952835f * _S9 + 0.89559531211853027f * _S10), _S11);
+
+        float _S12 = r2020_0.x;
+
+#line 76
+        float _S13 = r2020_0.y;
+
+#line 76
+        float _S14 = r2020_0.z;
+
+#line 82
+        float3 x_1 = saturate((log2(max(float3(0.85662716627120972f * _S12 + 0.09512124210596085f * _S13 + 0.04825161024928093f * _S14, 0.13731896877288818f * _S12 + 0.76124197244644165f * _S13 + 0.10143903642892838f * _S14, 0.11189821362495422f * _S12 + 0.0767994225025177f * _S13 + 0.81130236387252808f * _S14), _S11)) - float3(-12.47393035888671875f) ) * float3(0.06060606241226196f) );
+        float3 x2_0 = x_1 * x_1;
+        float3 x4_0 = x2_0 * x2_0;
+        float3 x_2 = float3(15.5f)  * x4_0 * x2_0 - float3(40.1399993896484375f)  * x4_0 * x_1 + float3(31.95999908447265625f)  * x4_0 - float3(6.86800003051757812f)  * x2_0 * x_1 + float3(0.42980000376701355f)  * x2_0 + float3(0.11909999698400497f)  * x_1 - float3(0.0023199999704957f) ;
+
+        float _S15 = x_2.x;
+
+#line 87
+        float _S16 = x_2.y;
+
+#line 87
+        float _S17 = 0.11060664057731628f * _S16;
+
+#line 87
+        float _S18 = x_2.z;
+
+#line 87
+        float _S19 = 0.01649394072592258f * _S18;
+        float _S20 = -0.14132976531982422f * _S15;
+
+
+
+        float3 lin2020_0 = pow(max(float3(1.12710058689117432f * _S15 - _S17 - _S19, _S20 + 1.15782368183135986f * _S16 - _S19, _S20 - _S17 + 1.25193643569946289f * _S18), float3(0.0f) ), float3(2.20000004768371582f) );
+
+        float _S21 = lin2020_0.x;
+
+#line 94
+        float _S22 = lin2020_0.y;
+
+#line 94
+        float _S23 = lin2020_0.z;
+
+
+
+        return saturate(float3(1.66049098968505859f * _S21 - 0.58764111995697021f * _S22 - 0.07284989953041077f * _S23, -0.12455049902200699f * _S21 + 1.13289988040924072f * _S22 - 0.00834940001368523f * _S23, -0.01815080083906651f * _S21 - 0.10057889670133591f * _S22 + 1.11872971057891846f * _S23));
+    }
+    if(mode_0 == 6U)
+    {
+
+        float _S24 = min(v_0.x, min(v_0.y, v_0.z));
+
+#line 103
+        float offset_0;
+        if(_S24 < 0.07999999821186066f)
+        {
+
+#line 104
+            offset_0 = _S24 - 6.25f * _S24 * _S24;
+
+#line 104
+        }
+        else
+        {
+
+#line 104
+            offset_0 = 0.03999999910593033f;
+
+#line 104
+        }
+        float3 p_1 = v_0 - float3(offset_0) ;
+        float _S25 = max(p_1.x, max(p_1.y, p_1.z));
+        if(_S25 < 0.75999999046325684f)
+        {
+
+#line 108
+            return saturate(p_1);
+        }
+
+        float new_peak_0 = 1.0f - 0.0576000027358532f / (_S25 + 0.24000000953674316f - 0.75999999046325684f);
+
+
+        return saturate(mix(p_1 * float3((new_peak_0 / _S25)) , float3(new_peak_0) , float3((1.0f - 1.0f / (0.15000000596046448f * (_S25 - new_peak_0) + 1.0f))) ));
+    }
+    return c_0;
+}
+
+
+#line 14
+float linear_to_srgb_0(float c_1)
+{
+
+#line 15
+    float _S26 = saturate(c_1);
+
+#line 15
+    float _S27;
+    if(_S26 <= 0.00313080009073019f)
+    {
+
+#line 16
+        _S27 = _S26 * 12.92000007629394531f;
+
+#line 16
+    }
+    else
+    {
+
+#line 16
+        _S27 = 1.0549999475479126f * pow(_S26, 0.4166666567325592f) - 0.05499999970197678f;
+
+#line 16
+    }
+
+#line 16
+    return _S27;
+}
+
+
+#line 39 "post.slang"
+float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 40
+    float a_0 = saturate(light_0.w);
+    if(a_0 <= 0.0f)
+    {
+
+#line 42
+        return float4(int4(int(0)) );
+    }
+    float3 c_2 = tone_map_0(light_0.xyz / float3(a_0) , uint(kernelContext_1->post_0->tone_0.x), kernelContext_1->post_0->tone_0.y);
+    float k_0 = clamp(max(c_2.x, max(c_2.y, c_2.z)), 1.0f, 1.0f / a_0);
+    float3 c_3 = c_2 / float3(k_0) ;
+    float m_0 = a_0 * k_0;
+    return float4(linear_to_srgb_0(c_3.x) * m_0, linear_to_srgb_0(c_3.y) * m_0, linear_to_srgb_0(c_3.z) * m_0, a_0);
+}
+
+
+#line 48
+struct pixelOutput_0
+{
+    float4 output_1 [[color(0)]];
+};
+
+
+#line 72
+[[fragment]] pixelOutput_0 fs_output(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]])
+{
+
+#line 72
+    thread KernelContext_0 kernelContext_2;
+
+#line 72
+    (&kernelContext_2)->post_0 = post_1;
+
+#line 72
+    (&kernelContext_2)->lightMap_texture_0 = lightMap_texture_1;
+
+#line 72
+    (&kernelContext_2)->lightMap_sampler_0 = lightMap_sampler_1;
+
+#line 72
+    float4 _S28 = light_at_0(int2(position_0.xy), &kernelContext_2);
+
+#line 72
+    float4 _S29 = output_0(_S28, &kernelContext_2);
+
+#line 72
+    pixelOutput_0 _S30 = { _S29 };
+    return _S30;
+}
+

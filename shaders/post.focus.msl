@@ -1,0 +1,568 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 12 "post.slang"
+struct Post_FS_0
+{
+    float4 tone_0;
+    float4 lens_0;
+    float4 camera_0;
+    float4 frame_0;
+};
+
+
+#line 1095 "core"
+struct KernelContext_0
+{
+    Post_FS_0 constant* post_0;
+    texture2d<float, access::sample> tileMap_texture_0;
+    sampler tileMap_sampler_0;
+    texture2d<float, access::sample> lightMap_texture_0;
+    sampler lightMap_sampler_0;
+    texture2d<float, access::sample> depthMap_texture_0;
+    sampler depthMap_sampler_0;
+    texture2d<float, access::sample> halfMap_texture_0;
+    sampler halfMap_sampler_0;
+    texture2d<float, access::sample> halfKeyMap_texture_0;
+    sampler halfKeyMap_sampler_0;
+};
+
+
+#line 51 "post.slang"
+float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 52
+    return ((kernelContext_0->lightMap_texture_0).sample((kernelContext_0->lightMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->tone_0.zw), level((0.0f))));
+}
+
+
+float key_at_0(int2 p_1, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 57
+    float _S1 = ((kernelContext_1->depthMap_texture_0).sample((kernelContext_1->depthMap_sampler_0), ((float2(p_1) + float2(0.5f) ) / kernelContext_1->post_0->frame_0.xy), level((0.0f))).x);
+    if(_S1 <= 0.0f)
+    {
+
+#line 59
+        return 0.0f;
+    }
+    float near_0 = kernelContext_1->post_0->camera_0.x;
+    float far_0 = kernelContext_1->post_0->camera_0.y;
+
+#line 62
+    float v_0;
+    if((kernelContext_1->post_0->camera_0.z) != 0.0f)
+    {
+
+#line 63
+        v_0 = far_0 - _S1 * (far_0 - near_0);
+
+#line 63
+    }
+    else
+    {
+
+#line 63
+        v_0 = near_0 * far_0 / (near_0 + _S1 * (far_0 - near_0));
+
+#line 63
+    }
+    return 1.0f / v_0;
+}
+
+float focus_blur_0(float key_0, KernelContext_0 thread* kernelContext_2)
+{
+
+#line 68
+    return min(kernelContext_2->post_0->lens_0.y * abs(1.0f - kernelContext_2->post_0->lens_0.x * key_0), kernelContext_2->post_0->lens_0.z);
+}
+
+
+#line 34 "common.slang"
+float3 tone_map_0(float3 c_0, uint mode_0, float exposure_0)
+{
+
+#line 35
+    if(mode_0 == 0U)
+    {
+
+#line 36
+        return c_0;
+    }
+
+#line 36
+    float exp_val_0;
+
+    if(exposure_0 > 0.0f)
+    {
+
+#line 38
+        exp_val_0 = exposure_0;
+
+#line 38
+    }
+    else
+    {
+
+#line 38
+        exp_val_0 = 1.0f;
+
+#line 38
+    }
+    float3 v_1 = c_0 * float3(exp_val_0) ;
+    if(mode_0 == 1U)
+    {
+
+#line 41
+        return saturate(v_1);
+    }
+    if(mode_0 == 2U)
+    {
+
+#line 44
+        return saturate(v_1 / (float3(1.0f)  + v_1));
+    }
+    if(mode_0 == 3U)
+    {
+
+#line 47
+        float3 x_0 = max(v_1 - float3(0.00400000018998981f) , float3(0.0f) );
+        float3 _S2 = float3(6.19999980926513672f)  * x_0;
+        return pow(x_0 * (_S2 + float3(0.5f) ) / (x_0 * (_S2 + float3(1.70000004768371582f) ) + float3(0.05999999865889549f) ), float3(2.20000004768371582f) );
+    }
+    if(mode_0 == 4U)
+    {
+
+#line 52
+        float3 v_2 = v_1 * float3(1.66666662693023682f) ;
+
+        float _S3 = v_2.x;
+
+#line 54
+        float _S4 = v_2.y;
+
+#line 54
+        float _S5 = v_2.z;
+
+#line 53
+        float3 v_3 = float3(0.59719002246856689f * _S3 + 0.35457998514175415f * _S4 + 0.04822999984025955f * _S5, 0.07599999755620956f * _S3 + 0.9083399772644043f * _S4 + 0.01565999910235405f * _S5, 0.0284000001847744f * _S3 + 0.1338299959897995f * _S4 + 0.83776998519897461f * _S5);
+
+#line 60
+        float3 v_4 = (v_3 * (v_3 + float3(0.02457859925925732f) ) - float3(0.0000905370034161f) ) / (v_3 * (float3(0.98372900485992432f)  * v_3 + float3(0.43295100331306458f) ) + float3(0.23808099329471588f) );
+
+        float _S6 = v_4.x;
+
+#line 62
+        float _S7 = v_4.y;
+
+#line 62
+        float _S8 = v_4.z;
+
+
+
+        return saturate(float3(1.60475003719329834f * _S6 - 0.53108000755310059f * _S7 - 0.07366999983787537f * _S8, -0.10208000242710114f * _S6 + 1.10812997817993164f * _S7 - 0.00604999996721745f * _S8, -0.00326999998651445f * _S6 - 0.07276000082492828f * _S7 + 1.0760200023651123f * _S8));
+    }
+    if(mode_0 == 5U)
+    {
+        float _S9 = v_1.x;
+
+#line 70
+        float _S10 = v_1.y;
+
+#line 70
+        float _S11 = v_1.z;
+
+
+
+        float3 _S12 = float3(1.00000001335143196e-10f) ;
+
+#line 74
+        float3 r2020_0 = max(float3(0.62740391492843628f * _S9 + 0.32928299903869629f * _S10 + 0.04331310093402863f * _S11, 0.06909730285406113f * _S9 + 0.9195404052734375f * _S10 + 0.01136230025440454f * _S11, 0.01639140024781227f * _S9 + 0.08801329880952835f * _S10 + 0.89559531211853027f * _S11), _S12);
+
+        float _S13 = r2020_0.x;
+
+#line 76
+        float _S14 = r2020_0.y;
+
+#line 76
+        float _S15 = r2020_0.z;
+
+#line 82
+        float3 x_1 = saturate((log2(max(float3(0.85662716627120972f * _S13 + 0.09512124210596085f * _S14 + 0.04825161024928093f * _S15, 0.13731896877288818f * _S13 + 0.76124197244644165f * _S14 + 0.10143903642892838f * _S15, 0.11189821362495422f * _S13 + 0.0767994225025177f * _S14 + 0.81130236387252808f * _S15), _S12)) - float3(-12.47393035888671875f) ) * float3(0.06060606241226196f) );
+        float3 x2_0 = x_1 * x_1;
+        float3 x4_0 = x2_0 * x2_0;
+        float3 x_2 = float3(15.5f)  * x4_0 * x2_0 - float3(40.1399993896484375f)  * x4_0 * x_1 + float3(31.95999908447265625f)  * x4_0 - float3(6.86800003051757812f)  * x2_0 * x_1 + float3(0.42980000376701355f)  * x2_0 + float3(0.11909999698400497f)  * x_1 - float3(0.0023199999704957f) ;
+
+        float _S16 = x_2.x;
+
+#line 87
+        float _S17 = x_2.y;
+
+#line 87
+        float _S18 = 0.11060664057731628f * _S17;
+
+#line 87
+        float _S19 = x_2.z;
+
+#line 87
+        float _S20 = 0.01649394072592258f * _S19;
+        float _S21 = -0.14132976531982422f * _S16;
+
+
+
+        float3 lin2020_0 = pow(max(float3(1.12710058689117432f * _S16 - _S18 - _S20, _S21 + 1.15782368183135986f * _S17 - _S20, _S21 - _S18 + 1.25193643569946289f * _S19), float3(0.0f) ), float3(2.20000004768371582f) );
+
+        float _S22 = lin2020_0.x;
+
+#line 94
+        float _S23 = lin2020_0.y;
+
+#line 94
+        float _S24 = lin2020_0.z;
+
+
+
+        return saturate(float3(1.66049098968505859f * _S22 - 0.58764111995697021f * _S23 - 0.07284989953041077f * _S24, -0.12455049902200699f * _S22 + 1.13289988040924072f * _S23 - 0.00834940001368523f * _S24, -0.01815080083906651f * _S22 - 0.10057889670133591f * _S23 + 1.11872971057891846f * _S24));
+    }
+    if(mode_0 == 6U)
+    {
+
+        float _S25 = min(v_1.x, min(v_1.y, v_1.z));
+
+#line 103
+        float offset_0;
+        if(_S25 < 0.07999999821186066f)
+        {
+
+#line 104
+            offset_0 = _S25 - 6.25f * _S25 * _S25;
+
+#line 104
+        }
+        else
+        {
+
+#line 104
+            offset_0 = 0.03999999910593033f;
+
+#line 104
+        }
+        float3 p_2 = v_1 - float3(offset_0) ;
+        float _S26 = max(p_2.x, max(p_2.y, p_2.z));
+        if(_S26 < 0.75999999046325684f)
+        {
+
+#line 108
+            return saturate(p_2);
+        }
+
+        float new_peak_0 = 1.0f - 0.0576000027358532f / (_S26 + 0.24000000953674316f - 0.75999999046325684f);
+
+
+        return saturate(mix(p_2 * float3((new_peak_0 / _S26)) , float3(new_peak_0) , float3((1.0f - 1.0f / (0.15000000596046448f * (_S26 - new_peak_0) + 1.0f))) ));
+    }
+    return c_0;
+}
+
+
+#line 14
+float linear_to_srgb_0(float c_1)
+{
+
+#line 15
+    float _S27 = saturate(c_1);
+
+#line 15
+    float _S28;
+    if(_S27 <= 0.00313080009073019f)
+    {
+
+#line 16
+        _S28 = _S27 * 12.92000007629394531f;
+
+#line 16
+    }
+    else
+    {
+
+#line 16
+        _S28 = 1.0549999475479126f * pow(_S27, 0.4166666567325592f) - 0.05499999970197678f;
+
+#line 16
+    }
+
+#line 16
+    return _S28;
+}
+
+
+#line 39 "post.slang"
+float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_3)
+{
+
+#line 40
+    float a_0 = saturate(light_0.w);
+    if(a_0 <= 0.0f)
+    {
+
+#line 42
+        return float4(int4(int(0)) );
+    }
+    float3 c_2 = tone_map_0(light_0.xyz / float3(a_0) , uint(kernelContext_3->post_0->tone_0.x), kernelContext_3->post_0->tone_0.y);
+    float k_0 = clamp(max(c_2.x, max(c_2.y, c_2.z)), 1.0f, 1.0f / a_0);
+    float3 c_3 = c_2 / float3(k_0) ;
+    float m_0 = a_0 * k_0;
+    return float4(linear_to_srgb_0(c_3.x) * m_0, linear_to_srgb_0(c_3.y) * m_0, linear_to_srgb_0(c_3.z) * m_0, a_0);
+}
+
+
+#line 48
+struct pixelOutput_0
+{
+    float4 output_1 [[color(0)]];
+};
+
+
+#line 135
+[[fragment]] pixelOutput_0 fs_focus(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> tileMap_texture_1 [[texture(2)]], sampler tileMap_sampler_1 [[sampler(2)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> depthMap_texture_1 [[texture(1)]], sampler depthMap_sampler_1 [[sampler(1)]], texture2d<float, access::sample> halfMap_texture_1 [[texture(3)]], sampler halfMap_sampler_1 [[sampler(3)]], texture2d<float, access::sample> halfKeyMap_texture_1 [[texture(4)]], sampler halfKeyMap_sampler_1 [[sampler(4)]])
+{
+
+#line 135
+    thread KernelContext_0 kernelContext_4;
+
+#line 135
+    (&kernelContext_4)->post_0 = post_1;
+
+#line 135
+    (&kernelContext_4)->tileMap_texture_0 = tileMap_texture_1;
+
+#line 135
+    (&kernelContext_4)->tileMap_sampler_0 = tileMap_sampler_1;
+
+#line 135
+    (&kernelContext_4)->lightMap_texture_0 = lightMap_texture_1;
+
+#line 135
+    (&kernelContext_4)->lightMap_sampler_0 = lightMap_sampler_1;
+
+#line 135
+    (&kernelContext_4)->depthMap_texture_0 = depthMap_texture_1;
+
+#line 135
+    (&kernelContext_4)->depthMap_sampler_0 = depthMap_sampler_1;
+
+#line 135
+    (&kernelContext_4)->halfMap_texture_0 = halfMap_texture_1;
+
+#line 135
+    (&kernelContext_4)->halfMap_sampler_0 = halfMap_sampler_1;
+
+#line 135
+    (&kernelContext_4)->halfKeyMap_texture_0 = halfKeyMap_texture_1;
+
+#line 135
+    (&kernelContext_4)->halfKeyMap_sampler_0 = halfKeyMap_sampler_1;
+    int2 _S29 = int2(position_0.xy);
+    int2 _S30 = int2(post_1->frame_0.xy);
+
+#line 137
+    int2 _S31 = int2(int(1)) ;
+    int2 _S32 = (_S30 + _S31) / int2(int(2)) ;
+    int2 _S33 = _S29 / int2(int(16)) ;
+
+#line 139
+    float2 _S34 = float2(0.5f) ;
+
+#line 139
+    float _S35 = (((&kernelContext_4)->tileMap_texture_0).sample(((&kernelContext_4)->tileMap_sampler_0), ((float2(_S33) + _S34) / post_1->frame_0.zw), level((0.0f))).x);
+
+#line 139
+    float4 _S36 = light_at_0(_S29, &kernelContext_4);
+
+#line 139
+    float4 sum_0;
+
+    if(_S35 >= 0.5f)
+    {
+
+#line 141
+        float _S37 = key_at_0(_S29, &kernelContext_4);
+
+#line 141
+        float _S38 = focus_blur_0(_S37, &kernelContext_4);
+
+#line 141
+        float2 dir_0 = float2(1.0f, 0.0f);
+
+#line 141
+        float radius_0 = 0.80000001192092896f;
+
+#line 141
+        sum_0 = _S36;
+
+#line 141
+        float count_0 = 1.0f;
+
+#line 147
+        for(;;)
+        {
+
+#line 147
+            if(radius_0 < _S35)
+            {
+            }
+            else
+            {
+
+#line 147
+                break;
+            }
+
+#line 148
+            float2 o_0 = dir_0 * float2(radius_0) ;
+
+
+            bool _S39 = radius_0 < 6.0f;
+
+#line 151
+            float key_1;
+
+#line 151
+            float4 light_1;
+
+#line 151
+            if(_S39)
+            {
+
+#line 152
+                int2 s_0 = clamp(int2(floor(float2(_S29) + o_0 + _S34)), int2(int(0)) , _S30 - _S31);
+
+#line 152
+                float4 _S40 = light_at_0(s_0, &kernelContext_4);
+
+#line 152
+                float _S41 = key_at_0(s_0, &kernelContext_4);
+
+#line 152
+                key_1 = _S41;
+
+#line 152
+                light_1 = _S40;
+
+#line 151
+            }
+            else
+            {
+
+
+
+                float2 uv_0 = (float2(clamp(int2(floor((float2(_S29) + _S34 + o_0) * _S34)), int2(int(0)) , _S32 - _S31)) + _S34) / float2(_S32);
+                float4 _S42 = (((&kernelContext_4)->halfMap_texture_0).sample(((&kernelContext_4)->halfMap_sampler_0), (uv_0), level((0.0f))));
+
+#line 158
+                key_1 = (((&kernelContext_4)->halfKeyMap_texture_0).sample(((&kernelContext_4)->halfKeyMap_sampler_0), (uv_0), level((0.0f))).x);
+
+#line 158
+                light_1 = _S42;
+
+#line 151
+            }
+
+#line 151
+            float _S43 = focus_blur_0(key_1, &kernelContext_4);
+
+#line 151
+            float blur_0;
+
+#line 162
+            if(key_1 < _S37)
+            {
+
+#line 162
+                blur_0 = min(_S43, _S38 * 2.0f);
+
+#line 162
+            }
+            else
+            {
+
+#line 162
+                blur_0 = _S43;
+
+#line 162
+            }
+
+
+            float m_1 = saturate(blur_0 - radius_0 + 0.5f);
+            float4 sum_1 = sum_0 + (sum_0 / float4(count_0)  * float4((1.0f - m_1))  + light_1 * float4(m_1) );
+            float count_1 = count_0 + 1.0f;
+
+#line 167
+            float _S44;
+            if(_S39)
+            {
+
+#line 168
+                _S44 = 1.60000002384185791f;
+
+#line 168
+            }
+            else
+            {
+
+#line 168
+                _S44 = 3.20000004768371582f;
+
+#line 168
+            }
+
+#line 168
+            float radius_1 = radius_0 + _S44 / radius_0;
+            float _S45 = dir_0.x;
+
+#line 169
+            float _S46 = dir_0.y;
+
+#line 169
+            dir_0 = float2(_S45 * -0.7373688817024231f - _S46 * 0.67549031972885132f, _S45 * 0.67549031972885132f + _S46 * -0.7373688817024231f);
+
+#line 169
+            radius_0 = radius_1;
+
+#line 169
+            sum_0 = sum_1;
+
+#line 169
+            count_0 = count_1;
+
+#line 147
+        }
+
+#line 147
+        sum_0 = sum_0 / float4(count_0) ;
+
+#line 141
+    }
+    else
+    {
+
+#line 141
+        sum_0 = _S36;
+
+#line 141
+    }
+
+#line 141
+    float4 _S47 = output_0(sum_0, &kernelContext_4);
+
+#line 141
+    pixelOutput_0 _S48 = { _S47 };
+
+#line 173
+    return _S48;
+}
+

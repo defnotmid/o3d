@@ -127,7 +127,7 @@ sky_texture :: proc(t: ^Textures, sky: Sky, width: int) -> Texture_Id {
 		v := 1 - (f32(y) + 0.5) / f32(h)
 		for x in 0 ..< w {
 			c := sky_shade(&k, equirect_dir({(f32(x) + 0.5) / f32(w), v}))
-			texels[y * w + x] = {f16(min(c.r, 65504)), f16(min(c.g, 65504)), f16(min(c.b, 65504)), 1}
+			texels[y * w + x] = to_halves({min(c.r, 65504), min(c.g, 65504), min(c.b, 65504), 1})
 		}
 	}
 	return texture_finish(t, &tex)

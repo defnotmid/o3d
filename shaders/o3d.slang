@@ -117,7 +117,8 @@ struct Material {
     float4 to_local[3];
     float4 normal_to_local[3];
     // o3d.Shading_Layers: the dielectric F0, clear coat and its roughness
-    // (factors), sheen roughness; sheen colour (linear); the normal map's
+    // (factors), sheen roughness; sheen colour (linear), w the
+    // environment's intensity on the material (env_intensity); the normal map's
     // x and y scale and the coat normal map's; transmission, thickness (the
     // model's units), ior; the model's axis scales; absorption per unit;
     // x: each layer map's texture (4 bits an o3d.Layer_Map: 0 none, 1
@@ -144,9 +145,10 @@ struct Light {
     uint shadowed;
 };
 
-// shadowMatrix: the shadow lights' view-projections; shadowParams: map size
-// (0: no shadow), bias, normal bias; envParams: intensity (0: no env),
-// max radiance mip level, tone mapping exposure, fog density.
+// count: the lights, 0, the fog's kind, the shadows; shadowMatrix: the
+// shadow lights' view-projections; shadowParams: map size (0: no shadow),
+// bias, normal bias; envParams: intensity (0: no env), max radiance mip
+// level, 0, fog density.
 struct Lighting {
     float4 eye;
     int4 count;
@@ -154,8 +156,7 @@ struct Lighting {
     float4 shadowParams[MAX_SHADOWS];
     float4 envParams;
     // x: the environment's maps are linear (HDR), not sRGB-encoded;
-    // y: the camera is orthographic; z: drawing the transmission snapshot
-    // or the mirror (linear light out, fogged, not tone mapped or encoded).
+    // y: the camera is orthographic.
     uint4 envFlags;
     // The frame's width and height, the camera's near and far.
     float4 frameParams;
@@ -569,7 +570,8 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
     }
     if (lighting.envParams.x > 0 || reflection > 0) {
         float3 spec = env_brdf(f0, roughness, nv);
-        float k = ao * lighting.envParams.x;
+        float env_k = lighting.envParams.x * material.sheen.w;
+        float k = ao * env_k;
         float3 rad = float3(0);
         if (lighting.envParams.x > 0) {
             float3 r = 2 * dot(n, v) * n - v;
@@ -584,7 +586,7 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
             }
         }
         if (reflection > 0) {
-            out_s += ao * mirrored(lighting.envParams.x * rad, mirror, reflection) * spec;
+            out_s += ao * mirrored(env_k * rad, mirror, reflection) * spec;
         } else {
             out_s += k * rad * spec;
         }
@@ -595,7 +597,7 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
                 coat_rad = env_radiance(cr_dir, cr * lighting.envParams.y);
             }
             if (reflection > 0) {
-                coat_l += ao * mirrored(lighting.envParams.x * coat_rad, mirror_coat, reflection) * env_brdf(float3(0.04), cr, cnv);
+                coat_l += ao * mirrored(env_k * coat_rad, mirror_coat, reflection) * env_brdf(float3(0.04), cr, cnv);
             } else {
                 coat_l += k * coat_rad * env_brdf(float3(0.04), cr, cnv);
             }
@@ -671,18 +673,8 @@ float4 frame_behind(float2 uv, float lod) {
     return c;
 }
 
-// raster.odin's see_through: a finished colour with transmission's alpha
-// under 1, kept premultiplied as the frame's was.
-float3 see_through(float3 c, float a) {
-    if (a >= 1) {
-        return c;
-    }
-    float3 e = float3(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b));
-    return linear_rgb(min(e / max(a, 1e-4), float3(1)));
-}
-
-// The standard material's colour at a fragment (premultiplied sRGB), as
-// fs_main writes it.
+// The standard material's light at a fragment, premultiplied, as fs_main
+// writes it.
 // `tint` (sRGB colour, opacity) multiplies the material's: a particle's row.
 // Where a fragment reads its maps (o3d's Lane_Uv): its uvs and their
 // derivatives, or (triplanar) its position projected along x, y and z (as
@@ -943,17 +935,12 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
             fog = saturate(1 - exp(-d * d));
         }
     }
-    if (lighting.envFlags.z != 0u) {
-        // The transmission snapshot or the mirror: linear light, fogged,
-        // premultiplied; transmission's alpha (glass in the mirror) leaves
-        // room for what shows behind.
-        c = lerp(c, lighting.fogColor.rgb, fog);
-        return float4(c * a, a * ta);
-    }
-    c = tone_map(c, lighting.count.y, lighting.envParams.z);
-    c = see_through(lerp(c, lighting.fogColor.rgb, fog), ta);
-    a *= ta;
-    return float4(linear_to_srgb(c.r) * a, linear_to_srgb(c.g) * a, linear_to_srgb(c.b) * a, a);
+    // Light, fogged, premultiplied by the material's alpha; coverage that
+    // alpha times transmission's (glass leaves room for what shows behind,
+    // whose light is in c already). The frame is tone mapped and encoded
+    // once a pixel after (shaders/post.slang).
+    c = lerp(c, lighting.fogColor.rgb, fog);
+    return float4(c * a, a * ta);
 }
 
 [shader("fragment")]

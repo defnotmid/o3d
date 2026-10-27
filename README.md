@@ -27,14 +27,23 @@ What is known about three.js carries over:
   transform is position, rotation and scale (`compose`), like Object3D.
 - The camera's field of view is vertical, in degrees (PerspectiveCamera);
   an orthographic camera takes the view's height.
-- Colours are sRGB; lighting is linear; the output is tone-mapped
-  (`scene.tone_mapping`: `.None` default, `.Linear`, `.Reinhard`, `.Cineon`,
-  `.ACES_Filmic`, `.AgX`, `.Neutral`, scaled by `scene.tone_mapping_exposure`,
-  default 1), blended toward `scene.fog` (`.Linear` between `near` and `far`,
-  or `.Exp2` with `density`, by Euclidean camera distance on drawn fragments),
-  and encoded to sRGB.
+- Colours are sRGB; lighting is linear. The frame is drawn in light, as
+  three.js's EffectComposer draws into a HalfFloat target: each fragment's
+  light, blended toward `scene.fog` (`.Linear` between `near` and `far`, or
+  `.Exp2` with `density`, by Euclidean camera distance), premultiplied by
+  its coverage, blended and added there (half floats, 4x MSAA), resolved,
+  then once a pixel through `scene.depth_of_field` (fframes-three-d's
+  gather: what is not at `focus` blurs by `blur * |1 - focus / depth|`,
+  shares of the frame's height, at most `max_blur`), tone-mapped
+  (`scene.tone_mapping`: `.None` default, `.Linear`, `.Reinhard`,
+  `.Cineon`, `.ACES_Filmic`, `.AgX`, `.Neutral`, scaled by
+  `scene.tone_mapping_exposure`, default 1) and encoded to sRGB (three.js's
+  OutputPass). Additive glows add as light; the background colour, the fog
+  and ShaderMaterials' output are light, tone-mapped with the rest.
 - Materials are MeshStandardMaterial (`color`, `metalness`, `roughness`,
-  `emissive`, `emissive_intensity`, `ao_map_intensity`, `opacity`,
+  `emissive`, `emissive_intensity`, `ao_map_intensity`, `env_intensity`
+  (three.js's envMapIntensity: the environment's light on it as a share of
+  the scene's, 0 meaning 1), `opacity`,
   `alpha_cutoff`, `size`, `mode`, `side`, texture maps `color_map`,
   `normal_map` (with `normal_scale`), `roughness_map` (green), `metalness_map` (blue; glTF packs
   both in one texture), `emissive_map`, `ao_map` (red, applied to indirect
@@ -103,7 +112,7 @@ What is known about three.js carries over:
   its derivatives pick (the full mip chain, repeating), `textureLod`,
   `texelFetch` and `textureSize`, uv up the image as with three.js's flipY;
   an unbound sampler reads white. The output is written as the shader
-  leaves it; `.Transparent` blends it, `side` culls as for any material. `projectionMatrix` maps depth to
+  leaves it, as light; `.Transparent` blends it, `side` culls as for any material. `projectionMatrix` maps depth to
   0..1 (SDL_GPU's clip space) rather than WebGL's -1..1, which matters only to
   shaders that build their own. On a morphed or skinned mesh, `position` and
   `normal` arrive already morphed and posed by the skin's joints.
@@ -129,12 +138,13 @@ What is known about three.js carries over:
   the point is by the first shadow-casting light, 0 to 1, as the standard
   material's (normal bias, bias, the same PCF; three.js's getShadow). Its
   map takes the shader's first sampler channel (`shader_map` finds the
-  shader's own by name). A ShaderMaterial's colour is written as it leaves
-  it, as three.js's; it finishes as the standard material does by calling
-  `toneMapping(color)` (the scene's tone mapping and exposure, linear to
-  linear), `fogged(color, worldPosition)` (the scene's fog, linear) and
-  `linearToOutputTexel(value)` (sRGB), in that order. These, like
-  `shadowAt`, are declared only for a shader that names them.
+  shader's own by name). A ShaderMaterial writes light, as three.js's does
+  into its EffectComposer's render target: the frame tone maps and encodes
+  it with everything else. It finishes as the standard material does by
+  calling `fogged(color, worldPosition)` (the scene's fog, linear);
+  `toneMapping(color)` and `linearToOutputTexel(value)` are as is (a render
+  target's), kept for three.js's sources. These, like `shadowAt`, are
+  declared only for a shader that names them.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments, phiStart, phiLength,
   thetaStart, thetaLength)`, `plane`, `circle(radius, segments,
@@ -196,8 +206,10 @@ The output is premultiplied RGBA, transparent where nothing was drawn, to
 composite over anything, unless `scene.background_color` (sRGB and alpha,
 three.js's `scene.background` as a Color) gives the frame a clear colour:
 with alpha 1 it is opaque everywhere, so what is added (a glow, a plume)
-lands on that colour rather than on nothing. A `scene.background` texture
-covers it.
+lands on that colour rather than on nothing; it is light like the rest,
+tone-mapped with it. A `scene.background` texture covers it. Light added
+past a pixel's coverage (glows over nothing) stays as colour past its
+alpha, which a premultiplied over adds.
 
 ## Use
 
@@ -305,7 +317,7 @@ w.shader = wave
 w.uniforms = o3d.scene_uniforms(&scene, {"uTime", {t}}, {"uColor", {0.3, 0.8, 0.4}})
 w.shader_maps[o3d.shader_map(&shaders, wave, "map")] = earth   // its `uniform sampler2D map`
 // shadows in it: `float lit = max(dot(n, sunDir), 0.0) * shadowAt(vWorld, n);` (the first shadow light's)
-// finished as the standard material: `gl_FragColor = linearToOutputTexel(vec4(fogged(toneMapping(c), vWorld), 1.0));`
+// it writes light, fogged as the standard material: `gl_FragColor = vec4(fogged(c, vWorld), 1.0);`
 append(&scene.draws, o3d.Draw{o3d.sphere(&geos, 1), o3d.compose(), w})
 
 // GPU (o3d/sdlgpu): borrows the host's SDL_GPU device, or makes a headless one
@@ -533,7 +545,7 @@ shaders would draw garbage.
 - **Shader contract:** `Light_Kind`'s values and `Shading_Flag`'s bits are
   the shader's `LIGHT_*` and `FLAG_*` constants; a test reads
   `shaders/o3d.slang` and checks them.
-- **Shading** is one model in two places, `shade` / `finish_color` in
+- **Shading** is one model in two places, `shade` / `fogged` in
   `scene.odin` (`tone_map` in `o3d.odin`) and `shaders/o3d.slang`
   (`shaders/common.slang`): Lambert diffuse plus GGX specular with Smith
   correlated visibility and Schlick Fresnel, plus equirectangular
@@ -542,11 +554,11 @@ shaders would draw garbage.
   `scene.background_blurriness`), as three.js's MeshStandardMaterial
   computes it, with `ao_map` (`1 + (r - 1) * ao_map_intensity`) multiplying
   indirect light only (ambient, hemisphere, environment irradiance and
-  radiance), followed by `tone_map` (`None`, `Linear`, `Reinhard`, `Cineon`,
-  `ACES_Filmic`, `AgX`, `Neutral` with `tone_mapping_exposure`, applied to
-  both drawn materials and the equirectangular background) and `fog_factor`
-  (`.Linear` or `.Exp2` blending toward `linear(fog.color)` before sRGB
-  encoding). When a texture is used as `scene.environment` (or blurred
+  radiance) and `fog_factor` (`.Linear` or `.Exp2` blending toward
+  `linear(fog.color)`), written as light; the frame's pixels then through
+  `tone_map` (`None`, `Linear`, `Reinhard`, `Cineon`, `ACES_Filmic`, `AgX`,
+  `Neutral` with `tone_mapping_exposure`) and sRGB encoding, once each
+  (raster.odin's `output`, shaders/post.slang's). When a texture is used as `scene.environment` (or blurred
   `scene.background`), the texture has derived maps, as it has mipmaps: a
   GGX-prefiltered radiance mip chain (roughness 0..1) and a
   cosine-convolved diffuse irradiance map in `Textures`, sampled alike by
@@ -615,9 +627,10 @@ shaders would draw garbage.
   `point_hidden` and `depth_image` turn it into distances as before.
 - **Blending:** `blend_of(material)` is a draw's `Blend`: `.Opaque`
   (depth written), `.Over` (blended: transparent with some alpha) or `.Add`
-  (`.Additive`, three.js's AdditiveBlending: the colour times its opacity
+  (`.Additive`, three.js's AdditiveBlending: the light times its opacity
   added, for any material: meshes, ShaderMaterials (SRC_ALPHA, ONE), shapes,
-  lines, particles). Blended and added draws come after the opaque ones,
+  lines, particles), in the frame's light (half floats, as both renderers
+  keep each sample). Blended and added draws come after the opaque ones,
   depth tested, not written; the GPU's pipelines are indexed by it.
 - **Vertex colours:** `.Vertex_Colors` multiplies the material's colour by
   its vertices' (`Vertex.color`, sRGB bytes made linear per vertex and
@@ -678,14 +691,17 @@ shaders would draw garbage.
   tables starts the mirrors over, and an earlier job then records
   `.Not_Prepared`) and its frame targets (grown to the largest job); each
   job has its own shadow maps and per-frame buffers.
-- **GPU targets:** the colour (multisampled), resolve and depth targets
-  only grow, to the largest frame drawn; a frame renders into their
-  top-left width x height (viewport and scissor) and is copied to the
-  caller's texture, so views of several sizes, or one whose size animates,
-  make no targets per frame.
+- **GPU targets:** the light (RGBA16F, multisampled), its resolve, the
+  depth and the output (RGBA8) targets only grow, to the largest frame
+  drawn; every pass of a frame (the mirror's, the transmission snapshot's,
+  the frame's) renders into their top-left width x height (viewport and
+  scissor), the output pass tone maps and encodes it, and it is copied to
+  the caller's texture, so views of several sizes, or one whose size
+  animates, make no targets per frame.
 - **Anti-aliasing:** 4x MSAA on the GPU; the software renderer keeps four
-  samples per pixel at the same positions, shades once per pixel per
-  triangle, and resolves the same way.
+  samples per pixel at the same positions (each a half-float light, as the
+  GPU's), shades once per pixel per triangle, and resolves the same way,
+  in light, before tone mapping.
 - **Software phases,** each spread over the caller's pool: chunks of the
   drawing order (up to 8192 triangles, so one large mesh splits too) are
   transformed, clipped and counted per band of 32 rows; after a prefix sum
