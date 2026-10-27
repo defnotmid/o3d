@@ -10,7 +10,8 @@ import "core:slice"
 // shared arrays (`Geometries.vertices`, `.indices`); a geometry is its
 // ranges in them, its indices counting from its first vertex. The
 // primitives take three.js's geometry parameters (BoxGeometry,
-// SphereGeometry, PlaneGeometry, CylinderGeometry, TorusGeometry), are made
+// SphereGeometry, PlaneGeometry, CylinderGeometry, TorusGeometry,
+// CircleGeometry, RingGeometry, the RoundedBoxGeometry addon), are made
 // by the `PRIMITIVES` table from their `Geometry_Key`, and the same key gives
 // the same id, so a frame may ask for `box(1, 1, 1)` every time without
 // making it again.
@@ -187,6 +188,9 @@ Primitive :: enum u8 {
 	Cylinder,
 	Torus,
 	Capsule,
+	Rounded_Box,
+	Circle,
+	Ring,
 }
 
 PARAMS :: 7
@@ -202,13 +206,16 @@ Geometry_Key :: struct {
 Builder :: #type proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 
 PRIMITIVES := [Primitive]Builder {
-	.None     = nil,
-	.Box      = build_box,
-	.Sphere   = build_sphere,
-	.Plane    = build_plane,
-	.Cylinder = build_cylinder,
-	.Torus    = build_torus,
-	.Capsule  = build_capsule,
+	.None        = nil,
+	.Box         = build_box,
+	.Sphere      = build_sphere,
+	.Plane       = build_plane,
+	.Cylinder    = build_cylinder,
+	.Torus       = build_torus,
+	.Capsule     = build_capsule,
+	.Rounded_Box = build_rounded_box,
+	.Circle      = build_circle,
+	.Ring        = build_ring,
 }
 
 Geometries :: struct {
@@ -439,9 +446,83 @@ box :: proc(g: ^Geometries, width: f32 = 1, height: f32 = 1, depth: f32 = 1, wid
 	return primitive(g, {.Box, {width, height, depth, f32(max(width_segments, 1)), f32(max(height_segments, 1)), f32(max(depth_segments, 1)), 0}})
 }
 
-// SphereGeometry(radius, widthSegments, heightSegments).
-sphere :: proc(g: ^Geometries, radius: f32 = 1, width_segments := 32, height_segments := 16) -> Geometry_Id {
-	return primitive(g, {.Sphere, {radius, f32(max(width_segments, 3)), f32(max(height_segments, 2)), 0, 0, 0, 0}})
+// SphereGeometry(radius, widthSegments, heightSegments, phiStart,
+// phiLength, thetaStart, thetaLength): phi around Y (from -X toward +Z),
+// theta down from +Y; less than the whole sphere when they cover less.
+sphere :: proc(g: ^Geometries, radius: f32 = 1, width_segments := 32, height_segments := 16, phi_start: f32 = 0, phi_length: f32 = 2 * math.PI, theta_start: f32 = 0, theta_length: f32 = math.PI) -> Geometry_Id {
+	return primitive(g, {.Sphere, {radius, f32(max(width_segments, 3)), f32(max(height_segments, 2)), phi_start, phi_length, theta_start, theta_length}})
+}
+
+// RoundedBoxGeometry(width, height, depth, segments, radius), three.js's
+// addon: a box whose edges and corners are rounded by `radius` (at most
+// half its least side) in `segments` steps (at least 1).
+rounded_box :: proc(g: ^Geometries, width: f32 = 1, height: f32 = 1, depth: f32 = 1, segments := 2, radius: f32 = 0.1) -> Geometry_Id {
+	return primitive(g, {.Rounded_Box, {width, height, depth, f32(max(segments, 1)), radius, 0, 0}})
+}
+
+// CircleGeometry(radius, segments, thetaStart, thetaLength): a disc, or a
+// sector of one, in the XY plane facing +Z.
+circle :: proc(g: ^Geometries, radius: f32 = 1, segments := 32, theta_start: f32 = 0, theta_length: f32 = 2 * math.PI) -> Geometry_Id {
+	return primitive(g, {.Circle, {radius, f32(max(segments, 3)), theta_start, theta_length, 0, 0, 0}})
+}
+
+// RingGeometry(innerRadius, outerRadius, thetaSegments, phiSegments,
+// thetaStart, thetaLength): an annulus, or a sector of one, in the XY
+// plane facing +Z, in `phi_segments` rings.
+ring :: proc(g: ^Geometries, inner_radius: f32 = 0.5, outer_radius: f32 = 1, theta_segments := 32, phi_segments := 1, theta_start: f32 = 0, theta_length: f32 = 2 * math.PI) -> Geometry_Id {
+	return primitive(g, {.Ring, {inner_radius, outer_radius, f32(max(theta_segments, 3)), f32(max(phi_segments, 1)), theta_start, theta_length, 0}})
+}
+
+// LatheGeometry(points, segments, phiStart, phiLength): the profile
+// `points` (x the radius, y the height) turned about Y. Its points are no
+// key, so each call makes a geometry: keep the id. 0 with fewer than two
+// points.
+lathe :: proc(g: ^Geometries, points: []Vec2, segments := 12, phi_start: f32 = 0, phi_length: f32 = 2 * math.PI) -> Geometry_Id {
+	n := len(points)
+	if n < 2 {
+		return 0
+	}
+	segs := max(segments, 1)
+	length := clamp(phi_length, 0, 2 * math.PI)
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	// Each point's normal in the profile's plane: the first segment's, the
+	// last's (as three.js, not normalized), or between two the sum of
+	// theirs (longer segments weigh more).
+	normals := make([]Vec2, n, context.temp_allocator)
+	prev: Vec2
+	for j in 0 ..< n {
+		if j == n - 1 {
+			normals[j] = prev
+			continue
+		}
+		d := points[j + 1] - points[j]
+		cur := Vec2{d.y, -d.x}
+		normals[j] = linalg.normalize0(cur if j == 0 else cur + prev)
+		prev = cur
+	}
+	clear(&g.scratch.vertices)
+	clear(&g.scratch.indices)
+	table_grow(&g.scratch.vertices, (segs + 1) * n)
+	table_grow_non_zero(&g.scratch.indices, segs * (n - 1) * 6)
+	for i in 0 ..= segs {
+		phi := phi_start + f32(i) * (1 / f32(segs)) * length
+		s, c := math.sin(phi), math.cos(phi)
+		for p, j in points {
+			nj := normals[j]
+			g.scratch.vertices[i * n + j] = {position = {p.x * s, p.y, p.x * c}, normal = {nj.x * s, nj.y, nj.x * c}, uv = {f32(i) / f32(segs), f32(j) / f32(n - 1)}}
+		}
+	}
+	at := 0
+	for i in 0 ..< segs {
+		for j in 0 ..< n - 1 {
+			a := u32(j + i * n)
+			b, c, d := a + u32(n), a + u32(n) + 1, a + 1
+			g.scratch.indices[at + 0], g.scratch.indices[at + 1], g.scratch.indices[at + 2] = a, b, d
+			g.scratch.indices[at + 3], g.scratch.indices[at + 4], g.scratch.indices[at + 5] = c, d, b
+			at += 6
+		}
+	}
+	return geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:])
 }
 
 // PlaneGeometry(width, height, widthSegments, heightSegments): in the XY
@@ -513,28 +594,133 @@ build_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 @(private = "file")
 build_sphere :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 	r, ws, hs := p[0], int(p[1]), int(p[2])
+	phi_start, phi_length, theta_start, theta_length := p[3], p[4], p[5], p[6]
+	theta_end := min(theta_start + theta_length, math.PI)
 	for iy in 0 ..= hs {
 		v := f32(iy) / f32(hs)
+		// A pole's row (three.js's): its uvs half a segment along, under
+		// the middles of the triangles it closes.
+		u_offset: f32
+		if iy == 0 && theta_start == 0 {
+			u_offset = 0.5 / f32(ws)
+		} else if iy == hs && theta_end == math.PI {
+			u_offset = -0.5 / f32(ws)
+		}
+		theta := theta_start + v * theta_length
 		for ix in 0 ..= ws {
 			u := f32(ix) / f32(ws)
 			// three.js: x = -cos(phi) sin(theta), y = cos(theta), z = sin(phi) sin(theta).
-			phi, theta := u * 2 * math.PI, v * math.PI
+			phi := phi_start + u * phi_length
 			n := Vec3{-math.cos(phi) * math.sin(theta), math.cos(theta), math.sin(phi) * math.sin(theta)}
-			append(verts, Vertex{position = n * r, normal = n, uv = {u, 1 - v}})
+			append(verts, Vertex{position = n * r, normal = n, uv = {u + u_offset, 1 - v}})
 		}
 	}
+	// A pole's row of triangles is left out where the sphere closes there.
 	for iy in 0 ..< hs {
 		for ix in 0 ..< ws {
 			a := u32(iy * (ws + 1) + ix + 1)
 			b := u32(iy * (ws + 1) + ix)
 			c := u32((iy + 1) * (ws + 1) + ix)
 			d := u32((iy + 1) * (ws + 1) + ix + 1)
-			if iy != 0 {
+			if iy != 0 || theta_start > 0 {
 				append(idx, a, b, d)
 			}
-			if iy != hs - 1 {
+			if iy != hs - 1 || theta_end < math.PI {
 				append(idx, b, c, d)
 			}
+		}
+	}
+}
+
+// three.js's RoundedBoxGeometry: a unit box of 2 * segments + 1 steps a
+// side, each vertex pushed out from its corner's centre by `radius` along
+// its direction there, uvs running around the rounded edges. three.js
+// lays the box's triangles out unindexed first; each face has vertices
+// of its own, so indexed they come out the same.
+@(private = "file")
+build_rounded_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
+	size := Vec3{p[0], p[1], p[2]}
+	steps := f32(2 * int(p[3]) + 1)
+	r := max(min(size.x / 2, size.y / 2, size.z / 2, p[4]), 0)
+	build_box({1, 1, 1, steps, steps, steps, 0}, verts, idx)
+	half_step := 0.5 / steps
+	corner := size / 2 - r
+	face_verts := len(verts) / 6
+	// How far along a face's uv axis a vertex is: around the arc of its
+	// edge, or across the flat between (three.js's getUv), from the edge on
+	// the axis's positive side when the vertex is on that side (`sign`, its
+	// unit box position's: where an arc meets the flat the normal's part
+	// along the axis is 0, and three.js's sign of it is rounding's).
+	along :: proc "contextless" (face, n, sign: Vec3, uv_axis, flat_axis: int, r, side: f32) -> f32 {
+		arc := 2 * math.PI * r / 4
+		flat := max(side - 2 * r, 0)
+		t := n
+		t[flat_axis] = 0
+		t = linalg.normalize0(t)
+		arc_uv := 0.5 * arc / (arc + flat)
+		arc_angle := 1 - math.acos(clamp(linalg.dot(t, face), -1, 1)) / (math.PI / 4)
+		if sign[uv_axis] > 0 {
+			return arc_angle * arc_uv
+		}
+		return flat / (arc + flat) + arc_uv + arc_uv * (1 - arc_angle)
+	}
+	X, Y, Z :: 0, 1, 2
+	for &v, i in verts {
+		sign := linalg.sign(v.position)
+		n := linalg.normalize0(v.position - sign * half_step)
+		v.position = corner * sign + n * r
+		v.normal = n
+		switch i / face_verts {
+		case 0: // +x
+			v.uv = {along({1, 0, 0}, n, sign, Z, Y, r, size.z), 1 - along({1, 0, 0}, n, sign, Y, Z, r, size.y)}
+		case 1: // -x
+			v.uv = {1 - along({-1, 0, 0}, n, sign, Z, Y, r, size.z), 1 - along({-1, 0, 0}, n, sign, Y, Z, r, size.y)}
+		case 2: // +y
+			v.uv = {1 - along({0, 1, 0}, n, sign, X, Z, r, size.x), along({0, 1, 0}, n, sign, Z, X, r, size.z)}
+		case 3: // -y
+			v.uv = {1 - along({0, -1, 0}, n, sign, X, Z, r, size.x), 1 - along({0, -1, 0}, n, sign, Z, X, r, size.z)}
+		case 4: // +z
+			v.uv = {1 - along({0, 0, 1}, n, sign, X, Y, r, size.x), 1 - along({0, 0, 1}, n, sign, Y, X, r, size.y)}
+		case: // -z
+			v.uv = {along({0, 0, -1}, n, sign, X, Y, r, size.x), 1 - along({0, 0, -1}, n, sign, Y, X, r, size.y)}
+		}
+	}
+}
+
+@(private = "file")
+build_circle :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
+	r, segs, start, length := p[0], int(p[1]), p[2], p[3]
+	append(verts, Vertex{normal = {0, 0, 1}, uv = {0.5, 0.5}})
+	for s in 0 ..= segs {
+		a := start + f32(s) / f32(segs) * length
+		pos := Vec3{r * math.cos(a), r * math.sin(a), 0}
+		append(verts, Vertex{position = pos, normal = {0, 0, 1}, uv = {(pos.x / r + 1) / 2, (pos.y / r + 1) / 2}})
+	}
+	for i in 1 ..= u32(segs) {
+		append(idx, i, i + 1, 0)
+	}
+}
+
+@(private = "file")
+build_ring :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
+	inner, outer := p[0], p[1]
+	ts, ps := int(p[2]), int(p[3])
+	start, length := p[4], p[5]
+	step := (outer - inner) / f32(ps)
+	r := inner
+	for _ in 0 ..= ps {
+		for i in 0 ..= ts {
+			a := start + f32(i) / f32(ts) * length
+			pos := Vec3{r * math.cos(a), r * math.sin(a), 0}
+			append(verts, Vertex{position = pos, normal = {0, 0, 1}, uv = {(pos.x / outer + 1) / 2, (pos.y / outer + 1) / 2}})
+		}
+		r += step
+	}
+	for j in 0 ..< ps {
+		for i in 0 ..< ts {
+			a := u32(i + j * (ts + 1))
+			b, c, d := a + u32(ts) + 1, a + u32(ts) + 2, a + 1
+			append(idx, a, b, d, b, c, d)
 		}
 	}
 }

@@ -53,6 +53,7 @@ static const uint FLAG_SHEEN = 4194304;
 static const uint FLAG_TRANSMISSION = 8388608;
 static const uint FLAG_LAYER_MAPS = 16777216;
 static const uint FLAG_CLEARCOAT_NORMAL_MAP = 33554432;
+static const uint FLAG_REFLECTION = 67108864;
 
 static const uint SLOT_COLOR = 0;
 static const uint SLOT_NORMAL = 1;
@@ -92,7 +93,8 @@ struct Draw_VS {
 };
 
 // Shading_Material: color is linear rgb, a = opacity (1 unless blended or
-// alpha-masked); emissive is linear rgb times intensity; flags are FLAG_* bits.
+// alpha-masked); emissive is linear rgb times intensity, w how much of the
+// reflection it shows (FLAG_REFLECTION); flags are FLAG_* bits.
 // curve_table: an exact shape's or glyph run's table of its quads' entries
 // in curveWords (each its curve set's first word, bit 31 for even-odd).
 struct Material {
@@ -153,7 +155,7 @@ struct Lighting {
     float4 envParams;
     // x: the environment's maps are linear (HDR), not sRGB-encoded;
     // y: the camera is orthographic; z: drawing the transmission snapshot
-    // (linear light out, fogged, not tone mapped or encoded).
+    // or the mirror (linear light out, fogged, not tone mapped or encoded).
     uint4 envFlags;
     // The frame's width and height, the camera's near and far.
     float4 frameParams;
@@ -161,6 +163,10 @@ struct Lighting {
     float4 fogParams;
     // The camera's view-projection (transmission's refraction).
     float4x4 viewProj;
+    // The mirror's pass: its plane (dot(xyz, p) + w < 0 behind it, left
+    // out; zero in the other passes). x: the reflection's last level.
+    float4 clipPlane;
+    float4 reflectParams;
     Light lights[MAX_LIGHTS];
 };
 
@@ -467,9 +473,16 @@ struct Layers {
     float3 sheen;
 };
 
-// scene.odin's shade, with emissive, the layers, the coat's normal and the
-// frame behind; transmission's alpha out.
-float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao, uint flags, float3 emissive, Layers ly, float3 coat_n, float4 behind, out float alpha) {
+// scene.odin's mirrored: the environment's reflected light with a
+// mirror's taking `amount` of its place.
+float3 mirrored(float3 env, float4 p, float amount) {
+    return lerp(env, p.rgb + env * (1 - p.a), amount);
+}
+
+// scene.odin's shade, with emissive, the layers, the coat's normal, the
+// frame behind and the reflection (its light at the surface's roughness
+// and the coat's, and how much it shows); transmission's alpha out.
+float3 shade(float3 base, float roughness_in, float metalness, float3 world, float3 n, float3 eye, float4 shadows, float ao, uint flags, float3 emissive, Layers ly, float3 coat_n, float4 behind, float4 mirror, float4 mirror_coat, float reflection, out float alpha) {
     float3 v = normalize(eye - world);
     float3 diffuse = base * (1 - metalness);
     float3 f0 = lerp(float3(material.layers.x), base, metalness);
@@ -554,23 +567,38 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
             sheen += irradiance * ly.sheen * (charlie(ly.sheen_roughness, nh) * neubelt(nv, nl));
         }
     }
-    if (lighting.envParams.x > 0) {
-        float3 r = 2 * dot(n, v) * n - v;
-        float3 irr = envIrradianceMap.SampleLevel(equirect_uv(n), 0).rgb;
-        if (lighting.envFlags.x == 0u) {
-            irr = linear_rgb(irr);
-        }
-        float3 rad = env_radiance(r, roughness * lighting.envParams.y);
+    if (lighting.envParams.x > 0 || reflection > 0) {
         float3 spec = env_brdf(f0, roughness, nv);
         float k = ao * lighting.envParams.x;
-        out_d += k * irr * diffuse * (1 - spec);
-        out_s += k * rad * spec;
-        if ((flags & FLAG_SHEEN) != 0) {
-            sheen += k * irr * ly.sheen * ibl_sheen(ly.sheen_roughness, nv);
+        float3 rad = float3(0);
+        if (lighting.envParams.x > 0) {
+            float3 r = 2 * dot(n, v) * n - v;
+            float3 irr = envIrradianceMap.SampleLevel(equirect_uv(n), 0).rgb;
+            if (lighting.envFlags.x == 0u) {
+                irr = linear_rgb(irr);
+            }
+            rad = env_radiance(r, roughness * lighting.envParams.y);
+            out_d += k * irr * diffuse * (1 - spec);
+            if ((flags & FLAG_SHEEN) != 0) {
+                sheen += k * irr * ly.sheen * ibl_sheen(ly.sheen_roughness, nv);
+            }
+        }
+        if (reflection > 0) {
+            out_s += ao * mirrored(lighting.envParams.x * rad, mirror, reflection) * spec;
+        } else {
+            out_s += k * rad * spec;
         }
         if (coat) {
-            float3 cr_dir = 2 * dot(coat_n, v) * coat_n - v;
-            coat_l += k * env_radiance(cr_dir, cr * lighting.envParams.y) * env_brdf(float3(0.04), cr, cnv);
+            float3 coat_rad = float3(0);
+            if (lighting.envParams.x > 0) {
+                float3 cr_dir = 2 * dot(coat_n, v) * coat_n - v;
+                coat_rad = env_radiance(cr_dir, cr * lighting.envParams.y);
+            }
+            if (reflection > 0) {
+                coat_l += ao * mirrored(lighting.envParams.x * coat_rad, mirror_coat, reflection) * env_brdf(float3(0.04), cr, cnv);
+            } else {
+                coat_l += k * coat_rad * env_brdf(float3(0.04), cr, cnv);
+            }
         }
     }
     alpha = 1;
@@ -751,8 +779,13 @@ float4 read_layer(uint map, LaneUv at) {
     return float4(1);
 }
 
-// TRANSMIT: whether the entry reads frameMap (fs_sprite has its depth
-// there instead).
+// The reflection's level for a roughness (scene.odin's reflection_lod).
+float reflection_lod(float roughness) {
+    return sqrt(saturate(roughness)) * lighting.reflectParams.x;
+}
+
+// TRANSMIT: whether the entry reads frameMap, the transmission snapshot or
+// the reflection (fs_sprite has its depth there instead).
 float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
@@ -769,6 +802,11 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
     if ((flags & FLAG_TRIPLANAR) != 0) {
         float3 tn = (flags & FLAG_FLAT_SHADING) != 0 ? cross(dp_dx, dp_dy) : i.normal;
         project_lane(at, i.world, tn);
+    }
+    // The mirror's pass leaves out what is behind its plane (after the
+    // derivatives; a zero plane in the other passes).
+    if (dot(lighting.clipPlane.xyz, i.world) + lighting.clipPlane.w < 0) {
+        discard;
     }
     if ((flags & FLAG_VERTEX_COLORS) != 0) {
         base *= i.color.rgb;
@@ -880,7 +918,20 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
             ly.thickness = distance;
             behind = frame_behind(uv, lod);
         }
-        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags, emissive, ly, coat_n, behind, ta);
+        // The reflection where the fragment is on the screen, at its
+        // roughness and its coat's.
+        float4 mirror = float4(0);
+        float4 mirror_coat = float4(0);
+        float reflection = 0;
+        if (TRANSMIT && (flags & FLAG_REFLECTION) != 0) {
+            reflection = material.emissive.w;
+            float2 uv = i.position.xy / lighting.frameParams.xy;
+            mirror = frameMap.SampleLevel(uv, reflection_lod(roughness));
+            if ((flags & FLAG_CLEARCOAT) != 0) {
+                mirror_coat = frameMap.SampleLevel(uv, reflection_lod(ly.clearcoat_roughness));
+            }
+        }
+        c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags, emissive, ly, coat_n, behind, mirror, mirror_coat, reflection, ta);
     }
     float fog = 0;
     if (lighting.count.z != FOG_NONE) {
@@ -893,9 +944,11 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
         }
     }
     if (lighting.envFlags.z != 0u) {
-        // The transmission snapshot: linear light, fogged, premultiplied.
+        // The transmission snapshot or the mirror: linear light, fogged,
+        // premultiplied; transmission's alpha (glass in the mirror) leaves
+        // room for what shows behind.
         c = lerp(c, lighting.fogColor.rgb, fog);
-        return float4(c * a, a);
+        return float4(c * a, a * ta);
     }
     c = tone_map(c, lighting.count.y, lighting.envParams.z);
     c = see_through(lerp(c, lighting.fogColor.rgb, fog), ta);

@@ -39,8 +39,8 @@ Builtin :: enum u8 {
 	Normal_Matrix, // of the model-view matrix, as three.js's
 	Camera_Position,
 	Is_Orthographic,
-	// An instanced draw's instance: its colour (white without one) and
-	// 0-based index.
+	// An instanced draw's instance: its colour (linear, as three.js's;
+	// white without one) and 0-based index.
 	Instance_Color,
 	Instance_Id,
 	// `shadowAt`'s: the first shadow-casting light's view-projection, and
@@ -564,8 +564,10 @@ shader_blocks_destroy :: proc(b: ^Shader_Blocks) {
 
 // Fills every custom draw's blocks: the built-ins its stages read (the
 // first of the frame's `shadows` for `shadowAt`), then the material's
-// uniforms by name.
-shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadows: []Shadow, out: ^Shader_Blocks) {
+// uniforms by name. `eye` (the camera's position when nil) is
+// cameraPosition: the mirror's pass draws through its image.
+shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadows: []Shadow, out: ^Shader_Blocks, eye: Maybe(Vec3) = nil) {
+	camera_position := eye.? or_else scene.camera.position
 	fog_near, fog_far, fog_density := fog_terms(scene.fog)
 	tone_params := [4]f32{f32(scene.tone_mapping), scene.tone_mapping_exposure if scene.tone_mapping_exposure > 0 else 1, 0, 0}
 	fog_params := [4]f32{f32(scene.fog.kind), fog_near, fog_far, fog_density}
@@ -611,11 +613,11 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadow
 						put(dst[c * 16:], [4]f32{nm[0, c], nm[1, c], nm[2, c], 0})
 					}
 				case .Camera_Position:
-					put(dst, scene.camera.position)
+					put(dst, camera_position)
 				case .Is_Orthographic:
 					put(dst, u32(1 if scene.camera.orthographic else 0))
 				case .Instance_Color:
-					put(dst, m.color)
+					put(dst, linear(m.color))
 				case .Instance_Id:
 					put(dst, f32(scene.draw_instance_ids[i] if i < len(scene.draw_instance_ids) else 0))
 				case .Shadow_Matrix:

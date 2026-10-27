@@ -55,6 +55,16 @@ Snapshot_Kind :: enum u8 {
 	Curves,
 	Sprite,
 }
+
+// The pass a draw is drawn in: the frame's, the transmission snapshot's
+// (opaque draws, linear light) or the mirror's (`o3d.mirror_view`: linear
+// light, blended as the frame's, through a mirrored camera, so front faces
+// turn clockwise).
+Pass :: enum u8 {
+	Main,
+	Snapshot,
+	Mirror,
+}
 // The shadow map holds depth as a colour, so every backend can sample it.
 SHADOW_FORMAT :: sdl.GPUTextureFormat.R32_FLOAT
 // The host's image of the frame's depth as distance (`record_depth_into`).
@@ -95,6 +105,10 @@ GPU :: struct {
 	snapshot_bg_pipeline:     ^sdl.GPUGraphicsPipeline,
 	snapshot_color:           ^sdl.GPUTexture,
 	snapshot_resolved:        ^sdl.GPUTexture,
+	// The mirror's pass: its pipelines (into SNAPSHOT_FORMAT, front faces
+	// clockwise) by kind, side and blend, made when a frame first needs
+	// them; it draws into the snapshot's targets.
+	mirror_pipelines:         [Snapshot_Kind][o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	// The frame's depth as distance into the host's image.
 	depth_vert, depth_frag:   ^sdl.GPUShader,
 	depth_pipeline:           ^sdl.GPUGraphicsPipeline,
@@ -121,6 +135,9 @@ GPU :: struct {
 	textures:                 [dynamic]^sdl.GPUTexture,
 	externals:                [dynamic]External_Texture,
 	dummy_texture:            ^sdl.GPUTexture,
+	// 1x1 transparent black: what a draw sees in frameMap with no snapshot
+	// or reflection (glass in the mirror, a reflective draw without one).
+	clear_texture:            ^sdl.GPUTexture,
 	linear_sampler:           ^sdl.GPUSampler,
 	env_sampler:              ^sdl.GPUSampler,
 	// Mipmapped, clamped: a frame's snapshot for transmissive draws.
@@ -155,8 +172,9 @@ External_Texture :: struct {
 Custom :: struct {
 	vert, frag: ^sdl.GPUShader,
 	pipelines:  [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
-	// Opaque, into the transmission snapshot.
+	// Opaque, into the transmission snapshot; into the mirror.
 	snapshot_pipelines: [o3d.Side]^sdl.GPUGraphicsPipeline,
+	mirror_pipelines:   [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	made:       bool,
 	failed:     bool,
 }
@@ -221,6 +239,10 @@ Lighting_Uniforms :: struct {
 	fog_params:    [4]f32,
 	// The camera's view-projection (transmission's refraction).
 	view_proj:     o3d.Mat4,
+	// The mirror's pass: its plane (behind it is left out; zero in the
+	// other passes). x: the reflection's last level.
+	clip_plane:    [4]f32,
+	reflect_params: [4]f32,
 	lights:        [o3d.MAX_LIGHTS]Light_Uniforms,
 }
 
@@ -325,11 +347,12 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.env_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .REPEAT, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE, max_lod = f32(o3d.MAX_MIPS)})
 	g.frame_sampler = sdl.CreateGPUSampler(g.device, {min_filter = .LINEAR, mag_filter = .LINEAR, mipmap_mode = .LINEAR, address_mode_u = .CLAMP_TO_EDGE, address_mode_v = .CLAMP_TO_EDGE, address_mode_w = .CLAMP_TO_EDGE, max_lod = f32(o3d.MAX_MIPS)})
 	g.dummy_texture = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = 1, height = 1, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
+	g.clear_texture = sdl.CreateGPUTexture(g.device, {type = .D2, format = COLOR_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = 1, height = 1, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
 	g.morph_deltas.capacity = 64 << 10
 	g.morph_deltas.buffer = sdl.CreateGPUBuffer(g.device, {usage = {.GRAPHICS_STORAGE_READ}, size = g.morph_deltas.capacity})
 	g.curve_words.capacity = 64 << 10
 	g.curve_words.buffer = sdl.CreateGPUBuffer(g.device, {usage = {.GRAPHICS_STORAGE_READ}, size = g.curve_words.capacity})
-	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.frame_sampler == nil || g.dummy_texture == nil || g.morph_deltas.buffer == nil || g.curve_words.buffer == nil {
+	if g.shadow_sampler == nil || g.linear_sampler == nil || g.env_sampler == nil || g.frame_sampler == nil || g.dummy_texture == nil || g.clear_texture == nil || g.morph_deltas.buffer == nil || g.curve_words.buffer == nil {
 		return .Device
 	}
 	// 1x1 fallback shadow and colour textures, cleared, bound for unused slots.
@@ -346,6 +369,8 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear_shadow, 1, nil))
 	clear := sdl.GPUColorTargetInfo{texture = g.dummy_texture, clear_color = {1, 1, 1, 1}, load_op = .CLEAR, store_op = .STORE}
 	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &clear, 1, nil))
+	transparent := sdl.GPUColorTargetInfo{texture = g.clear_texture, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE}
+	sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &transparent, 1, nil))
 	if !sdl.SubmitGPUCommandBuffer(cmd) {
 		return .Device
 	}
@@ -371,6 +396,9 @@ destroy :: proc(g: ^GPU) {
 	delete(g.externals)
 	if g.dummy_texture != nil {
 		sdl.ReleaseGPUTexture(g.device, g.dummy_texture)
+	}
+	if g.clear_texture != nil {
+		sdl.ReleaseGPUTexture(g.device, g.clear_texture)
 	}
 	if g.linear_sampler != nil {
 		sdl.ReleaseGPUSampler(g.device, g.linear_sampler)
@@ -414,6 +442,13 @@ destroy :: proc(g: ^GPU) {
 		for p in g.snapshot_pipelines[kind] {
 			if p != nil {
 				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+			}
+		}
+		for side in o3d.Side {
+			for p in g.mirror_pipelines[kind][side] {
+				if p != nil {
+					sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+				}
 			}
 		}
 	}
@@ -525,9 +560,9 @@ SKINNED_ATTRIBUTES := [7]sdl.GPUVertexAttribute {
 // A pipeline drawing `Vertex`es (slot 0, plus `Skin_Vertex`es in slot 1 when
 // `skinned`) for a material side and blend. The standard material's output
 // is premultiplied; a ShaderMaterial's (`raw`) is as written, premultiplied
-// by the blend.
+// by the blend. Through a mirror (`mirrored`) front faces are clockwise.
 @(private = "file")
-make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend: o3d.Blend, raw, skinned: bool, format := COLOR_FORMAT) -> ^sdl.GPUGraphicsPipeline {
+make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVertexAttribute, side: o3d.Side, blend: o3d.Blend, raw, skinned: bool, format := COLOR_FORMAT, mirrored := false) -> ^sdl.GPUGraphicsPipeline {
 	buffers := [2]sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX},
 		{slot = 1, pitch = size_of(o3d.Skin_Vertex), input_rate = .VERTEX},
@@ -558,7 +593,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 		fragment_shader = frag,
 		vertex_input_state = {vertex_buffer_descriptions = &buffers[0], num_vertex_buffers = 2 if skinned else 1, vertex_attributes = raw_data(attrs), num_vertex_attributes = u32(len(attrs))},
 		primitive_type = .TRIANGLELIST,
-		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
+		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .CLOCKWISE if mirrored else .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = g.samples},
 		depth_stencil_state = {compare_op = .GREATER, enable_depth_test = true, enable_depth_write = blend == .Opaque},
 		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
@@ -599,20 +634,31 @@ make_depth_image_pipeline :: proc(g: ^GPU) -> ^sdl.GPUGraphicsPipeline {
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
 }
 
-// A ShaderMaterial's pipeline, its shaders made from oksl's output the first
-// time (nil: they could not be). `record` only looks it up (`make` false).
+// A ShaderMaterial's pipeline for a pass, its shaders made from oksl's
+// output the first time (nil: they could not be). `record` only looks it
+// up (`make` false).
 @(private)
-custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: o3d.Blend, make := true, snapshot := false) -> ^sdl.GPUGraphicsPipeline {
+custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, blend: o3d.Blend, make := true, pass := Pass.Main) -> ^sdl.GPUGraphicsPipeline {
 	sh := o3d.shader_get(shaders, id)
 	if sh == nil {
 		return nil
+	}
+	pipeline :: proc(c: ^Custom, side: o3d.Side, blend: o3d.Blend, pass: Pass) -> ^^sdl.GPUGraphicsPipeline {
+		switch pass {
+		case .Snapshot:
+			return &c.snapshot_pipelines[side]
+		case .Mirror:
+			return &c.mirror_pipelines[side][blend]
+		case .Main:
+		}
+		return &c.pipelines[side][blend]
 	}
 	if !make {
 		c := &g.custom[id - 1] if int(id) <= len(g.custom) else nil
 		if c == nil || c.failed {
 			return nil
 		}
-		return c.snapshot_pipelines[side] if snapshot else c.pipelines[side][blend]
+		return pipeline(c, side, blend, pass)^
 	}
 	if len(g.custom) < int(id) {
 		resize(&g.custom, int(id))
@@ -647,7 +693,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 	if c.failed {
 		return nil
 	}
-	p := &c.snapshot_pipelines[side] if snapshot else &c.pipelines[side][blend]
+	p := pipeline(c, side, blend, pass)
 	if p^ == nil {
 		attrs: [len(o3d.Vertex_Attribute)]sdl.GPUVertexAttribute
 		n := 0
@@ -658,7 +704,7 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 				n += 1
 			}
 		}
-		p^ = make_pipeline(g, c.vert, c.frag, attrs[:n], side, blend, true, false, SNAPSHOT_FORMAT if snapshot else COLOR_FORMAT)
+		p^ = make_pipeline(g, c.vert, c.frag, attrs[:n], side, blend, true, false, COLOR_FORMAT if pass == .Main else SNAPSHOT_FORMAT, pass == .Mirror)
 	}
 	return p^
 }
@@ -673,6 +719,11 @@ release_custom :: proc(g: ^GPU, c: ^Custom) {
 		}
 		if c.snapshot_pipelines[side] != nil {
 			sdl.ReleaseGPUGraphicsPipeline(g.device, c.snapshot_pipelines[side])
+		}
+		for p in c.mirror_pipelines[side] {
+			if p != nil {
+				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+			}
 		}
 	}
 	if c.vert != nil {
@@ -781,6 +832,27 @@ release_snapshot :: proc(g: ^GPU, job: ^Job) {
 	job.snapshot_tex, job.snapshot_size = nil, {}
 }
 
+// A job's reflection: the mirror's light at its size with `levels` mips
+// (o3d.Mirror_View's).
+@(private)
+ensure_reflection :: proc(g: ^GPU, job: ^Job, width, height, levels: u32) -> bool {
+	if job.reflection_size == {width, height, levels} && job.reflection_tex != nil {
+		return true
+	}
+	release_reflection(g, job)
+	job.reflection_tex = sdl.CreateGPUTexture(g.device, {type = .D2, format = SNAPSHOT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = levels})
+	job.reflection_size = {width, height, levels}
+	return job.reflection_tex != nil
+}
+
+@(private)
+release_reflection :: proc(g: ^GPU, job: ^Job) {
+	if job.reflection_tex != nil {
+		sdl.ReleaseGPUTexture(g.device, job.reflection_tex)
+	}
+	job.reflection_tex, job.reflection_size = nil, {}
+}
+
 @(private)
 release_shadow_slot :: proc(g: ^GPU, job: ^Job, idx: int) {
 	if job.shadow_maps[idx] != nil {
@@ -812,9 +884,8 @@ release_targets :: proc(g: ^GPU) {
 	g.snapshot_color, g.snapshot_resolved = nil, nil
 }
 
-// The transmission snapshot's pass: its pipelines (once) and targets at
-// `capacity` (multisampled as the frame's, resolved into
-// `snapshot_resolved`).
+// The transmission snapshot's pass: its pipelines (once) and targets
+// (`ensure_linear_targets`).
 @(private)
 ensure_snapshot_pass :: proc(g: ^GPU) -> bool {
 	if g.snapshot_bg_pipeline == nil {
@@ -836,6 +907,39 @@ ensure_snapshot_pass :: proc(g: ^GPU) -> bool {
 	if g.snapshot_bg_pipeline == nil {
 		return false
 	}
+	return ensure_linear_targets(g)
+}
+
+// The mirror's pass: its pipelines (once) and targets
+// (`ensure_linear_targets`).
+@(private)
+ensure_mirror_pass :: proc(g: ^GPU) -> bool {
+	if g.mirror_pipelines[.Standard][.Front][.Opaque] == nil {
+		for side in o3d.Side {
+			for blend in o3d.Blend {
+				g.mirror_pipelines[.Standard][side][blend] = make_pipeline(g, g.vert, g.frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, SNAPSHOT_FORMAT, true)
+				g.mirror_pipelines[.Skinned][side][blend] = make_pipeline(g, g.skinned_vert, g.frag, SKINNED_ATTRIBUTES[:], side, blend, false, true, SNAPSHOT_FORMAT, true)
+				g.mirror_pipelines[.Curves][side][blend] = make_pipeline(g, g.curves_vert, g.curves_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, SNAPSHOT_FORMAT, true)
+				g.mirror_pipelines[.Sprite][side][blend] = make_pipeline(g, g.curves_vert, g.sprite_frag, STANDARD_ATTRIBUTES[:], side, blend, false, false, SNAPSHOT_FORMAT, true)
+			}
+		}
+	}
+	for kind in Snapshot_Kind {
+		for side in o3d.Side {
+			for p in g.mirror_pipelines[kind][side] {
+				if p == nil {
+					return false
+				}
+			}
+		}
+	}
+	return ensure_linear_targets(g)
+}
+
+// The linear passes' targets at `capacity` (multisampled as the frame's,
+// resolved into `snapshot_resolved`).
+@(private = "file")
+ensure_linear_targets :: proc(g: ^GPU) -> bool {
 	if g.snapshot_color == nil {
 		single := g.samples == ._1
 		size := g.capacity

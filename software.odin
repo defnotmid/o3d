@@ -64,7 +64,10 @@ Software :: struct {
 	// reuse).
 	order:         [dynamic]int,
 	materials:     [dynamic]Shading_Material, // per draw
+	// ShaderMaterials' uniform blocks, through the camera and through the
+	// mirror.
 	blocks:        Shader_Blocks,
+	mirror_blocks: Shader_Blocks,
 	// The frame's chunks are chunks[:chunk_count]; the ones past it keep
 	// their lists' memory for later frames.
 	chunks:        [dynamic]Chunk,
@@ -95,6 +98,13 @@ Software :: struct {
 	snapshot_tex:  Texture,
 	hdr:           []u32,
 	capture:       bool,
+	// The scene mirrored in its reflector (`mirror_view`), drawn first in
+	// the same samples at its size, its light resolved into level 0 of
+	// `reflection_tex` (texture 1), mipmapped as the GPU's, then its levels
+	// read as floats (`reflection_light`) by the draws that show it.
+	reflection:    Textures,
+	reflection_tex: Texture,
+	reflection_light: [dynamic][4]f32,
 }
 
 // An external texture's pixels for the software renderer: RGBA8 (sRGB
@@ -109,10 +119,13 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.depth)
 	delete(s.own)
 	textures_destroy(&s.snapshot)
+	textures_destroy(&s.reflection)
+	delete(s.reflection_light)
 	delete(s.hdr)
 	delete(s.order)
 	delete(s.materials)
 	shader_blocks_destroy(&s.blocks)
+	shader_blocks_destroy(&s.mirror_blocks)
 	for &c in s.chunks {
 		delete(c.tris)
 		delete(c.values)
@@ -269,6 +282,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	bg_tex, bg_intensity, bg_lod := shading_background(active, textures)
 	job := Frame_Job {
 		s             = s,
+		blocks        = &s.blocks,
 		scene         = active,
 		geos          = geos,
 		shaders       = shaders,
@@ -310,6 +324,38 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	} else {
 		clear(&s.depth_map)
 	}
+	if mv, ok := mirror_view(active, s.materials[:], geos, view, proj, width, height, &s.expanded); ok {
+		// The mirror's light in the frame's samples at its size: its pass
+		// with the mirrored camera, front faces turned, what is behind the
+		// plane clipped, cleared to nothing (the environment shows there).
+		mirror_order(active, geos, shaders, s.materials[:], mv.view, proj, &s.order, &s.expanded)
+		shader_blocks(active, shaders, mv.view, proj, shadows[:ns], &s.mirror_blocks, mv.eye)
+		ensure_hdr(s)
+		clear(&s.reflection.list)
+		clear(&s.reflection.hdr_texels)
+		s.reflection_tex = texture_grow(&s.reflection.hdr_texels, mv.width, mv.height)
+		s.reflection_tex.hdr = true
+		s.reflection_tex.levels = u32(mv.levels)
+		mj := job
+		mj.view_proj, mj.width, mj.height, mj.depth_only = proj * mv.view, mv.width, mv.height, false
+		mj.eye, mj.mirrored, mj.clip, mj.blocks = mv.eye, true, mv.plane, &s.mirror_blocks
+		mj.bg_tex, mj.clear, mj.clear_light = 0, 0, 0
+		mj.capture, mj.capture_into = true, s.reflection.hdr_texels[s.reflection_tex.mips[0]:][:mv.width * mv.height]
+		s.capture = true
+		run_pass(s, active, geos, &mj, pool, draw_band, 0, len(s.order))
+		s.capture = false
+		texture_finish(&s.reflection, &s.reflection_tex, blit = true)
+		// A read takes eight texels (four at each of two levels): their half
+		// floats converted once.
+		tex := &s.reflection_tex
+		last := tex.levels - 1
+		used := int(tex.mips[last] - tex.first_texel) + int(max(tex.width >> last, 1) * max(tex.height >> last, 1))
+		table_grow_non_zero(&s.reflection_light, used)
+		for c, i in s.reflection.hdr_texels[tex.first_texel:][:used] {
+			s.reflection_light[i] = linalg.array_cast(c, f32)
+		}
+		job.reflection, job.reflection_tex, job.reflection_last = s.reflection_light[:used], tex^, f32(last)
+	}
 	snapshot := draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
 	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
 	if bg_tex != 0 {
@@ -318,15 +364,13 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	if snapshot < len(s.order) {
 		// The frame so far, resolved and mipmapped, for the transmissive
 		// draws after it.
-		if len(s.hdr) != width * height * SAMPLES {
-			delete(s.hdr)
-			s.hdr = make([]u32, width * height * SAMPLES)
-		}
+		ensure_hdr(s)
 		clear(&s.snapshot.list)
 		clear(&s.snapshot.hdr_texels)
 		s.snapshot_tex = texture_grow(&s.snapshot.hdr_texels, width, height)
 		s.snapshot_tex.hdr = true
 		s.capture, job.capture = true, true
+		job.capture_into = s.snapshot.hdr_texels[s.snapshot_tex.mips[0]:][:width * height]
 		run_pass(s, active, geos, &job, pool, draw_band, 0, snapshot)
 		s.capture, job.capture = false, false
 		// Mipmapped as the GPU's snapshot is (three.js's too).
@@ -335,6 +379,15 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	}
 	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))
 	return s.pixels
+}
+
+// Each sample's light for a pass that keeps it, at the frame's size.
+@(private = "file")
+ensure_hdr :: proc(s: ^Software) {
+	if len(s.hdr) != s.width * s.height * SAMPLES {
+		delete(s.hdr)
+		s.hdr = make([]u32, s.width * s.height * SAMPLES)
+	}
 }
 
 // The frame's depth per pixel from the last `software_render` of a scene
@@ -379,6 +432,7 @@ make_chunks :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, from, to: in
 @(private)
 Frame_Job :: struct {
 	s:             ^Software,
+	blocks:        ^Shader_Blocks, // ShaderMaterials' uniforms for the pass's camera
 	scene:         ^Scene,
 	geos:          ^Geometries,
 	shaders:       ^Shaders,
@@ -410,8 +464,21 @@ Frame_Job :: struct {
 	bands:         int,
 	// Over what the pass before drew (no clear, no background).
 	keep:          bool,
-	// Keeping the linear light for the snapshot (`Software.capture`).
+	// Keeping the linear light for the snapshot or the mirror
+	// (`Software.capture`), resolved into `capture_into` (level 0, the
+	// pass's size).
 	capture:       bool,
+	capture_into:  [][4]f16,
+	// The mirror's pass (`mirror_view`): front faces turn, transmissive
+	// draws see nothing behind them, what is behind `clip` is left out (a
+	// zero plane: nothing), and the frame's pixels are not written.
+	mirrored:      bool,
+	clip:          Vec4,
+	// The frame's reflection for the draws that show it (nil: none): its
+	// levels' light, laid out as `reflection_tex`, and its last level.
+	reflection:    [][4]f32,
+	reflection_tex: Texture,
+	reflection_last: f32,
 }
 
 @(private = "file")
@@ -545,7 +612,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 			row := VERTEX_ATTRIBUTES[a]
 			attrs[loc] = {rawptr(uintptr(&src_verts[0]) + row.offset), size_of(Vertex), .Float2 if row.components == 2 else .Float3}
 		}
-		oksl.run_vertex(&sh.pipeline.vertex.program, block(&s.blocks, di, .Vertex), attrs[:], count, w.positions[:], w.values[:], &w.vm)
+		oksl.run_vertex(&sh.pipeline.vertex.program, block(job.blocks, di, .Vertex), attrs[:], count, w.positions[:], w.values[:], &w.vm)
 	}
 	side := shadow_side(d.material.side) if job.depth_only && !job.own_side else d.material.side
 	values := raw_data(w.values) // nil with no floats (the shadow map): never read
@@ -556,7 +623,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		// Its quad's entry: an exact shape's curve set, or a particle's row.
 		curve := curve_quad_entry(job.geos, geo, indices[t] / 4) if curved_geo else (geo.sprite_table + indices[t] / 4 if geo.mode == .Sprites else 0)
 		if clip[0].z <= clip[0].w && clip[1].z <= clip[1].w && clip[2].z <= clip[2].w {
-			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, curve, job.width, job.height, side)
+			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, curve, job.width, job.height, side, job.mirrored)
 			continue
 		}
 		corners: [3]Corner = ---
@@ -564,7 +631,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 			corners[k].c = clip[k]
 			copy(corners[k].v[:nf], w.values[v[k] * nf:][:nf])
 		}
-		clip_near(c, &corners, nf, flat, di, curve, job.width, job.height, side)
+		clip_near(c, &corners, nf, flat, di, curve, job.width, job.height, side, job.mirrored)
 	}
 	counts := s.chunk_bands[ci * job.bands:][:job.bands]
 	slice.zero(counts)
@@ -623,7 +690,7 @@ list_chunk :: proc(data: rawptr, ci, _: int) {
 // what is left as one or two screen triangles; `nf` floats per corner,
 // the `flat` ones the first vertex's, carried, not interpolated.
 @(private = "file")
-clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side) {
+clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side, mirrored: bool) {
 	for f in flat {
 		tri[1].v[f], tri[2].v[f] = tri[0].v[f], tri[0].v[f]
 	}
@@ -650,15 +717,16 @@ clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw: int, cu
 		}
 	}
 	for k in 1 ..< count - 1 {
-		emit(c, {in_[0].c, in_[k].c, in_[k + 1].c}, {&in_[0].v[0], &in_[k].v[0], &in_[k + 1].v[0]}, nf, flat, draw, curve, width, height, side)
+		emit(c, {in_[0].c, in_[k].c, in_[k + 1].c}, {&in_[0].v[0], &in_[k].v[0], &in_[k + 1].v[0]}, nf, flat, draw, curve, width, height, side, mirrored)
 	}
 }
 
 // A clipped triangle to the screen, kept if it faces a drawn side and
 // reaches a row: its corners' `nf` floats each (`values`), divided by w
-// except the flat ones, the first corner's.
+// except the flat ones, the first corner's. Seen in a mirror, a front
+// face turns clockwise.
 @(private = "file")
-emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side) {
+emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side, mirrored: bool) {
 	t: Tri
 	t.draw = draw
 	t.curve = curve
@@ -672,12 +740,12 @@ emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, d
 	// Screen area: negative is counter-clockwise on screen (y down), the
 	// front face.
 	area := (t.p[1].x - t.p[0].x) * (t.p[2].y - t.p[0].y) - (t.p[2].x - t.p[0].x) * (t.p[1].y - t.p[0].y)
-	t.front = area < 0
+	t.front = (area < 0) != mirrored
 	if area == 0 || (side == .Front && !t.front) || (side == .Back && t.front) {
 		return
 	}
 	order := [3]int{0, 1, 2}
-	if !t.front {
+	if area > 0 {
 		order = {0, 2, 1}
 		t.p[1], t.p[2] = t.p[2], t.p[1]
 		t.inv_w[1], t.inv_w[2] = t.inv_w[2], t.inv_w[1]

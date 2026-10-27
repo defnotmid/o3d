@@ -17,25 +17,26 @@ import "deps:ovg/curves"
 draw_band :: proc(data: rawptr, band, wi: int) {
 	job := (^Frame_Job)(data)
 	s := job.s
+	width := job.width
 	y0 := band * BAND_ROWS
-	y1 := min(y0 + BAND_ROWS, s.height)
+	y1 := min(y0 + BAND_ROWS, job.height)
 	// The second part of a frame (after its snapshot) draws over the first.
 	if !job.keep {
-		slice.fill(s.depth[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES], 0)
+		slice.fill(s.depth[y0 * width * SAMPLES:y1 * width * SAMPLES], 0)
 		if job.bg_tex == 0 {
-			for &c in s.color[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES] {
+			for &c in s.color[y0 * width * SAMPLES:y1 * width * SAMPLES] {
 				c = job.clear
 			}
 			if job.capture {
-				for &c in s.hdr[y0 * s.width * SAMPLES:y1 * s.width * SAMPLES] {
+				for &c in s.hdr[y0 * width * SAMPLES:y1 * width * SAMPLES] {
 					c = job.clear_light
 				}
 			}
 		} else {
 			// The background first, as the GPU draws it: what is drawn then
 			// blends over it or adds to it.
-			inv_w := 2.0 / f32(s.width)
-			inv_h := 2.0 / f32(s.height)
+			inv_w := 2.0 / f32(width)
+			inv_h := 2.0 / f32(job.height)
 			for y in y0 ..< y1 {
 				ndc_y := 1 - (f32(y) + 0.5) * inv_h
 				// From the near plane (depth 1) to the far (0).
@@ -45,13 +46,13 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 				p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
 				ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
 				ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
-				for x in 0 ..< s.width {
+				for x in 0 ..< width {
 					dir := linalg.normalize(ray0 + f32(x) * ray_step)
 					c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
 					bg := pack(tone_map(c, job.tone_mapping, job.tone_exposure), 1)
-					slice.fill(s.color[(y * s.width + x) * SAMPLES:][:SAMPLES], bg)
+					slice.fill(s.color[(y * width + x) * SAMPLES:][:SAMPLES], bg)
 					if job.capture {
-						slice.fill(s.hdr[(y * s.width + x) * SAMPLES:][:SAMPLES], rgb9e5(c))
+						slice.fill(s.hdr[(y * width + x) * SAMPLES:][:SAMPLES], rgb9e5(c))
 					}
 				}
 			}
@@ -67,25 +68,29 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 		draw_standard(job, refs[r], t, y0, y1)
 		r += 1
 	}
-	for i in y0 * s.width ..< y1 * s.width {
-		// Two channels a sum: red and blue, green and alpha (4 samples of
-		// 255 fit 16 bits).
-		rb, ga: u32
-		for k in 0 ..< SAMPLES {
-			c := s.color[i * SAMPLES + k]
-			rb += c & 0x00ff00ff
-			ga += (c >> 8) & 0x00ff00ff
+	// The mirror's pass keeps only its light.
+	if !job.mirrored {
+		for i in y0 * width ..< y1 * width {
+			// Two channels a sum: red and blue, green and alpha (4 samples
+			// of 255 fit 16 bits).
+			rb, ga: u32
+			for k in 0 ..< SAMPLES {
+				c := s.color[i * SAMPLES + k]
+				rb += c & 0x00ff00ff
+				ga += (c >> 8) & 0x00ff00ff
+			}
+			s.pixels[i * 4 + 0] = u8(((rb & 0xffff) + SAMPLES / 2) / SAMPLES)
+			s.pixels[i * 4 + 1] = u8(((ga & 0xffff) + SAMPLES / 2) / SAMPLES)
+			s.pixels[i * 4 + 2] = u8(((rb >> 16) + SAMPLES / 2) / SAMPLES)
+			s.pixels[i * 4 + 3] = u8(((ga >> 16) + SAMPLES / 2) / SAMPLES)
 		}
-		s.pixels[i * 4 + 0] = u8(((rb & 0xffff) + SAMPLES / 2) / SAMPLES)
-		s.pixels[i * 4 + 1] = u8(((ga & 0xffff) + SAMPLES / 2) / SAMPLES)
-		s.pixels[i * 4 + 2] = u8(((rb >> 16) + SAMPLES / 2) / SAMPLES)
-		s.pixels[i * 4 + 3] = u8(((ga >> 16) + SAMPLES / 2) / SAMPLES)
 	}
 	if job.capture {
-		// The snapshot's level 0: the samples' light averaged, premultiplied
-		// as the colour's alpha (the clear's light already is).
-		level := s.snapshot.hdr_texels[s.snapshot_tex.mips[0]:][:s.width * s.height]
-		for i in y0 * s.width ..< y1 * s.width {
+		// The snapshot's or reflection's level 0: the samples' light
+		// averaged, premultiplied as the colour's alpha (the clear's light
+		// already is).
+		level := job.capture_into
+		for i in y0 * width ..< y1 * width {
 			light: Vec3
 			alpha: u32
 			for k in 0 ..< SAMPLES {
@@ -106,7 +111,34 @@ behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n_in: Vec
 	n := -n_in if two_sided && linalg.dot(n_in, job.eye - world) < 0 else n_in
 	uv, lod, distance := refraction(world, n, job.eye, roughness, ly, job.view_proj, job.width)
 	ly.thickness = distance
+	if job.mirrored {
+		// The mirror has no snapshot: the environment shows through.
+		return {}
+	}
 	return frame_behind(&job.s.snapshot, uv, lod)
+}
+
+// What a reflective point at pixel (x, y) reads of the frame's reflection
+// (none: nothing, the environment's), at its roughness and its coat's.
+@(private = "file")
+mirror_at :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, x, y: int, roughness, coat_roughness: f32) -> (mirror: Mirror_Light) {
+	mirror.amount = m.reflection
+	if job.reflection == nil {
+		return
+	}
+	uv := Vec2{(f32(x) + 0.5) / f32(job.width), (f32(y) + 0.5) / f32(job.height)}
+	mirror.spec = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(roughness, job.reflection_last))
+	if .Clearcoat in m.flags {
+		mirror.coat = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(coat_roughness, job.reflection_last))
+	}
+	return
+}
+
+// Whether a point is behind the mirror's plane (`job.clip`, zero in the
+// other passes).
+@(private = "file")
+clipped :: #force_inline proc "contextless" (job: ^Frame_Job, p: Vec3) -> bool {
+	return linalg.dot(job.clip.xyz, p) + job.clip.w < 0
 }
 
 // A finished colour with transmission's alpha under 1 (the frame behind
@@ -124,20 +156,21 @@ see_through :: #force_inline proc "contextless" (c: Vec3, a: f32) -> Vec3 {
 	return out
 }
 
-// A colour's linear light for the snapshot, fogged and not tone mapped,
-// when the pass keeps one (else 0).
+// A colour's linear light for the snapshot or the mirror, fogged and not
+// tone mapped, premultiplied by its `alpha` (the material's, before
+// transmission's), when the pass keeps one (else 0).
 @(private = "file")
-snapshot_light :: #force_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3) -> u32 {
+snapshot_light :: #force_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3, alpha: f32) -> u32 {
 	if !job.capture {
 		return 0
 	}
-	return capture_light(job, lit, world)
+	return capture_light(job, lit, world, alpha)
 }
 
 // Out of line: the frame's shading loops stay as they were without it.
 @(private = "file")
-capture_light :: #force_no_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3) -> u32 {
-	return rgb9e5(finish_color(lit, world, job.eye, .None, 1, job.fog, job.fog_color))
+capture_light :: #force_no_inline proc "contextless" (job: ^Frame_Job, lit, world: Vec3, alpha: f32) -> u32 {
+	return rgb9e5(finish_color(lit, world, job.eye, .None, 1, job.fog, job.fog_color) * clamp(alpha, 0, 1))
 }
 
 // RGB9E5: three 9-bit mantissas with a shared 5-bit exponent, a sample's
@@ -279,6 +312,7 @@ transform_uv :: #force_inline proc "contextless" (xf: [2]Vec3, raw, dx, dy: Vec2
 draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0, y1: int) {
 	t := t // a local the pixel loop keeps in registers (a parameter is a reference)
 	s := job.s
+	width := job.width
 	m := &s.materials[t.draw]
 	blend := .Blended in m.flags
 	receive := .Receive_Shadow in m.flags && job.shadow_count > 0
@@ -299,8 +333,11 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 	}
 	out_alpha := m.opacity if blend else 1
 	dz := depth_plane(t, area)
-	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
-	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	// The mirror's pass clips; a reflective draw reads the reflection.
+	clipping := job.clip != {}
+	reflective := .Reflection in m.flags
 	// World position and normal over w per corner.
 	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
 	world, normal: [3]Vec3
@@ -326,6 +363,9 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			b2 := 1 - b0 - b1
 			iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
 			p := (world[0] * b0 + world[1] * b1 + world[2] * b2) / iw
+			if clipping && clipped(job, p) {
+				continue
+			}
 			n := flat_n
 			if .Flat_Shading not_in m.flags {
 				n = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
@@ -346,16 +386,22 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 				ly = &local
 				behind = behind_of(job, p, n, m.roughness, ly, .Two_Sided in m.flags)
 			}
+			mirror: Mirror_Light = ---
+			mp: ^Mirror_Light
+			if reflective {
+				mirror = mirror_at(job, m, x, y, m.roughness, m.layers.clearcoat_roughness)
+				mp = &mirror
+			}
 			a: f32 = 1
 			lit: Vec3
 			if m.flags & LAYER_FLAGS != {} {
-				a, lit = shade_layered(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, ly, n, behind)
+				a, lit = shade_layered(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, ly, n, behind, mp)
 			} else {
-				lit = shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, m.layers.f0)
+				lit = shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, m.layers.f0, mp)
 			}
-			hdr := snapshot_light(job, lit, p)
+			hdr := snapshot_light(job, lit, p, out_alpha)
 			lit = finish_color(lit, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, dz, x, y, covered, pack(see_through(lit, a), out_alpha * a), blend_of(m), hdr)
+			write_samples(s, width, dz, x, y, covered, pack(see_through(lit, a), out_alpha * a), blend_of(m), hdr)
 		}
 	}
 }
@@ -365,9 +411,10 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 @(private = "file")
 draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32) {
 	s := job.s
+	width := job.width
 	dz := depth_plane(t, area)
-	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
-	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
 	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
 	world, normal: [3]Vec3
 	for k in 0 ..< 3 {
@@ -392,7 +439,7 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 			}
 			lit := finish_color(m.base, p, job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-			write_samples(s, dz, x, y, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m), 0)
+			write_samples(s, width, dz, x, y, covered, pack(lit, m.opacity * (1 - mask)), blend_of(m), 0)
 		}
 	}
 }
@@ -400,6 +447,7 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 @(private = "file")
 draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32, blend, receive: bool) {
 	s := job.s
+	width := job.width
 	dz := depth_plane(t, area)
 	coloured := .Vertex_Colors in m.flags
 	nf := STANDARD_FLOATS + (COLOR_FLOATS if coloured else 0)
@@ -443,11 +491,13 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 		row.color.a *= sprite_visibility(row.probe, s.depth_map[:], s.width, s.height)
 	}
 	inv_area := 1 / area
-	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width) &~ 1
-	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width) &~ 1
+	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	clipping := job.clip != {}
+	reflective := .Reflection in m.flags
 	for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
 		for qx := x_lo; qx < x_hi; qx += 2 {
-			lanes, helpers := quad_coverage(t, qx, qy, s.width, y1, area)
+			lanes, helpers := quad_coverage(t, qx, qy, width, y1, area)
 			if card(helpers) == 4 {
 				continue
 			}
@@ -475,7 +525,7 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				}
 			}
 			for l in 0 ..< 4 {
-				if lanes[l] == {} {
+				if lanes[l] == {} || clipping && clipped(job, worlds[l]) {
 					continue
 				}
 				x, y := qx + l & 1, qy + l >> 1
@@ -593,16 +643,22 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				if .Transmission in m.flags {
 					behind = behind_of(job, worlds[l], n, pm.roughness, ly, false)
 				}
+				mirror: Mirror_Light = ---
+				mp: ^Mirror_Light
+				if reflective {
+					mirror = mirror_at(job, m, x, y, pm.roughness, ly.clearcoat_roughness)
+					mp = &mirror
+				}
 				a: f32 = 1
 				lit: Vec3
 				if m.flags & LAYER_FLAGS != {} {
-					a, lit = shade_layered(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, ly, coat_n, behind)
+					a, lit = shade_layered(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, ly, coat_n, behind, mp)
 				} else {
-					lit = shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, m.layers.f0)
+					lit = shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, m.layers.f0, mp)
 				}
-				hdr := snapshot_light(job, lit, worlds[l])
+				hdr := snapshot_light(job, lit, worlds[l], opacity)
 				lit = finish_color(lit, worlds[l], job.eye, job.tone_mapping, job.tone_exposure, job.fog, job.fog_color)
-				write_samples(s, dz, x, y, covered, pack(see_through(lit, a), opacity * a), blend_of(m), hdr)
+				write_samples(s, width, dz, x, y, covered, pack(see_through(lit, a), opacity * a), blend_of(m), hdr)
 			}
 		}
 	}
@@ -782,6 +838,7 @@ quad_coverage :: #force_inline proc "contextless" (t: Tri, qx, qy, width, y1: in
 @(private = "file")
 draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Ref, y0, y1: int) -> int {
 	s := job.s
+	width := job.width
 	q := &w.quads
 	clear(&q.origin)
 	clear(&q.helpers)
@@ -802,11 +859,11 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 			continue
 		}
 		// Quads at even pixels: a band (BAND_ROWS even) holds whole quads.
-		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width) &~ 1
-		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, s.width)
+		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width) &~ 1
+		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
 		for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
 			for qx := x_lo; qx < x_hi; qx += 2 {
-				lanes, helpers := quad_coverage(t, qx, qy, s.width, y1, area)
+				lanes, helpers := quad_coverage(t, qx, qy, width, y1, area)
 				if card(helpers) == 4 {
 					continue
 				}
@@ -869,7 +926,7 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 			sizes[c] = {i32(tex.width), i32(tex.height)}
 		}
 	}
-	oksl.run_fragment(&sh.pipeline.fragment.program, block(&s.blocks, draw, .Fragment), quads, q.colours[:], q.shaded[:], &w.vm, {sampler = sample_shader_map, user = &maps, channel_sizes = sizes[:]})
+	oksl.run_fragment(&sh.pipeline.fragment.program, block(job.blocks, draw, .Fragment), quads, q.colours[:], q.shaded[:], &w.vm, {sampler = sample_shader_map, user = &maps, channel_sizes = sizes[:]})
 	blend := blend_of(&s.materials[draw])
 	for qi in 0 ..< nq {
 		ref := q.tri[qi]
@@ -878,7 +935,9 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 		for l in q.shaded[qi] {
 			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
 			c := q.colours[qi * 4 + l]
-			write_samples(s, dz, x, y, q.covered[qi][l], pack_raw(c, blend != .Opaque), blend, rgb9e5(c.rgb) if job.capture else 0)
+			// Its light premultiplied as the blend multiplies it.
+			hdr := rgb9e5(c.rgb * (clamp(c.a, 0, 1) if blend != .Opaque else 1)) if job.capture else 0
+			write_samples(s, width, dz, x, y, q.covered[qi][l], pack_raw(c, blend != .Opaque), blend, hdr)
 		}
 	}
 	return taken
@@ -938,12 +997,14 @@ coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (
 
 // A pixel's colour into its covered samples that pass the depth test:
 // replacing them (depth written), blended over them or added to them
-// (premultiplied colour added, alpha over; depth kept).
+// (premultiplied colour added, alpha over; depth kept). Kept, its light
+// `hdr` (premultiplied) likewise, blended in linear light as the GPU's
+// half-float target blends it.
 @(private = "file")
-write_samples :: #force_inline proc "contextless" (s: ^Software, dz: Depth_Plane, x, y: int, covered: Sample_Mask, col: u32, blend: Blend, hdr: u32) {
+write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask, col: u32, blend: Blend, hdr: u32) {
 	for k in covered {
 		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
-		i := (y * s.width + x) * SAMPLES + k
+		i := (y * width + x) * SAMPLES + k
 		if z < 0 || z > 1 || z <= s.depth[i] {
 			continue
 		}
@@ -955,6 +1016,9 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, dz: Depth_Plane
 				s.hdr[i] = hdr
 			}
 		case .Over:
+			if s.capture {
+				blend_light(s, i, hdr, col >> 24)
+			}
 			s.color[i] = over(col, s.color[i])
 		case .Add:
 			dst := s.color[i]
@@ -963,8 +1027,19 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, dz: Depth_Plane
 				out |= min(((col >> sh) & 0xff) + ((dst >> sh) & 0xff), 255) << sh
 			}
 			s.color[i] = out
+			if s.capture {
+				blend_light(s, i, hdr, 0)
+			}
 		}
 	}
+}
+
+// A blended sample's light over the one kept (`over`: the alpha it covers
+// with, 0 to 255; 0 adds): only the mirror's pass blends what it keeps.
+// Out of line, so the frame's writes stay as small as they were.
+@(private = "file")
+blend_light :: #force_no_inline proc "contextless" (s: ^Software, i: int, hdr, over: u32) {
+	s.hdr[i] = rgb9e5(rgb9e5_light(hdr) + rgb9e5_light(s.hdr[i]) * (1 - f32(over) / 255))
 }
 
 // A triangle's screen depth as a plane: at its first corner, and per pixel

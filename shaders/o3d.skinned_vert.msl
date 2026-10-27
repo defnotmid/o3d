@@ -48,11 +48,11 @@ float3 linear_rgb_0(float3 c_1)
 }
 
 
-#line 244 "o3d.slang"
+#line 250 "o3d.slang"
 float4 vertex_color_0(float4 c_2)
 {
 
-#line 245
+#line 251
     return float4(linear_rgb_0(c_2.xyz), c_2.w);
 }
 
@@ -69,7 +69,7 @@ struct vs_skinned_Result_0
 };
 
 
-#line 224 "o3d.slang"
+#line 230 "o3d.slang"
 struct vertexInput_0
 {
     float3 position_1 [[attribute(0)]];
@@ -82,14 +82,14 @@ struct vertexInput_0
 };
 
 
-#line 224
+#line 230
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 85
+#line 86
 struct Draw_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 mvp_0;
@@ -101,7 +101,7 @@ struct Draw_VS_natural_0
 };
 
 
-#line 85
+#line 86
 struct Morph_Delta_natural_0
 {
     packed_float4 position_2;
@@ -109,21 +109,21 @@ struct Morph_Delta_natural_0
 };
 
 
-#line 85
+#line 86
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E64_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_0, int(64)> data_1;
 };
 
 
-#line 85
+#line 86
 struct Joints_VS_natural_0
 {
     _Array_natural_matrixx3Cfloatx2C4x2C4x3E64_0 mats_0;
 };
 
 
-#line 234
+#line 240
 struct VS_Out_0
 {
     float4 position_3;
@@ -135,7 +135,7 @@ struct VS_Out_0
 };
 
 
-#line 172
+#line 178
 struct KernelContext_0
 {
     Draw_VS_natural_0 constant* draw_0;
@@ -144,79 +144,79 @@ struct KernelContext_0
 };
 
 
-#line 172
+#line 178
 [[vertex]] vs_skinned_Result_0 vs_skinned(vertexInput_0 _S2 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_1 [[buffer(0)]], Morph_Delta_natural_0 device* skinnedMorphDeltas_1 [[buffer(2)]], Joints_VS_natural_0 constant* joints_2 [[buffer(1)]])
 {
 
-#line 172
+#line 178
     VS_Out_0 _S3;
 
-#line 172
+#line 178
     thread KernelContext_0 kernelContext_0;
 
-#line 172
+#line 178
     (&kernelContext_0)->draw_0 = draw_1;
 
-#line 172
+#line 178
     (&kernelContext_0)->skinnedMorphDeltas_0 = skinnedMorphDeltas_1;
 
-#line 172
+#line 178
     (&kernelContext_0)->joints_1 = joints_2;
 
-#line 172
+#line 178
     for(;;)
     {
 
-#line 172
+#line 178
         uint k_0 = 0U;
 
-#line 172
+#line 178
         float3 mpos_0 = _S2.position_1;
 
-#line 172
+#line 178
         float3 mnorm_0 = _S2.normal_1;
 
-#line 310
+#line 316
         for(;;)
         {
 
-#line 310
+#line 316
             if(k_0 < ((&kernelContext_0)->draw_0->morph_info_0.x))
             {
             }
             else
             {
 
-#line 310
+#line 316
                 break;
             }
 
-#line 311
+#line 317
             uint _S4 = k_0 >> 2U;
 
-#line 311
+#line 317
             uint _S5 = k_0 & 3U;
 
             Morph_Delta_natural_0 d_0 = (&kernelContext_0)->skinnedMorphDeltas_0[(&kernelContext_0)->draw_0->morph_bases_0[_S4][_S5] + vid_0];
 
-#line 313
+#line 319
             float3 _S6 = float3((&kernelContext_0)->draw_0->morph_weights_0[_S4][_S5]) ;
             float3 mpos_1 = mpos_0 + (float4(d_0.position_2) ).xyz * _S6;
             float3 mnorm_1 = mnorm_0 + (float4(d_0.normal_3) ).xyz * _S6;
 
-#line 310
+#line 316
             k_0 = k_0 + 1U;
 
-#line 310
+#line 316
             mpos_0 = mpos_1;
 
-#line 310
+#line 316
             mnorm_0 = mnorm_1;
 
-#line 310
+#line 316
         }
 
-#line 319
+#line 325
         matrix<float,int(4),int(4)>  skin_0 = _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(0)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(1)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(2)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(3)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(0)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(1)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(2)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(3)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(0)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(1)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(2)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(3)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(0)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(1)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(2)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.x].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x, _S2.weights_0.x)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(0)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(1)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(2)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(3)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(0)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(1)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(2)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(3)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(0)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(1)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(2)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(3)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(0)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(1)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(2)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.y].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y, _S2.weights_0.y)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(0)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(1)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(2)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(3)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(0)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(1)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(2)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(3)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(0)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(1)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(2)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(3)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(0)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(1)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(2)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.z].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z, _S2.weights_0.z)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(0)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(1)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(2)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(3)][int(0)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(0)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(1)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(2)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(3)][int(1)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(0)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(1)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(2)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(3)][int(2)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(0)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(1)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(2)][int(3)], (&(&kernelContext_0)->joints_1->mats_0)->data_1[_S2.joints_0.w].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w, _S2.weights_0.w));
 
 
@@ -224,7 +224,7 @@ struct KernelContext_0
         thread VS_Out_0 o_0;
         float4 _S7 = float4((((float4(mpos_0, 1.0f)) * (skin_0))).xyz, 1.0f);
 
-#line 324
+#line 330
         (&o_0)->position_3 = (((_S7) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->mvp_0.data_0[int(3)][int(3)]))));
         (&o_0)->world_1 = (((_S7) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->model_0.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->model_0.data_0[int(3)][int(3)])))).xyz;
         (&o_0)->normal_4 = (((float4(norm_0, 0.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(0)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(1)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(2)], (&kernelContext_0)->draw_0->normal_2.data_0[int(0)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(1)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(2)][int(3)], (&kernelContext_0)->draw_0->normal_2.data_0[int(3)][int(3)])))).xyz;
@@ -232,33 +232,33 @@ struct KernelContext_0
         (&o_0)->uv1_2 = _S2.uv1_1;
         (&o_0)->color_2 = vertex_color_0(_S2.color_1);
 
-#line 329
+#line 335
         _S3 = o_0;
         break;
     }
 
-#line 330
+#line 336
     thread vs_skinned_Result_0 _S8;
 
-#line 330
+#line 336
     (&_S8)->position_0 = _S3.position_3;
 
-#line 330
+#line 336
     (&_S8)->world_0 = _S3.world_1;
 
-#line 330
+#line 336
     (&_S8)->normal_0 = _S3.normal_4;
 
-#line 330
+#line 336
     (&_S8)->uv_0 = _S3.uv_2;
 
-#line 330
+#line 336
     (&_S8)->uv1_0 = _S3.uv1_2;
 
-#line 330
+#line 336
     (&_S8)->color_0 = _S3.color_2;
 
-#line 330
+#line 336
     return _S8;
 }
 

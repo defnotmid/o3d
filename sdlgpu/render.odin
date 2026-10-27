@@ -97,8 +97,20 @@ Job :: struct {
 	snapshot_clear:       [4]f32,
 	snapshot_tex:         ^sdl.GPUTexture,
 	snapshot_size:        [2]u32,
+	// The mirror's pass (`o3d.mirror_view`) when the frame has one, drawn
+	// first: its draws, camera and lighting; its light into
+	// `reflection_tex` (width, height and levels in `reflection_size`),
+	// mipmapped, for the draws that show it.
+	reflect:              bool,
+	mirror_order:         [dynamic]int,
+	mirror_view_proj:     o3d.Mat4,
+	mirror_lighting:      Lighting_Uniforms,
+	reflection_tex:       ^sdl.GPUTexture,
+	reflection_size:      [3]u32,
 	materials:            [dynamic]o3d.Shading_Material, // per draw
+	// ShaderMaterials' uniform blocks, through the camera and the mirror.
 	blocks:               o3d.Shader_Blocks,
+	mirror_blocks:        o3d.Shader_Blocks,
 	expanded:             o3d.Expanded_Draws,
 	custom_skinned_verts: [dynamic]o3d.Vertex,
 	custom_skinned_first: [dynamic]i32,
@@ -117,7 +129,9 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	}
 	release_depth(g, job)
 	release_snapshot(g, job)
+	release_reflection(g, job)
 	delete(job.depth_draws)
+	delete(job.mirror_order)
 	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned, &job.sprite_rows}) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
@@ -126,6 +140,7 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	delete(job.order)
 	delete(job.materials)
 	o3d.shader_blocks_destroy(&job.blocks)
+	o3d.shader_blocks_destroy(&job.mirror_blocks)
 	o3d.expanded_draws_destroy(&job.expanded)
 	delete(job.custom_skinned_verts)
 	delete(job.custom_skinned_first)
@@ -170,8 +185,9 @@ upload_custom_skinned :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.
 	for &f in job.custom_skinned_first {
 		f = -1
 	}
-	for di in job.order {
-		if job.materials[di].shader == 0 {
+	// The frame's draws and the mirror's (some only it sees).
+	for list in ([2][]int{job.order[:], job.mirror_order[:] if job.reflect else nil}) do for di in list {
+		if job.materials[di].shader == 0 || job.custom_skinned_first[di] >= 0 {
 			continue
 		}
 		d := &scene.draws[di]
@@ -233,7 +249,7 @@ make_draw_uniforms :: #force_inline proc "contextless" (mvp, model: o3d.Mat4, ge
 make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Material, geo: o3d.Geometry) -> (mu: Material_Uniforms) {
 	mu = {
 		color        = {m.base.r, m.base.g, m.base.b, m.opacity},
-		emissive     = {m.emissive.r, m.emissive.g, m.emissive.b, 0},
+		emissive     = {m.emissive.r, m.emissive.g, m.emissive.b, m.reflection},
 		metalness    = m.metalness,
 		roughness    = m.roughness,
 		ao_intensity = m.ao_intensity,
@@ -553,6 +569,32 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 			shadowed = u32(l.shadowed),
 		}
 	}
+	mv: o3d.Mirror_View
+	mv, job.reflect = o3d.mirror_view(active, job.materials[:], geos, view, proj, int(width), int(height), &job.expanded)
+	if job.reflect {
+		if !ensure_reflection(g, job, u32(mv.width), u32(mv.height), u32(mv.levels)) || !ensure_mirror_pass(g) {
+			return .Out_Of_Memory
+		}
+		o3d.mirror_order(active, geos, shaders, job.materials[:], mv.view, proj, &job.mirror_order, &job.expanded)
+		o3d.shader_blocks(active, shaders, mv.view, proj, job.shadows[:ns], &job.mirror_blocks, mv.eye)
+		job.mirror_view_proj = proj * mv.view
+		lu.reflect_params = {f32(mv.levels - 1), 0, 0, 0}
+		// The mirror's pass: linear light out, through the mirrored camera
+		// at its size, what is behind the plane left out.
+		ml := &job.mirror_lighting
+		ml^ = job.lighting
+		ml.eye = {mv.eye.x, mv.eye.y, mv.eye.z, 0}
+		ml.env_flags.z = 1
+		ml.frame_params[0], ml.frame_params[1] = f32(mv.width), f32(mv.height)
+		ml.view_proj = job.mirror_view_proj
+		ml.clip_plane = mv.plane
+		for di in job.mirror_order {
+			m := &job.materials[di]
+			if m.shader != 0 {
+				custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, o3d.blend_of(m), pass = .Mirror)
+			}
+		}
+	}
 	job.snapshot = o3d.draw_order(active, geos, shaders, view, proj, &job.order, &job.expanded)
 	if job.snapshot < len(job.order) {
 		if !ensure_snapshot(g, job, width, height) || !ensure_snapshot_pass(g) {
@@ -570,7 +612,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 		if m.shader != 0 {
 			custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, o3d.blend_of(m))
 			if oi < job.snapshot {
-				custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, .Opaque, snapshot = true)
+				custom_pipeline(g, shaders, m.shader, active.draws[di].material.side, .Opaque, pass = .Snapshot)
 			}
 		}
 	}
@@ -621,6 +663,10 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	if !job.prepared || job.mirrored != g.mirrored || job.width > g.capacity.x || job.height > g.capacity.y {
 		return .Not_Prepared
 	}
+	// The linear passes' targets go when another job grows the frame's.
+	if (job.reflect || job.snapshot < len(job.order)) && g.snapshot_color == nil {
+		return .Not_Prepared
+	}
 	job.prepared = false
 	width, height := job.width, job.height
 	for si in 0 ..< job.shadow_count {
@@ -647,6 +693,27 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		sdl.PushGPUFragmentUniformData(cmd, 0, params, size_of(job.bg_params))
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	}
+	if job.reflect {
+		// The scene through the mirror in linear light, resolved, copied
+		// into the reflection and mipmapped (the transmission snapshot's
+		// targets, at the mirror's size).
+		w, h := job.reflection_size.x, job.reflection_size.y
+		color := sdl.GPUColorTargetInfo{texture = g.snapshot_color, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE}
+		light := g.snapshot_color
+		if g.samples != ._1 {
+			color.store_op, color.resolve_texture = .RESOLVE, g.snapshot_resolved
+			light = g.snapshot_resolved
+		}
+		depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+		pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
+		viewport(pass, w, h)
+		draw_list(g, job, pass, cmd, job.mirror_order[:], &shadow_maps, .Mirror)
+		sdl.EndGPURenderPass(pass)
+		copy_pass := sdl.BeginGPUCopyPass(cmd)
+		sdl.CopyGPUTextureToTexture(copy_pass, {texture = light}, {texture = job.reflection_tex}, w, h, 1, false)
+		sdl.EndGPUCopyPass(copy_pass)
+		sdl.GenerateMipmapsForGPUTexture(cmd, job.reflection_tex)
+	}
 	if job.snapshot < len(job.order) {
 		// The opaque draws before the transmissive ones, in linear light,
 		// resolved, copied into the snapshot and mipmapped (three.js's
@@ -663,7 +730,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		if job.background != 0 {
 			background(g, job, pass, cmd, g.snapshot_bg_pipeline, &job.snapshot_bg)
 		}
-		draw_list(g, job, pass, cmd, job.order[:job.snapshot], &shadow_maps, true)
+		draw_list(g, job, pass, cmd, job.order[:job.snapshot], &shadow_maps, .Snapshot)
 		sdl.EndGPURenderPass(pass)
 		copy_pass := sdl.BeginGPUCopyPass(cmd)
 		sdl.CopyGPUTextureToTexture(copy_pass, {texture = light}, {texture = job.snapshot_tex}, width, height, 1, false)
@@ -685,7 +752,7 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	if job.background != 0 {
 		background(g, job, pass, cmd, g.bg_pipeline, &job.bg_params)
 	}
-	draw_list(g, job, pass, cmd, job.order[:], &shadow_maps, false)
+	draw_list(g, job, pass, cmd, job.order[:], &shadow_maps, .Main)
 	sdl.EndGPURenderPass(pass)
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
 	sdl.CopyGPUTextureToTexture(copy_pass, {texture = frame}, {texture = out}, width, height, 1, false)
@@ -693,13 +760,24 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	return nil
 }
 
-// The draws `order` (the job's) into the open pass: the main one, or the
-// transmission snapshot's (`snapshot`: its pipelines and lighting).
+// The draws `order` (the job's) into the open pass: the main one, the
+// transmission snapshot's or the mirror's (its pipelines, lighting and
+// camera).
 @(private = "file")
-draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCommandBuffer, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture, snapshot: bool) {
+draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCommandBuffer, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture, kind: Pass) {
 	scene, geos, shaders := job.scene, job.geos, job.shaders
 	bound: ^sdl.GPUGraphicsPipeline
-	sdl.PushGPUFragmentUniformData(cmd, 1, &job.snapshot_lighting if snapshot else &job.lighting, size_of(job.lighting))
+	lighting := &job.lighting
+	view_proj := job.view_proj
+	blocks := &job.blocks
+	switch kind {
+	case .Snapshot:
+		lighting = &job.snapshot_lighting
+	case .Mirror:
+		lighting, view_proj, blocks = &job.mirror_lighting, job.mirror_view_proj, &job.mirror_blocks
+	case .Main:
+	}
+	sdl.PushGPUFragmentUniformData(cmd, 1, lighting, size_of(job.lighting))
 	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
 	bound_vb: ^sdl.GPUBuffer
 	bound_ib: ^sdl.GPUBuffer
@@ -725,7 +803,7 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 		m := &job.materials[di]
 		blend := o3d.blend_of(m)
 		if m.shader != 0 {
-			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend, make = false, snapshot = snapshot)
+			p := custom_pipeline(g, shaders, m.shader, d.material.side, blend, make = false, pass = kind)
 			if p == nil {
 				continue
 			}
@@ -745,15 +823,15 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 				sdl.BindGPUFragmentSamplers(pass, 0, &maps[0], u32(min(n, len(maps))))
 			}
 			for stage in o3d.Shader_Stage {
-				at := job.blocks.at[di][stage]
+				at := blocks.at[di][stage]
 				if at < 0 {
 					continue
 				}
 				size := u32(o3d.shader_module(o3d.shader_get(shaders, m.shader), stage).block_size)
 				if stage == .Vertex {
-					sdl.PushGPUVertexUniformData(cmd, 0, &job.blocks.bytes[at], size)
+					sdl.PushGPUVertexUniformData(cmd, 0, &blocks.bytes[at], size)
 				} else {
-					sdl.PushGPUFragmentUniformData(cmd, 0, &job.blocks.bytes[at], size)
+					sdl.PushGPUFragmentUniformData(cmd, 0, &blocks.bytes[at], size)
 				}
 			}
 			if custom_first := job.custom_skinned_first[di]; custom_first >= 0 && job.custom_skinned.buffer != nil {
@@ -782,15 +860,15 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 		if sprite {
 			p = g.sprite_pipelines[d.material.side][blend]
 		}
-		if snapshot {
-			kind := Snapshot_Kind.Skinned if skinned else .Standard
+		if kind != .Main {
+			linear := Snapshot_Kind.Skinned if skinned else .Standard
 			if curved {
-				kind = .Curves
+				linear = .Curves
 			}
 			if sprite {
-				kind = .Sprite
+				linear = .Sprite
 			}
-			p = g.snapshot_pipelines[kind][d.material.side]
+			p = g.snapshot_pipelines[linear][d.material.side] if kind == .Snapshot else g.mirror_pipelines[linear][d.material.side][blend]
 		}
 		if p != bound {
 			sdl.BindGPUGraphicsPipeline(pass, p)
@@ -817,17 +895,23 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 			{texture = shadow_maps[3], sampler = g.shadow_sampler},
 			tex_binding(g, m.alpha_map),
 			// Sprites: the frame's depth (soft particles); transmissive
-			// draws: the frame's snapshot.
+			// draws: the frame's snapshot; reflective ones: the reflection.
 			{texture = job.depth_map if job.depth && job.depth_map != nil else g.dummy_shadow, sampler = g.shadow_sampler},
 			// The layers' two textures (white for none).
 			tex_binding(g, m.layer_textures[0]),
 			tex_binding(g, m.layer_textures[1]),
 		}
 		if !sprite {
-			samplers[13] = {texture = job.snapshot_tex if .Transmission in m.flags && job.snapshot_tex != nil && !snapshot else g.dummy_texture, sampler = g.frame_sampler}
+			frame := g.dummy_texture
+			if .Transmission in m.flags {
+				frame = job.snapshot_tex if kind == .Main && job.snapshot_tex != nil else g.clear_texture
+			} else if .Reflection in m.flags {
+				frame = job.reflection_tex if job.reflect else g.clear_texture
+			}
+			samplers[13] = {texture = frame, sampler = g.frame_sampler}
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, &samplers[0], 16)
-		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
+		du := make_draw_uniforms(view_proj * d.model, d.model, geo, o3d.scene_draw_morphs(scene, di))
 		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
 		mu := make_material_uniforms(m, geo)
 		if .Triplanar in m.flags {

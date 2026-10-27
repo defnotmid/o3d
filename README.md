@@ -66,7 +66,23 @@ What is known about three.js carries over:
   GPU binds two; a map in a third is dropped on both renderers — none of
   the 150 Khronos sample models uses more than two). A ShaderMaterial
   behind glass is seen as it draws into the frame (its own tone mapping
-  included). ShadowMaterial (`.Shadow_Only`:
+  included). Planar reflections as fframes-three-d draws them
+  (three.js's Reflector, physically): `Scene.reflector` is a plane
+  (`point`, `normal` toward the side it mirrors, `scale` the reflection's
+  share of the frame's size, 0.5 by default), and a material's
+  `reflection` (0 to 1) is how much of the scene mirrored in it takes the
+  place of the environment's reflection, through the same Fresnel (where
+  the mirror shows nothing the environment shows; no environment is
+  needed), blurred by roughness (sqrt(roughness) of the way down its mip
+  levels, six at most; the clear coat by its own). The mirror is drawn
+  first, through the mirrored camera at its size, in linear light (blended
+  draws blended there), leaving out what is behind the plane (not for
+  ShaderMaterials), particles, shadow catchers and the surfaces that show
+  it; those read it where they are on the screen, so they belong on the
+  plane (a floor, a table top, a mirror). One reflector a scene; it is
+  not drawn when the camera is behind it or nothing that shows it is in
+  view; transmission takes a material's place of reflection, and glass in
+  the mirror shows the environment behind it. ShadowMaterial (`.Shadow_Only`:
   only the shadows it receives, `color` at `opacity` times the light they
   take, blended over what is behind: shadows on a backdrop or a video
   without a visible ground), MeshBasicMaterial (`.Basic`),
@@ -78,7 +94,8 @@ What is known about three.js carries over:
   `glsl3 = true`), with three.js's built-in uniforms (`modelMatrix`,
   `modelViewMatrix`, `projectionMatrix`, `viewMatrix`, `normalMatrix`,
   `cameraPosition`, `isOrthographic`, plus `instanceColor` and `instanceId`:
-  an instanced draw's instance colour, white without one, and 0-based index)
+  an instanced draw's instance colour, linear as three.js's, white without
+  one, and 0-based index)
   and attributes (`position`, `normal`, `uv`), compiled by [oksl](https://github.com/defnotmid/oksl) on both
   renderers. Fragment shaders sample textures as three.js's do: `uniform
   sampler2D`s bound to `Material.shader_maps` by channel (`shader_map`
@@ -119,9 +136,15 @@ What is known about three.js carries over:
   `linearToOutputTexel(value)` (sRGB), in that order. These, like
   `shadowAt`, are declared only for a shader that names them.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
-  `sphere(radius, widthSegments, heightSegments)`, `plane`, `cylinder`
+  `sphere(radius, widthSegments, heightSegments, phiStart, phiLength,
+  thetaStart, thetaLength)`, `plane`, `circle(radius, segments,
+  thetaStart, thetaLength)`, `ring(innerRadius, outerRadius,
+  thetaSegments, phiSegments, thetaStart, thetaLength)`, `cylinder`
   (radiusTop 0 is a cone), `torus`, `capsule(radius, height, capSegments,
-  radialSegments)`, plus `scene_tube(scene, points, radius, radialSegments,
+  radialSegments)`, `rounded_box(width, height, depth, segments, radius)`
+  (the RoundedBoxGeometry addon), `lathe(points, segments, phiStart,
+  phiLength)` (made each call: its points are no key; the others are kept
+  by their parameters), all as three.js r186 makes them (to 1e-6), plus `scene_tube(scene, points, radius, radialSegments,
   closed)` (a per-frame lit tube through the points), `line_segments(positions)` (pairs of
   endpoints), `polyline(positions, closed)` (connected path),
   `wireframe(src)` (edges of a triangle mesh), and `points(positions)` (point

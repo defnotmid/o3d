@@ -2268,6 +2268,104 @@ test_transmission :: proc(t: ^testing.T) {
 	testing.expectf(t, snapshot == 1 && len(order) == 2 && order[0] == 1 && order[1] == 0, "opaque first, then transmissive: %v at %d", order, snapshot)
 }
 
+// A mirror floor (Scene.reflector) shows a box above it where its image
+// is, and not a box below the floor (behind the plane, clipped); without
+// the reflector the floor shows nothing there.
+@(test)
+test_reflector :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+	W, H :: 48, 36
+	frame :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, reflector: Reflector) -> []u8 {
+		scene_clear(scene)
+		scene.camera = {position = {0, 1.5, 4}, target = {0, 0, 0}, fov = 50, near = 0.1, far = 50}
+		scene.reflector = reflector
+		mirror := MATERIAL_DEFAULT
+		mirror.color, mirror.metalness, mirror.roughness, mirror.reflection = {1, 1, 1}, 1, 0, 1
+		append(&scene.draws, Draw{plane(g, 30, 30), compose({}, {-math.PI / 2, 0, 0}), mirror})
+		red := MATERIAL_DEFAULT
+		red.color, red.flags = {1, 0, 0}, {.Basic}
+		append(&scene.draws, Draw{box(g, 0.6, 0.6, 0.6), compose({0, 0.5, 0}), red})
+		green := MATERIAL_DEFAULT
+		green.color, green.flags = {0, 1, 0}, {.Basic}
+		append(&scene.draws, Draw{box(g, 0.6, 0.6, 0.6), compose({0, -0.8, -1.5}), green})
+		return software_render(s, scene, g, nil, W, H)
+	}
+	at :: proc(scene: ^Scene, px: []u8, p: Vec3) -> [4]u8 {
+		xy, _, _ := camera_project(scene.camera, W, H, p)
+		i := (int(xy.y) * W + int(xy.x)) * 4
+		return {px[i], px[i + 1], px[i + 2], px[i + 3]}
+	}
+	floor := Reflector{normal = {0, 1, 0}, scale = 1}
+	px := frame(&s, &scene, &g, floor)
+	image := at(&scene, px, {0, -0.5, 0})
+	testing.expectf(t, image.r > 150 && image.g < 40, "the box's image in the mirror: %v", image)
+	below := at(&scene, px, {0, 0.8, -1.5})
+	testing.expectf(t, below.g < 40, "a box below the mirror, clipped: %v", below)
+	px = frame(&s, &scene, &g, {})
+	none := at(&scene, px, {0, -0.5, 0})
+	testing.expectf(t, none.r < 40, "no reflector: %v", none)
+	// Behind the plane the camera sees no reflection.
+	view, proj := camera_matrices(scene.camera, W, H)
+	materials: [dynamic]Shading_Material
+	defer delete(materials)
+	shading_materials(scene_materials(&scene), &materials)
+	scene.reflector = floor
+	_, ok := mirror_view(&scene, materials[:], &g, view, proj, W, H)
+	testing.expect(t, ok, "in front of the mirror")
+	scene.reflector.point = {0, 3, 0}
+	_, ok = mirror_view(&scene, materials[:], &g, view, proj, W, H)
+	testing.expect(t, !ok, "behind it")
+}
+
+// The geometries three.js makes as LatheGeometry, RingGeometry,
+// CircleGeometry, RoundedBoxGeometry and a part of a SphereGeometry: their
+// counts and a vertex each, as three.js r186 gives them.
+@(test)
+test_three_geometries :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	Want :: struct {
+		vertices, indices, at: int,
+		position, normal:      Vec3,
+		uv:                    Vec2,
+	}
+	check :: proc(t: ^testing.T, g: ^Geometries, name: string, id: Geometry_Id, want: Want, unindexed := false) {
+		verts, idx, ok := geometry_mesh(g, id)
+		testing.expectf(t, ok, "%s: made", name)
+		if !ok {
+			return
+		}
+		if unindexed {
+			testing.expectf(t, len(idx) == want.vertices, "%s: %d corners, three.js %d", name, len(idx), want.vertices)
+		} else {
+			testing.expectf(t, len(verts) == want.vertices && len(idx) == want.indices, "%s: %d vertices %d indices, three.js %d %d", name, len(verts), len(idx), want.vertices, want.indices)
+		}
+		v := verts[idx[want.at]] if unindexed else verts[want.at]
+		close :: proc(a, b: $T) -> bool {
+			for c in 0 ..< len(T) {
+				if abs(a[c] - b[c]) > 1e-5 {
+					return false
+				}
+			}
+			return true
+		}
+		testing.expectf(t, close(v.position, want.position) && close(v.normal, want.normal) && close(v.uv, want.uv), "%s: vertex %d %v, three.js %v", name, want.at, v, want)
+	}
+	check(t, &g, "sphere part", sphere(&g, 1.2, 10, 6, 0.3, 4.0, 0.4, 1.9), {77, 360, 25, {-0.072917, 0.61435, 1.02823}, {-0.060764, 0.511958, 0.856858}, {0.3, 0.666667}})
+	check(t, &g, "sphere cap", sphere(&g, 1, 16, 8, 0, 2 * math.PI, 0, 0.9), {153, 720, 51, {-0.331129, 0.943585, 0}, {-0.331129, 0.943585, 0}, {0, 0.625}})
+	check(t, &g, "circle sector", circle(&g, 0.7, 9, 0.5, 2.5), {11, 27, 3, {0.344921, 0.609122, 0}, {0, 0, 1}, {0.746372, 0.935087}})
+	check(t, &g, "ring sector", ring(&g, 0.2, 0.9, 7, 2, 1.0, 3.0), {24, 84, 8, {0.297166, 0.462809, 0}, {0, 0, 1}, {0.665092, 0.757116}})
+	check(t, &g, "lathe", lathe(&g, {{0.1, -0.8}, {0.4, -0.5}, {0.6, -0.2}, {0.5, 0.1}, {0.3, 0.4}, {0.45, 0.7}}, 9, 0.2, 5.0), {60, 270, 20, {0.573929, -0.2, -0.174943}, {0.943534, -0.164399, -0.287605}, {0.333333, 0.4}})
+	check(t, &g, "rounded box", rounded_box(&g, 2, 1, 1.5, 3, 0.2), {1764, 0, 588, {-0.91547, 0.41547, -0.66547}, {-0.57735, 0.57735, -0.57735}, {0, 1}}, unindexed = true)
+	testing.expect(t, lathe(&g, {{1, 0}}) == 0, "a lathe needs two points")
+	testing.expect(t, rounded_box(&g, 2, 1, 1.5, 3, 0.2) == rounded_box(&g, 2, 1, 1.5, 3, 0.2), "kept by its key")
+}
+
 // RGB9E5, the transmission snapshot's sample: within half a step of the
 // largest channel, zero and negatives to 0, the top clamped.
 @(test)

@@ -70,6 +70,7 @@ PARITY_CASES := [?]Parity_Case {
 	{"transmission", 240, 180, build_transmission},
 	{"layer_maps", 240, 180, build_layer_maps},
 	{"transmission_mips", 270, 170, build_transmission_mips},
+	{"reflector", 270, 170, build_reflector},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -2233,5 +2234,84 @@ build_transmission_mips :: proc(a: ^Parity_Assets) -> string {
 		m.roughness = roughness[k]
 		append(&s.draws, o3d.Draw{sphere, o3d.compose({-1.1 + 1.1 * f32(k), 0, 0}), m})
 	}
+	return ""
+}
+
+// A reflective floor (Scene.reflector) under what the mirror's pass draws:
+// a rounded box seen by its front faces (clockwise in the mirror), a metal
+// sphere, a transparent box and an additive torus (blended in linear
+// light), a glass sphere (nothing behind it in the mirror), a two-sided
+// ring card leaning over, a sphere half under the floor (clipped), a lathed
+// vase and ShaderMaterials (their uniforms through the mirror); the floor's
+// roughness map varies the blur over odd-sized levels and its clear coat
+// reads the mirror sharper.
+build_reflector :: proc(a: ^Parity_Assets) -> string {
+	rim, errors := o3d.shader(&a.shaders, RIM_VERT, RIM_FRAG)
+	if len(errors) > 0 {
+		return o3d.format_shader_errors(errors, context.temp_allocator)
+	}
+	facets: o3d.Shader_Id
+	facets, errors = o3d.shader(&a.shaders, FACETS_VERT, FACETS_FRAG, true)
+	if len(errors) > 0 {
+		return o3d.format_shader_errors(errors, context.temp_allocator)
+	}
+	S :: 32
+	px: [S * S * 4]u8
+	for y in 0 ..< S {
+		for x in 0 ..< S {
+			v: u8 = 40 if (x / 8 + y / 4) % 3 == 0 else 200
+			i := (y * S + x) * 4
+			px[i], px[i + 1], px[i + 2], px[i + 3] = v, v, v, 255
+		}
+	}
+	rough := o3d.texture_add(&a.textures, px[:], S, S)
+	sky := o3d.SKY_DEFAULT
+	sky.sun = {0.5, 0.35, 1}
+	id := o3d.sky_texture(&a.textures, sky, 256)
+	o3d.environment_prefilter(&a.textures, id)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0.5, 1.2, 4.3}, target = {0, 0.35, 0}, fov = 50, near = 0.1, far = 50}
+	s.environment = id
+	s.tone_mapping = .AgX
+	s.reflector = {normal = {0, 1, 0}, scale = 0.5}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 0.95, 0.9}, intensity = 2, position = {2, 4, 3}, cast_shadow = true})
+	floor := o3d.MATERIAL_DEFAULT
+	floor.color, floor.roughness = {0.22, 0.24, 0.28}, 0.6
+	floor.roughness_map = rough
+	floor.reflection = 0.9
+	floor.clearcoat, floor.clearcoat_roughness = 0.4, 0.05
+	floor.flags = {.Receive_Shadow}
+	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 7, 5), o3d.compose({}, {-math.PI / 2, 0, 0}), floor})
+	red := o3d.MATERIAL_DEFAULT
+	red.color, red.roughness, red.flags = {0.9, 0.15, 0.1}, 0.5, {.Cast_Shadow}
+	append(&s.draws, o3d.Draw{o3d.rounded_box(&a.geos, 0.7, 0.9, 0.5, 3, 0.12), o3d.compose({-1.3, 0.45, -0.4}, {0, 0.6, 0}), red})
+	metal := o3d.MATERIAL_DEFAULT
+	metal.color, metal.metalness, metal.roughness, metal.flags = {0.95, 0.8, 0.4}, 1, 0.25, {.Cast_Shadow}
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.4, 48, 24), o3d.compose({-0.2, 0.4, 0.3}), metal})
+	sunk := o3d.MATERIAL_DEFAULT
+	sunk.color, sunk.roughness = {0.2, 0.7, 0.3}, 0.4
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.45, 32, 16), o3d.compose({1.5, 0.1, -0.9}), sunk})
+	blue := o3d.MATERIAL_DEFAULT
+	blue.color, blue.opacity, blue.flags = {0.2, 0.4, 1}, 0.5, {.Transparent}
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.5, 0.7, 0.5), o3d.compose({0.8, 0.35, 0.2}, {0, 0.4, 0}), blue})
+	glow := o3d.MATERIAL_DEFAULT
+	glow.color, glow.roughness, glow.flags = {1, 0.5, 0.15}, 0.5, {.Additive}
+	append(&s.draws, o3d.Draw{o3d.torus(&a.geos, 0.35, 0.06, 12, 48), o3d.compose({0.1, 1.05, -0.6}, {1.1, 0, 0}), glow})
+	glass := o3d.MATERIAL_DEFAULT
+	glass.color, glass.roughness, glass.transmission = {1, 1, 1}, 0.1, 1
+	append(&s.draws, o3d.Draw{o3d.sphere(&a.geos, 0.3, 32, 16), o3d.compose({0.5, 0.3, 1.0}), glass})
+	card := o3d.MATERIAL_DEFAULT
+	card.color, card.roughness, card.side = {0.9, 0.85, 0.3}, 0.5, .Double
+	append(&s.draws, o3d.Draw{o3d.ring(&a.geos, 0.15, 0.5, 32, 2, 0.3, 4.5), o3d.compose({-0.6, 0.6, -1.3}, {-0.5, 0.4, 0}), card})
+	vase := o3d.MATERIAL_DEFAULT
+	vase.color, vase.roughness = {0.5, 0.3, 0.8}, 0.3
+	append(&s.draws, o3d.Draw{o3d.lathe(&a.geos, {{0.05, 0}, {0.25, 0.1}, {0.3, 0.35}, {0.15, 0.6}, {0.2, 0.8}}, 24), o3d.compose({1.1, 0, 0.9}), vase})
+	shaded := o3d.MATERIAL_DEFAULT
+	shaded.shader = rim
+	append(&s.draws, o3d.Draw{o3d.torus(&a.geos, 0.25, 0.08, 16, 40), o3d.compose({-1.9, 0.5, 0.6}, {0.3, 0.9, 0}), shaded})
+	shaded.shader = facets
+	shaded.uniforms = o3d.scene_uniforms(s, {"uTints", {0.9, 0.3, 0.3, 0.3, 0.9, 0.3, 0.3, 0.3, 0.9}})
+	append(&s.draws, o3d.Draw{o3d.box(&a.geos, 0.35, 0.35, 0.35), o3d.compose({2.0, 0.6, 0.2}, {0.5, 0.7, 0}), shaded})
 	return ""
 }
