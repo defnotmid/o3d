@@ -6,14 +6,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# ovg's curves.slang (exact shapes' coverage) from its checkout beside o3d.
-FLAGS=(-matrix-layout-column-major -O2 -I . -I ../../ovg/shaders)
-# The layout of the curves words that curves.slang reads (ovg's
-# curves.FORMAT), from the same checkout: o3d_sdlgpu refuses to build
-# against an ovg with another.
-FORMAT=$(sed -n 's/^FORMAT :: \([0-9][0-9]*\).*/\1/p' ../../ovg/curves/curves.odin)
+# ocurves' curves.slang (exact shapes' coverage) from its checkout beside o3d.
+FLAGS=(-matrix-layout-column-major -O2 -I . -I ../../ocurves)
+# The layout of the curves words that curves.slang reads (curves.FORMAT),
+# from the same checkout: o3d_sdlgpu refuses to build against an ocurves
+# with another.
+FORMAT=$(sed -n 's/^FORMAT :: \([0-9][0-9]*\).*/\1/p' ../../ocurves/curves.odin)
 if [ -z "$FORMAT" ]; then
-	echo "no FORMAT in ../../ovg/curves/curves.odin" >&2
+	echo "no FORMAT in ../../ocurves/curves.odin" >&2
 	exit 1
 fi
 UNITS=(
@@ -21,8 +21,10 @@ UNITS=(
 	o3d:skinned_vert:vs_skinned
 	o3d:curves_vert:vs_curves
 	o3d:frag:fs_main
+	o3d:frag_mirror:fs_mirror
 	o3d:shadow:fs_shadow
 	o3d:curves_frag:fs_curves
+	o3d:curves_frag_mirror:fs_curves_mirror
 	o3d:sprite_frag:fs_sprite
 	o3d:shadow_curves:fs_shadow_curves
 	background:vert:vs_main
@@ -50,7 +52,7 @@ done
 cat >../sdlgpu/curves_format.odin <<EOF
 package o3d_sdlgpu
 
-// Written by shaders/build.sh: the ovg curves format (curves.FORMAT) the
+// Written by shaders/build.sh: the ocurves format (curves.FORMAT) the
 // committed curve shaders read.
 SHADERS_CURVES_FORMAT :: $FORMAT
 EOF

@@ -142,8 +142,8 @@ make_srgb_tables :: proc "contextless" () {
 	}
 }
 
-// AgX's two curves by table (linearly interpolated, within about 1e-8):
-// log2 of a mantissa in [1, 2), and x^2.2 on [0, 1].
+// Two curves by table (linearly interpolated, within about 1e-8): log2 of
+// a mantissa in [1, 2) (`log2_fast`), and AgX's x^2.2 on [0, 1].
 @(private = "file")
 agx_tables: struct {
 	log2_mantissa, pow22: [SRGB_STEPS + 1]f32,
@@ -164,9 +164,10 @@ table_lerp :: #force_inline proc "contextless" (table: ^[SRGB_STEPS + 1]f32, t: 
 	return table[i] + (table[i + 1] - table[i]) * (t - f32(i))
 }
 
-// log2 of a normal positive float: its exponent and its mantissa's.
-@(private = "file")
-agx_log2 :: #force_inline proc "contextless" (x: f32) -> f32 {
+// log2 of a normal positive float: its exponent and its mantissa's (a
+// reflection's level, AgX's exposure; math.log2 goes through f64's ln).
+@(private)
+log2_fast :: #force_inline proc "contextless" (x: f32) -> f32 {
 	bits := transmute(u32)x
 	mantissa := f32(bits & 0x7fffff) * (SRGB_STEPS / f32(1 << 23))
 	return f32(i32(bits >> 23) - 127) + table_lerp(&agx_tables.log2_mantissa, mantissa)
@@ -274,7 +275,7 @@ tone_map :: proc "contextless" (c: Vec3, mode: Tone_Mapping, exposure: f32 = 1) 
 			0.11189821 * r2020.r + 0.07679942 * r2020.g + 0.81130237 * r2020.b,
 		}
 		inset = linalg.max(inset, Vec3{1e-10, 1e-10, 1e-10})
-		ev := Vec3{agx_log2(inset.r), agx_log2(inset.g), agx_log2(inset.b)}
+		ev := Vec3{log2_fast(inset.r), log2_fast(inset.g), log2_fast(inset.b)}
 		x := linalg.clamp((ev - Vec3{-12.47393, -12.47393, -12.47393}) * (1.0 / 16.5), 0, 1)
 		x2 := x * x
 		x4 := x2 * x2

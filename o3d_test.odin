@@ -347,7 +347,7 @@ test_software_shadow :: proc(t: ^testing.T) {
 	scene_clear(&scene)
 	scene.camera = {position = {0, 8, 0.01}, fov = 60, near = 0.1, far = 100}
 	append(&scene.lights, Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.3})
-	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 5, 5}, cast_shadow = true, shadow = {map_size = 256, height = 10, bias = -0.001}})
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 5, 5}, cast_shadow = true, shadow = {map_size = 256, bias = -0.02}})
 	floor, other, block := MATERIAL_DEFAULT, MATERIAL_DEFAULT, MATERIAL_DEFAULT
 	floor.flags = {.Receive_Shadow}
 	block.flags = {.Cast_Shadow}
@@ -766,7 +766,7 @@ test_alpha_mask_ao_and_uv_transform :: proc(t: ^testing.T) {
 		intensity   = 3,
 		position    = {0, 0, 5},
 		cast_shadow = true,
-		shadow      = {map_size = 256, height = 4, bias = -0.002},
+		shadow      = {map_size = 256, height = 4, bias = -0.02},
 	})
 	floor := MATERIAL_DEFAULT
 	floor.color, floor.flags = {0.8, 0.8, 0.8}, {.Receive_Shadow}
@@ -957,7 +957,7 @@ test_spot_light_and_multi_shadows :: proc(t: ^testing.T) {
 		position    = {0, 0, 5},
 		target      = {0, 0, 0},
 		cast_shadow = true,
-		shadow      = {map_size = 256, height = 4, bias = -0.002},
+		shadow      = {map_size = 256, height = 4, bias = -0.02},
 	})
 	append(&scene.lights, Light{
 		kind        = .Spot,
@@ -968,7 +968,7 @@ test_spot_light_and_multi_shadows :: proc(t: ^testing.T) {
 		angle       = 55 * math.RAD_PER_DEG,
 		penumbra    = 0.2,
 		cast_shadow = true,
-		shadow      = {map_size = 256, bias = -0.002},
+		shadow      = {map_size = 256, bias = -0.02},
 	})
 	caster := MATERIAL_DEFAULT
 	caster.flags = {.Cast_Shadow}
@@ -982,6 +982,66 @@ test_spot_light_and_multi_shadows :: proc(t: ^testing.T) {
 	testing.expectf(t, left_px[0] < 20 && left_px[2] > 100, "left floor shadowed from red directional, lit by blue spot: %v", left_px)
 	testing.expectf(t, right_px[2] < 20 && right_px[0] > 100, "right floor shadowed from blue spot, lit by red directional: %v", right_px)
 	testing.expectf(t, center_px[0] > 100 && center_px[2] > 100, "center floor lit by both lights: %v", center_px)
+}
+
+// A directional shadow with no height is fitted: its map holds a little
+// caster over a wide floor (not the floor), its texels stay on one grid as
+// the camera moves, and a caster out of view still shadows the floor in
+// view.
+@(test)
+test_fitted_shadow :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 64
+	scene_clear(&scene)
+	scene.camera = {position = {0, 3, 4}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 100}
+	append(&scene.lights, Light{kind = .Directional, color = 1, intensity = 3, position = {1, 5, 2}, cast_shadow = true, shadow = {map_size = 256, bias = -0.01}})
+	floor, block := MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	floor.flags, block.flags = {.Receive_Shadow}, {.Cast_Shadow}
+	append(&scene.draws, Draw{plane(&g, 100, 100), compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	append(&scene.draws, Draw{box(&g, 0.4, 0.4, 0.4), compose({0, 0.5, 0}), block})
+	fit :: proc(scene: ^Scene, g: ^Geometries) -> Shadow {
+		view, proj := camera_matrices(scene.camera, W, W)
+		views := [1]Mat4{proj * view}
+		shadows: [MAX_SHADOWS]Shadow
+		frame_shadows(scene, g, nil, views[:], &shadows)
+		return shadows[0]
+	}
+	// Where a point falls in the map, in texels.
+	texel_of :: proc(sh: Shadow, p: Vec3) -> Vec2 {
+		c := sh.view_proj * Vec4{p.x, p.y, p.z, 1}
+		return {c.x * 0.5 + 0.5, 0.5 - c.y * 0.5} * f32(sh.size)
+	}
+	sh := fit(&scene, &g)
+	lo, hi := Vec2{1e9, 1e9}, Vec2{-1e9, -1e9}
+	for c in 0 ..< 8 {
+		corner := Vec3{-0.2 if c & 1 == 0 else 0.2, 0.3 if c & 2 == 0 else 0.7, -0.2 if c & 4 == 0 else 0.2}
+		at := texel_of(sh, corner)
+		lo, hi = linalg.min(lo, at), linalg.max(hi, at)
+	}
+	testing.expectf(t, lo.x >= 0 && lo.y >= 0 && hi.x <= 256 && hi.y <= 256 && max(hi.x - lo.x, hi.y - lo.y) > 0.45 * 256, "the caster fills the map: %v..%v", lo, hi)
+	// The camera moves a little: the texels' grid holds (a texel's corner
+	// lands on a whole texel in both).
+	scene.camera.position = {0.03, 3.02, 4.01}
+	moved := fit(&scene, &g)
+	origin := texel_of(moved, {}) - texel_of(sh, {})
+	testing.expectf(t, abs(origin.x - math.round(origin.x)) < 1e-2 && abs(origin.y - math.round(origin.y)) < 1e-2, "on one grid: %v", origin)
+	// Looking down on the floor beside the block, which is out of view
+	// (above and behind the camera's frustum): its shadow is there.
+	scene.camera = {position = {-0.6, 2.5, -1.2}, target = {-0.6, 0, -1.2}, fov = 20, near = 0.1, far = 100}
+	scene.lights[0].position = {1, 1, 2}
+	clear(&scene.draws)
+	append(&scene.draws, Draw{plane(&g, 100, 100), compose({0, 0, 0}, {-math.PI / 2, 0, 0}), floor})
+	append(&scene.draws, Draw{box(&g, 1.2, 0.1, 1.2), compose({0, 0.6, 0}), block})
+	s: Software
+	defer software_destroy(&s)
+	px := software_render(&s, &scene, &g, nil, W, W)
+	centre := px[(W / 2 * W + W / 2) * 4]
+	scene.draws.material[1].flags = {}
+	open := software_render(&s, &scene, &g, nil, W, W)[(W / 2 * W + W / 2) * 4]
+	testing.expectf(t, open > 100 && centre < open / 2, "an unseen caster's shadow: %v, open %v", centre, open)
 }
 
 // InstancedMesh (per-instance transform + color), LineSegments (line_segments,
@@ -1316,7 +1376,7 @@ test_shadow_only :: proc(t: ^testing.T) {
 	defer scene_destroy(&scene)
 	scene_clear(&scene)
 	scene.camera = {position = {0, 8, 0.01}, fov = 60, near = 0.1, far = 100}
-	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 5, 5}, cast_shadow = true, shadow = {map_size = 256, height = 10, bias = -0.001}})
+	append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 5, 5}, cast_shadow = true, shadow = {map_size = 256, bias = -0.02}})
 	under, catcher, block := MATERIAL_DEFAULT, MATERIAL_DEFAULT, MATERIAL_DEFAULT
 	under.color, under.flags = {1, 0, 0}, {.Basic}
 	catcher.color, catcher.opacity, catcher.flags = {0, 0, 1}, 0.5, {.Shadow_Only}
@@ -1459,6 +1519,59 @@ test_particles :: proc(t: ^testing.T) {
 	// a little), on the other nearly at it (faded most).
 	left, right := at(px, W / 2 - 8, W / 2), at(px, W / 2 + 8, W / 2)
 	testing.expectf(t, left.r != right.r && min(left.r, right.r) < 200, "faded by how far the wall is behind: %v %v", left, right)
+}
+
+// A particle moving across the shutter smears along its way: its light
+// spread over the way (the row's light the same), not across it; still
+// with no shutter or no velocity.
+@(test)
+test_particle_smear :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	W :: 96
+	s: Software
+	defer software_destroy(&s)
+	// The centre row's light (linear) and the columns and rows lit.
+	Seen :: struct {
+		light:      f32,
+		lo_x, hi_x: int,
+		lo_y, hi_y: int,
+	}
+	look :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, velocity: Vec3, shutter: f32) -> Seen {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20, shutter = shutter}
+		m := MATERIAL_DEFAULT
+		one := [1]Particle{{position = {0, 0, 0}, size = 0.5, color = 1, velocity = velocity}}
+		append(&scene.draws, Draw{scene_particles(scene, one[:]), compose({0, 0, 0}), m})
+		px := software_render(s, scene, g, nil, W, W)
+		seen := Seen{lo_x = W, lo_y = W, hi_x = -1, hi_y = -1}
+		for y in 0 ..< W {
+			for x in 0 ..< W {
+				// Premultiplied over nothing: the colour encoded, then
+				// times the coverage.
+				r, a := px[(y * W + x) * 4], px[(y * W + x) * 4 + 3]
+				if a == 0 {
+					continue
+				}
+				seen.lo_x, seen.hi_x = min(seen.lo_x, x), max(seen.hi_x, x)
+				seen.lo_y, seen.hi_y = min(seen.lo_y, y), max(seen.hi_y, y)
+				if y == W / 2 {
+					seen.light += srgb_to_linear(f32(r) / f32(a)) * f32(a) / 255
+				}
+			}
+		}
+		return seen
+	}
+	still := look(&s, &scene, &g, {}, 0)
+	smeared := look(&s, &scene, &g, {2, 0, 0}, 1)
+	testing.expectf(t, look(&s, &scene, &g, {2, 0, 0}, 0) == still && look(&s, &scene, &g, {}, 1) == still, "still without a shutter or a velocity")
+	// 2 world units at 5 m with 40 degrees: about 53 px more.
+	grown := (smeared.hi_x - smeared.lo_x) - (still.hi_x - still.lo_x)
+	testing.expectf(t, grown >= 50 && grown <= 56, "smeared along its way: %v -> %v", still, smeared)
+	testing.expectf(t, smeared.lo_y == still.lo_y && smeared.hi_y == still.hi_y, "not across it: %v -> %v", still, smeared)
+	testing.expectf(t, abs(smeared.light / still.light - 1) < 0.05, "its light kept: %v -> %v", still.light, smeared.light)
 }
 
 // point_hidden: points on a steeply tilted surface are not hidden by it
@@ -1894,6 +2007,44 @@ void main() {
 // A ShaderMaterial finishing its colour with toneMapping, fogged and
 // linearToOutputTexel draws what the standard material does with the same
 // colour, under every tone mapping and fog (an unlit plane, a colour past 1
+// sRGBTransferEOTF turns a display colour into the light a basic material
+// of that colour writes.
+@(test)
+test_shader_srgb_eotf :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	scene: Scene
+	defer scene_destroy(&scene)
+	id, errors := shader(&shaders, "void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }", "uniform vec3 shown;\nvoid main() { gl_FragColor = sRGBTransferEOTF(vec4(shown, 1.0)); }")
+	testing.expectf(t, len(errors) == 0, "compiles: %v", errors)
+	W :: 8
+	s: Software
+	defer software_destroy(&s)
+	for shown in ([]Vec3{{0.9, 0.5, 0.2}, {0.02, 0.04, 0.6}, {1, 0, 0.3}}) {
+		pixels: [2][4]u8
+		for custom, k in ([]bool{false, true}) {
+			scene_clear(&scene)
+			scene.camera = {position = {0, 0, 5}, fov = 40, near = 0.1, far = 20}
+			m := MATERIAL_DEFAULT
+			m.color, m.flags = shown, {.Basic}
+			if custom {
+				m.shader = id
+				m.uniforms = scene_uniforms(&scene, {"shown", {shown.r, shown.g, shown.b}})
+			}
+			append(&scene.draws, Draw{plane(&g, 4, 4), compose(), m})
+			px := software_render(&s, &scene, &g, &shaders, W, W)
+			copy(pixels[k][:], px[(W / 2 * W + W / 2) * 4:][:4])
+		}
+		close := true
+		for c in 0 ..< 4 {
+			close &&= abs(int(pixels[0][c]) - int(pixels[1][c])) <= 1
+		}
+		testing.expectf(t, close, "%v: basic %v, shader %v", shown, pixels[0], pixels[1])
+	}
+}
+
 // by the exposure); a shader that calls none declares none.
 @(test)
 test_shader_tone_fog :: proc(t: ^testing.T) {
@@ -2283,6 +2434,53 @@ test_transmission :: proc(t: ^testing.T) {
 	testing.expectf(t, snapshot == 1 && len(order) == 2 && order[0] == 1 && order[1] == 0, "opaque first, then transmissive: %v at %d", order, snapshot)
 }
 
+// A rough mirror's reflection hardens where things touch it: a white pole
+// standing on it reflects sharp at its foot and spreads toward its top's
+// image, as far as each part is from the mirror.
+@(test)
+test_contact_hardening :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	s: Software
+	defer software_destroy(&s)
+	W :: 96
+	scene_clear(&scene)
+	scene.camera = {position = {0, 1, 4}, target = {0, 0.1, 0}, fov = 40, near = 0.1, far = 50}
+	scene.reflector = {normal = {0, 1, 0}, scale = 1}
+	floor := MATERIAL_DEFAULT
+	floor.color, floor.metalness, floor.roughness, floor.reflection = {1, 1, 1}, 1, 0.35, 1
+	append(&scene.draws, Draw{plane(&g, 30, 30), compose({}, {-math.PI / 2, 0, 0}), floor})
+	pole := MATERIAL_DEFAULT
+	pole.color, pole.flags = {1, 1, 1}, {.Basic}
+	append(&scene.draws, Draw{box(&g, 0.12, 1.6, 0.12), compose({0, 0.8, 0}), pole})
+	px := software_render(&s, &scene, &g, nil, W, W)
+	// The row of the image of the pole at `h` above the mirror: the columns
+	// at least half as bright as its brightest.
+	spread :: proc(scene: ^Scene, px: []u8, h: f32) -> int {
+		xy, _, _ := camera_project(scene.camera, W, W, {0, -h, 0})
+		y := int(xy.y)
+		peak: u8
+		for x in 0 ..< W {
+			peak = max(peak, px[(y * W + x) * 4])
+		}
+		n := 0
+		for x in 0 ..< W {
+			if int(px[(y * W + x) * 4]) * 2 >= int(peak) && peak > 20 {
+				n += 1
+			}
+		}
+		return n
+	}
+	foot, top := spread(&scene, px, 0.05), spread(&scene, px, 1.4)
+	pole_px, _, _ := camera_project(scene.camera, W, W, {0.06, 0, 0})
+	centre, _, _ := camera_project(scene.camera, W, W, {})
+	width := int(math.ceil(2 * (pole_px.x - centre.x)))
+	testing.expectf(t, foot > 0 && foot <= width + 2, "sharp at its foot: %v columns (the pole %v)", foot, width)
+	testing.expectf(t, top >= 3 * foot, "spread toward its top: %v columns, %v at its foot", top, foot)
+}
+
 // A mirror floor (Scene.reflector) shows a box above it where its image
 // is, and not a box below the floor (behind the plane, clipped); without
 // the reflector the floor shows nothing there.
@@ -2337,9 +2535,9 @@ test_reflector :: proc(t: ^testing.T) {
 	testing.expect(t, !ok, "behind it")
 }
 
-// Depth of field: none without blur (the frame as drawn); with it, a quad
-// at the focus as sharp as without, far stripes behind it blurred (their
-// neighbouring pixels nearly alike).
+// Depth of field gathered: none without an f-stop (the frame as drawn);
+// with one, a quad at the focus as sharp as without, far stripes behind it
+// blurred (their neighbouring pixels nearly alike).
 @(test)
 test_depth_of_field :: proc(t: ^testing.T) {
 	g: Geometries
@@ -2360,10 +2558,9 @@ test_depth_of_field :: proc(t: ^testing.T) {
 	far.color_map, far.flags = texture_add(&textures, stripes[:], 64, 1), {.Basic}
 	near := MATERIAL_DEFAULT
 	near.color, near.flags = {1, 0, 0}, {.Basic}
-	frame :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, textures: ^Textures, far, near: Material, dof: Depth_Of_Field) -> []u8 {
+	frame :: proc(s: ^Software, scene: ^Scene, g: ^Geometries, textures: ^Textures, far, near: Material, f_stop: f32) -> []u8 {
 		scene_clear(scene)
-		scene.camera = {position = {0, 0, 0}, target = {0, 0, -1}, fov = 50, near = 0.1, far = 100}
-		scene.depth_of_field = dof
+		scene.camera = {position = {0, 0, 0}, target = {0, 0, -1}, fov = 50, near = 0.1, far = 100, f_stop = f_stop, focus = 2}
 		append(&scene.draws, Draw{plane(g, 40, 40), compose({0, 0, -20}), far})
 		append(&scene.draws, Draw{plane(g, 0.6, 0.6), compose({0, 0, -2}), near})
 		return slice.clone(software_render(s, scene, g, nil, W, H, nil, textures), context.temp_allocator)
@@ -2374,14 +2571,39 @@ test_depth_of_field :: proc(t: ^testing.T) {
 		}
 		return
 	}
-	sharp := frame(&s, &scene, &g, &textures, far, near, {})
-	testing.expect(t, slice.equal(frame(&s, &scene, &g, &textures, far, near, {focus = 2}), sharp), "no blur, no depth of field")
-	// Stripes 3 pixels wide, blurred by 5 (fframes' default cap, 40/1080
-	// of the height, is under 4 pixels here).
-	blurred := frame(&s, &scene, &g, &textures, far, near, {focus = 2, blur = 0.06, max_blur = 0.06})
+	sharp := frame(&s, &scene, &g, &textures, far, near, 0)
+	// Stripes 3 pixels wide blurred by about 5 at infinity: the f-stop that
+	// does it (the thin lens: 0.5 (f / N) f / (focus - f) / film * H).
+	focal, _ := lens_of(scene.camera)
+	f_stop := 0.5 * focal * focal / (2000 - focal) / FILM_HEIGHT * H / 5.5
+	f, ok := focus_of(Camera{fov = 50, f_stop = f_stop, focus = 2}, H)
+	testing.expectf(t, ok && abs(f.blur - 5.5) < 1e-3, "blur at infinity %v", f.blur)
+	blurred := frame(&s, &scene, &g, &textures, far, near, f_stop)
 	centre := (H / 2 * W + W / 2) * 4
 	testing.expectf(t, slice.equal(blurred[centre:][:4], sharp[centre:][:4]), "at the focus: %v, sharp %v", blurred[centre:][:4], sharp[centre:][:4])
 	testing.expectf(t, contrast(blurred, 4) * 4 < contrast(sharp, 4), "the far stripes blurred: %d, sharp %d", contrast(blurred, 4), contrast(sharp, 4))
+}
+
+// A view from a point of the aperture (`Camera.lens`): a point at the focus
+// distance falls where it does through the centre, a nearer one moves
+// against the lens's shift and a farther one with it; no gather then.
+@(test)
+test_lens_view :: proc(t: ^testing.T) {
+	W, H :: 200, 100
+	c := Camera{position = {0, 1, 5}, target = {0, 1, 0}, fov = 40, near = 0.1, far = 100, f_stop = 0.5, focus = 4}
+	from := c
+	from.lens = Vec2{1, 0}
+	at :: proc(c: Camera, p: Vec3) -> Vec2 {
+		px, _, _ := camera_project(c, W, H, p)
+		return px
+	}
+	focused := Vec3{0.3, 1.2, 1} // 4 from the camera along its axis
+	testing.expectf(t, linalg.length(at(from, focused) - at(c, focused)) < 1e-3, "in focus: %v, %v", at(from, focused), at(c, focused))
+	nearer, farther := Vec3{0.3, 1.2, 3}, Vec3{0.3, 1.2, -5}
+	testing.expectf(t, at(from, nearer).x < at(c, nearer).x - 0.5, "nearer: %v, %v", at(from, nearer), at(c, nearer))
+	testing.expectf(t, at(from, farther).x > at(c, farther).x + 0.5, "farther: %v, %v", at(from, farther), at(c, farther))
+	_, gathered := focus_of(from, H)
+	testing.expect(t, !gathered, "a lens view is not gathered")
 }
 
 // A scene expanded (here for its points) keeps its settings: the

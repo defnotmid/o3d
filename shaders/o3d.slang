@@ -147,13 +147,15 @@ struct Light {
 
 // count: the lights, 0, the fog's kind, the shadows; shadowMatrix: the
 // shadow lights' view-projections; shadowParams: map size (0: no shadow),
-// bias, normal bias; envParams: intensity (0: no env), max radiance mip
-// level, 0, fog density.
+// bias, normal bias; shadowFrom: where the light comes from (toward it, w
+// 0; its position, w 1); envParams: intensity (0: no env), max radiance
+// mip level, 0, fog density.
 struct Lighting {
     float4 eye;
     int4 count;
     float4x4 shadowMatrix[MAX_SHADOWS];
     float4 shadowParams[MAX_SHADOWS];
+    float4 shadowFrom[MAX_SHADOWS];
     float4 envParams;
     // x: the environment's maps are linear (HDR), not sRGB-encoded;
     // y: the camera is orthographic.
@@ -198,19 +200,24 @@ struct Joints_VS {
 // The shadow pass's alpha map, after its colour map.
 [[vk::binding(1, 2)]] Sampler2D<float4> shadowAlphaMap : register(t1, space2) : register(s1, space2);
 // Transmissive draws: the frame before them (linear light, premultiplied,
-// mipmapped: three.js's transmissionSamplerMap); then the layers' two
+// mipmapped: three.js's transmissionSamplerMap, layer 0); reflective ones:
+// the reflection (its light, layer 0; its runs, o3d.mirror_run
+// premultiplied by the coverage, and the coverage, layer 1's red and
+// green); then the layers' two
 // textures (Material.layer_info).
-[[vk::binding(13, 2)]] Sampler2D<float4> frameMap : register(t13, space2) : register(s13, space2);
+[[vk::binding(13, 2)]] Sampler2DArray<float4> frameMap : register(t13, space2) : register(s13, space2);
 [[vk::binding(14, 2)]] Sampler2D<float4> layerMap0 : register(t14, space2) : register(s14, space2);
 [[vk::binding(15, 2)]] Sampler2D<float4> layerMap1 : register(t15, space2) : register(s15, space2);
 // Particles: the frame's depth (soft particles) in its place, and the rows
 // after it (SPIR-V; on Metal after the uniform buffers, as curveWords).
 [[vk::binding(13, 2)]] Sampler2D<float> sceneDepth : register(t13, space2) : register(s13, space2);
-// A particle quad's row (o3d.Sprite_Row): its colour and opacity, and its
-// probe (pixel x, y, depth; the disc's radius, 0 when not probed).
+// A particle quad's row (o3d.Sprite_Row): its colour and opacity, its
+// probe (pixel x, y, depth; the disc's radius, 0 when not probed), and its
+// smear (its way in its sprite's uv over the shutter, the moments averaged).
 struct SpriteRow {
     float4 color;
     float4 probe;
+    float4 motion;
 };
 [[vk::binding(16, 2)]] StructuredBuffer<SpriteRow> spriteRows : register(t2, space2);
 // Exact shapes' curves (Geometries.curve_words): after the samplers in
@@ -384,6 +391,10 @@ float shadow_factor(int idx, float3 world, float3 normal) {
         return 1;
     }
     float3 p = world + normal * params.z;
+    float4 from = lighting.shadowFrom[idx];
+    float3 toward = from.xyz - p * from.w;
+    float len2 = dot(toward, toward);
+    p -= (len2 > 0 ? toward * rsqrt(len2) : float3(0)) * params.y;
     float4 c = mul(lighting.shadowMatrix[idx], float4(p, 1));
     if (c.w <= 1e-6) {
         return 1;
@@ -391,7 +402,7 @@ float shadow_factor(int idx, float3 world, float3 normal) {
     float inv_w = 1 / c.w;
     float u = c.x * inv_w * 0.5 + 0.5;
     float v = 0.5 - c.y * inv_w * 0.5;
-    float z = c.z * inv_w - params.y;
+    float z = c.z * inv_w;
     if (u < 0 || u > 1 || v < 0 || v > 1 || z < 0 || z > 1) {
         return 1;
     }
@@ -654,10 +665,10 @@ float4 frame_bicubic(float2 uv, uint level) {
     float2 h0 = -1 + w1 / g0;
     float2 h1 = 1 + w3 / g1;
     float lod = float(level);
-    float4 t00 = frameMap.SampleLevel((i + float2(h0.x, h0.y) - 0.5) / size, lod);
-    float4 t10 = frameMap.SampleLevel((i + float2(h1.x, h0.y) - 0.5) / size, lod);
-    float4 t01 = frameMap.SampleLevel((i + float2(h0.x, h1.y) - 0.5) / size, lod);
-    float4 t11 = frameMap.SampleLevel((i + float2(h1.x, h1.y) - 0.5) / size, lod);
+    float4 t00 = frameMap.SampleLevel(float3((i + float2(h0.x, h0.y) - 0.5) / size, 0), lod);
+    float4 t10 = frameMap.SampleLevel(float3((i + float2(h1.x, h0.y) - 0.5) / size, 0), lod);
+    float4 t01 = frameMap.SampleLevel(float3((i + float2(h0.x, h1.y) - 0.5) / size, 0), lod);
+    float4 t11 = frameMap.SampleLevel(float3((i + float2(h1.x, h1.y) - 0.5) / size, 0), lod);
     return g0.y * (g0.x * t00 + g1.x * t10) + g1.y * (g0.x * t01 + g1.x * t11);
 }
 
@@ -771,14 +782,59 @@ float4 read_layer(uint map, LaneUv at) {
     return float4(1);
 }
 
-// The reflection's level for a roughness (scene.odin's reflection_lod).
-float reflection_lod(float roughness) {
-    return sqrt(saturate(roughness)) * lighting.reflectParams.x;
+// scene.odin's reflection_lod: reflectParams is the reflection's last
+// level, its focal (Mirror_View.focal) and whether the camera is
+// orthographic.
+float reflection_lod(float roughness, float run, float d) {
+    float alpha = saturate(roughness) * saturate(roughness);
+    float k = lighting.reflectParams.z != 0 ? run : run / (d + run);
+    float blur = 1.29 * alpha * lighting.reflectParams.y * k;
+    return clamp(log2(max(2 * blur, 1)), 0, lighting.reflectParams.x);
+}
+
+static const float REFLECTION_MISS = 1e9;
+
+// scene.odin's reflected_run: how far the mirrored ray runs past the
+// fragment to what it meets.
+float reflected_run(float2 uv, float far) {
+    float4 near = frameMap.SampleLevel(float3(uv, 1), 0);
+    float4 about = frameMap.SampleLevel(float3(uv, 1), far);
+    float beyond = about.g > 0 ? about.r / about.g : REFLECTION_MISS;
+    return near.r + (1 - near.g) * beyond;
+}
+
+// raster.odin's smeared_map: a smeared particle's sprite at the moments of
+// the shutter, its light averaged, back as a straight colour and coverage.
+float4 smeared_map(LaneUv at, float4 motion, uint flags) {
+    int taps = int(motion.z);
+    float4 acc = float4(0);
+    for (int k = 0; k < taps; k++) {
+        LaneUv tap = at;
+        tap.triplanar = false;
+        tap.uv = at.uv - motion.xy * ((float(k) + 0.5) / float(taps) - 0.5);
+        if (tap.uv.x < 0 || tap.uv.x > 1 || tap.uv.y < 0 || tap.uv.y > 1) {
+            continue;
+        }
+        float4 s = float4(1);
+        if ((flags & FLAG_COLOR_MAP) != 0) {
+            s = read_map(colorMap, SLOT_COLOR, tap);
+            if ((flags & FLAG_PREMULTIPLIED) != 0) {
+                s.rgb = s.a > 0 ? saturate(s.rgb / s.a) : float3(0);
+            }
+        }
+        acc += float4(linear_rgb(s.rgb) * s.a, s.a);
+    }
+    if (acc.a <= 0) {
+        return float4(0);
+    }
+    float3 c = acc.rgb / acc.a;
+    return float4(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b), acc.a / float(taps));
 }
 
 // TRANSMIT: whether the entry reads frameMap, the transmission snapshot or
-// the reflection (fs_sprite has its depth there instead).
-float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1)) {
+// the reflection (fs_sprite has its depth there instead). `smear`: a
+// smeared particle's (SpriteRow.motion).
+float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1), float4 smear = float4(0)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
     float a = material.color.a * saturate(tint.a);
@@ -806,10 +862,16 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
             a *= i.color.a;
         }
     }
-    if ((flags & FLAG_COLOR_MAP) != 0) {
-        float4 tex = read_map(colorMap, SLOT_COLOR, at);
-        if ((flags & FLAG_PREMULTIPLIED) != 0) {
-            tex.rgb = tex.a > 0 ? saturate(tex.rgb / tex.a) : float3(0);
+    bool smeared = smear.z > 1;
+    if ((flags & FLAG_COLOR_MAP) != 0 || smeared) {
+        float4 tex;
+        if (smeared) {
+            tex = smeared_map(at, smear, flags);
+        } else {
+            tex = read_map(colorMap, SLOT_COLOR, at);
+            if ((flags & FLAG_PREMULTIPLIED) != 0) {
+                tex.rgb = tex.a > 0 ? saturate(tex.rgb / tex.a) : float3(0);
+            }
         }
         base *= linear_rgb(tex.rgb);
         if ((flags & (FLAG_BLENDED | FLAG_ALPHA_MASK)) != 0) {
@@ -918,9 +980,12 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
         if (TRANSMIT && (flags & FLAG_REFLECTION) != 0) {
             reflection = material.emissive.w;
             float2 uv = i.position.xy / lighting.frameParams.xy;
-            mirror = frameMap.SampleLevel(uv, reflection_lod(roughness));
-            if ((flags & FLAG_CLEARCOAT) != 0) {
-                mirror_coat = frameMap.SampleLevel(uv, reflection_lod(ly.clearcoat_roughness));
+            bool coated = (flags & FLAG_CLEARCOAT) != 0;
+            float d = length(i.world - lighting.eye.xyz);
+            float run = reflected_run(uv, reflection_lod(max(roughness, coated ? ly.clearcoat_roughness : 0), REFLECTION_MISS, d));
+            mirror = frameMap.SampleLevel(float3(uv, 0), reflection_lod(roughness, run, d));
+            if (coated) {
+                mirror_coat = frameMap.SampleLevel(float3(uv, 0), reflection_lod(ly.clearcoat_roughness, run, d));
             }
         }
         c = shade(base, roughness, metalness, i.world, n, lighting.eye.xyz, shadows, ao, flags, emissive, ly, coat_n, behind, mirror, mirror_coat, reflection, ta);
@@ -946,6 +1011,31 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
 [shader("fragment")]
 float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
     return surface<true>(i, front);
+}
+
+// The mirror's pass: the light, and how far the mirror's ray runs past the
+// mirror to the fragment (o3d.mirror_run; lighting.eye is the eye's image,
+// clipPlane the mirror) premultiplied by its coverage, and the coverage
+// (alpha too, the blend's), into the second target.
+float4 mirror_run_of(float3 world, float4 color) {
+    float3 n = lighting.clipPlane.xyz;
+    float h = max(dot(n, world) + lighting.clipPlane.w, 0);
+    float below = -(dot(n, lighting.eye.xyz) + lighting.clipPlane.w);
+    float run = length(world - lighting.eye.xyz) * h / max(h + below, 1e-6);
+    return float4(run * color.a, color.a, 0, color.a);
+}
+
+struct Mirror_Out {
+    float4 color : SV_Target0;
+    float4 run : SV_Target1;
+};
+
+[shader("fragment")]
+Mirror_Out fs_mirror(VS_Out i, bool front : SV_IsFrontFace) {
+    Mirror_Out o;
+    o.color = surface<true>(i, front);
+    o.run = mirror_run_of(i.world, o.color);
+    return o;
 }
 
 // A view depth from a depth value (o3d.view_depth).
@@ -999,19 +1089,20 @@ float4 fs_sprite(VS_Curves_Out i, bool front : SV_IsFrontFace) : SV_Target {
         float behind = view_depth(sceneDepth.SampleLevel(uv, 0));
         row.a *= saturate((behind - view_depth(i.position.z)) / material.softness);
     }
-    return surface<false>(curves_surface_in(i), front, row);
+    return surface<false>(curves_surface_in(i), front, row, r.motion);
 }
 
 // Sample positions in a pixel (the standard 4x MSAA pattern, software.odin's
 // SAMPLE_OFFSETS), by sample index.
 static const float2 SAMPLE_OFFSETS[4] = { float2(0.375, 0.125), float2(0.875, 0.375), float2(0.125, 0.625), float2(0.625, 0.875) };
 
-bool curves_inside(StructuredBuffer<uint> words, uint s, float2 rc, bool even_odd) {
-    int w = curves_winding(words, s, rc);
-    return even_odd ? (w & 1) != 0 : w != 0;
-}
-
+// A `.Curves` quad's table entry: its set's first word, the top bit its
+// fill rule (curve.odin's CURVE_EVEN_ODD).
 static const uint CURVE_EVEN_ODD = 0x80000000u;
+
+Curves_Fill_Rule curve_entry_rule(uint entry) {
+    return (Curves_Fill_Rule)(entry >> 31);
+}
 
 // Fine derivatives (within the 2x2 quad's row or column) where the target
 // names them; Metal's dfdx has no coarse kind to choose.
@@ -1048,15 +1139,36 @@ struct Curves_Out {
 // discard.
 [shader("fragment")]
 Curves_Out fs_curves(VS_Curves_Out i, bool front : SV_IsFrontFace) {
+    return curves_out(i, front);
+}
+
+struct Curves_Mirror_Out {
+    float4 color : SV_Target0;
+    float4 run : SV_Target1;
+    uint mask : SV_Coverage;
+};
+
+// An exact shape in the mirror's pass (fs_mirror's runs).
+[shader("fragment")]
+Curves_Mirror_Out fs_curves_mirror(VS_Curves_Out i, bool front : SV_IsFrontFace) {
+    Curves_Out c = curves_out(i, front);
+    Curves_Mirror_Out o;
+    o.color = c.color;
+    o.mask = c.mask;
+    o.run = mirror_run_of(i.world, c.color);
+    return o;
+}
+
+Curves_Out curves_out(VS_Curves_Out i, bool front) {
     float2 dx = fine_ddx(i.uv1);
     float2 dy = fine_ddy(i.uv1);
     uint entry = curveWords[material.curve_table + i.quad];
     uint s = entry & ~CURVE_EVEN_ODD;
-    bool even_odd = (entry & CURVE_EVEN_ODD) != 0u;
+    Curves_Fill_Rule rule = curve_entry_rule(entry);
     float4 color = surface<true>(curves_surface_in(i), front);
     Curves_Out o;
     if ((material.flags & FLAG_BLENDED) != 0) {
-        float cov = curves_coverage_affine(curveWords, s, i.uv1, dx, dy, even_odd);
+        float cov = curves_coverage_affine(curveWords, s, i.uv1, dx, dy, rule);
         if (cov <= 0.0) {
             discard;
         }
@@ -1066,7 +1178,7 @@ Curves_Out fs_curves(VS_Curves_Out i, bool front : SV_IsFrontFace) {
         uint mask = 0;
         for (uint k = 0; k < 4; k++) {
             float2 off = SAMPLE_OFFSETS[k] - 0.5;
-            if (curves_inside(curveWords, s, i.uv1 + dx * off.x + dy * off.y, even_odd)) {
+            if (curves_fill_inside(curves_winding(curveWords, s, i.uv1 + dx * off.x + dy * off.y), rule)) {
                 mask |= 1u << k;
             }
         }
@@ -1115,7 +1227,7 @@ float fs_shadow(VS_Out i) : SV_Target {
 [shader("fragment")]
 float fs_shadow_curves(VS_Curves_Out i) : SV_Target {
     uint entry = shadowCurveWords[material.curve_table + i.quad];
-    if (!curves_inside(shadowCurveWords, entry & ~CURVE_EVEN_ODD, i.uv1, (entry & CURVE_EVEN_ODD) != 0u)) {
+    if (!curves_fill_inside(curves_winding(shadowCurveWords, entry & ~CURVE_EVEN_ODD, i.uv1), curve_entry_rule(entry))) {
         discard;
     }
     return shadow_depth(curves_surface_in(i));

@@ -5,7 +5,7 @@ import "core:math/linalg"
 import "core:slice"
 
 import "deps:oksl"
-import "deps:ovg/curves"
+import curves "deps:ocurves"
 
 // Phase 3 of the software renderer: each band clears its rows, rasterizes its
 // triangles in drawing order (per pixel when untextured, in 2x2 quads when
@@ -26,6 +26,9 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	// The second part of a frame (after its snapshot) draws over the first.
 	if !job.keep {
 		slice.fill(s.depth[y0 * width * SAMPLES:y1 * width * SAMPLES], 0)
+		if job.runs != nil {
+			slice.fill(job.runs[y0 * width * SAMPLES:y1 * width * SAMPLES], 0)
+		}
 		if job.bg_tex == 0 {
 			slice.fill(s.light[y0 * width * SAMPLES:y1 * width * SAMPLES], job.clear)
 		} else {
@@ -65,6 +68,18 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	if job.capture_into != nil {
 		for i in y0 * width ..< y1 * width {
 			job.capture_into[i] = to_halves(pixel_light(s, i))
+		}
+		if job.capture_runs != nil {
+			// As the GPU resolves its runs and copies them into its second
+			// layer's red and green, alpha 1.
+			for i in y0 * width ..< y1 * width {
+				sum: [2]f32
+				for r in job.runs[i * SAMPLES:][:SAMPLES] {
+					sum += {from_half(r.x), from_half(r.y)}
+				}
+				sum *= 1.0 / SAMPLES
+				job.capture_runs[i] = {to_half(sum.x), to_half(sum.y), 0, to_half(1)}
+			}
 		}
 		return
 	}
@@ -128,18 +143,24 @@ behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n_in: Vec
 	return frame_behind(job.snapshot, &job.snapshot_tex, uv, lod)
 }
 
-// What a reflective point at pixel (x, y) reads of the frame's reflection
-// (none: nothing, the environment's), at its roughness and its coat's.
+// What a reflective point `p` at pixel (x, y) reads of the frame's
+// reflection (none: nothing, the environment's), at its roughness and its
+// coat's, each blurred as far as its mirrored ray runs (`reflected_run`).
 @(private = "file")
-mirror_at :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, x, y: int, roughness, coat_roughness: f32) -> (mirror: Mirror_Light) {
+mirror_at :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, x, y: int, p: Vec3, roughness, coat_roughness: f32) -> (mirror: Mirror_Light) {
 	mirror.amount = m.reflection
 	if job.reflection == nil {
 		return
 	}
 	uv := Vec2{(f32(x) + 0.5) / f32(job.width), (f32(y) + 0.5) / f32(job.height)}
-	mirror.spec = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(roughness, job.reflection_last))
-	if .Clearcoat in m.flags {
-		mirror.coat = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(coat_roughness, job.reflection_last))
+	coated := .Clearcoat in m.flags
+	d := linalg.length(p - job.eye)
+	focal, ortho, last := job.reflection_focal, job.ortho, job.reflection_last
+	far := reflection_lod(max(roughness, coat_roughness if coated else 0), REFLECTION_MISS, d, focal, ortho, last)
+	run := reflected_run(job.reflection_runs, &job.reflection_tex, uv, far)
+	mirror.spec = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(roughness, run, d, focal, ortho, last))
+	if coated {
+		mirror.coat = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(coat_roughness, run, d, focal, ortho, last))
 	}
 	return
 }
@@ -192,9 +213,9 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 			}
 		}
 		words: []u32
-		even_odd: bool
+		rule: curves.Fill_Rule
 		if curved {
-			words, even_odd = curve_entry_words(job.geos, t.curve)
+			words, rule = curve_entry_words(job.geos, t.curve)
 		}
 		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
 		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
@@ -211,7 +232,7 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 				i := y * size + x
 				if z >= 0 && z <= 1 && z > smap[i] {
 					iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
-					if curved && !curves_inside(words, (rc[0] * b0 + rc[1] * b1 + rc[2] * b2) / iw, even_odd) {
+					if curved && !curves_inside(words, (rc[0] * b0 + rc[1] * b1 + rc[2] * b2) / iw, rule) {
 						continue
 					}
 					if masked {
@@ -350,7 +371,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			mirror: Mirror_Light = ---
 			mp: ^Mirror_Light
 			if reflective {
-				mirror = mirror_at(job, m, x, y, m.roughness, m.layers.clearcoat_roughness)
+				mirror = mirror_at(job, m, x, y, p, m.roughness, m.layers.clearcoat_roughness)
 				mp = &mirror
 			}
 			a: f32 = 1
@@ -361,7 +382,12 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 				lit = shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, m.layers.f0, mp)
 			}
 			lit = fogged(lit, p, job.eye, job.fog, job.fog_color)
-			write_samples(s, width, dz, x, y, covered, light_of(lit, out_alpha, a), blend_of(m))
+			light := light_of(lit, out_alpha, a)
+			if job.runs != nil {
+				write_samples(s, width, dz, x, y, covered, light, blend_of(m), job.runs, mirror_run(p, job.eye, job.clip), true)
+			} else {
+				write_samples(s, width, dz, x, y, covered, light, blend_of(m), nil, 0, false)
+			}
 		}
 	}
 }
@@ -399,7 +425,7 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 			}
 			lit := fogged(m.base, p, job.eye, job.fog, job.fog_color)
-			write_samples(s, width, dz, x, y, covered, light_of(lit, m.opacity * (1 - mask), 1), blend_of(m))
+			write_samples(s, width, dz, x, y, covered, light_of(lit, m.opacity * (1 - mask), 1), blend_of(m), nil, 0, false)
 		}
 	}
 }
@@ -432,9 +458,9 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 	}
 	curved := .Curves in m.flags
 	words: []u32
-	even_odd: bool
+	rule: curves.Fill_Rule
 	if curved {
-		words, even_odd = curve_entry_words(job.geos, t.curve)
+		words, rule = curve_entry_words(job.geos, t.curve)
 	}
 	// Triplanar: its maps projected in its frame.
 	triplanar := .Triplanar in m.flags
@@ -507,10 +533,16 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 						opacity *= colors[l].a
 					}
 				}
-				if .Color_Map in m.flags {
-					tex := read_map(job, m, tl, .Color, m.color_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					if .Premultiplied in m.flags {
-						tex.rgb = linalg.clamp(tex.rgb / tex.a, 0, 1) if tex.a > 0 else 0
+				smeared := sprite && row.motion.z > 1
+				if .Color_Map in m.flags || smeared {
+					tex: Vec4
+					if smeared {
+						tex = smeared_map(job, m, row.motion, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+					} else {
+						tex = read_map(job, m, tl, .Color, m.color_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
+						if .Premultiplied in m.flags {
+							tex.rgb = linalg.clamp(tex.rgb / tex.a, 0, 1) if tex.a > 0 else 0
+						}
 					}
 					pm.base *= linear(tex.rgb)
 					if blend || .Alpha_Mask in m.flags {
@@ -541,13 +573,13 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				covered := lanes[l]
 				if curved {
 					if blend {
-						cov := curve_coverage(words, uv1s[l], d1x, d1y, even_odd)
+						cov := curve_coverage(words, uv1s[l], d1x, d1y, rule)
 						if cov <= 0 {
 							continue
 						}
 						opacity *= cov
 					} else {
-						covered &= curve_samples(words, uv1s[l], d1x, d1y, even_odd)
+						covered &= curve_samples(words, uv1s[l], d1x, d1y, rule)
 						if covered == {} {
 							continue
 						}
@@ -606,7 +638,7 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				mirror: Mirror_Light = ---
 				mp: ^Mirror_Light
 				if reflective {
-					mirror = mirror_at(job, m, x, y, pm.roughness, ly.clearcoat_roughness)
+					mirror = mirror_at(job, m, x, y, worlds[l], pm.roughness, ly.clearcoat_roughness)
 					mp = &mirror
 				}
 				a: f32 = 1
@@ -617,10 +649,45 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 					lit = shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, m.layers.f0, mp)
 				}
 				lit = fogged(lit, worlds[l], job.eye, job.fog, job.fog_color)
-				write_samples(s, width, dz, x, y, covered, light_of(lit, opacity, a), blend_of(m))
+				light := light_of(lit, opacity, a)
+				if job.runs != nil {
+					write_samples(s, width, dz, x, y, covered, light, blend_of(m), job.runs, mirror_run(worlds[l], job.eye, job.clip), true)
+				} else {
+					write_samples(s, width, dz, x, y, covered, light, blend_of(m), nil, 0, false)
+				}
 			}
 		}
 	}
+}
+
+// A smeared particle's sprite at a pixel (`Sprite_Row.motion`): the sprite
+// (its colour map, or white; nothing past its edges) at the moments of the
+// shutter, its light averaged (premultiplied, linear), back as a straight
+// colour (sRGB-encoded, as the map's) and the share of the shutter it
+// covered the pixel.
+@(private = "file")
+smeared_map :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, motion: Vec4, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec4 {
+	taps := int(motion.z)
+	acc: Vec4
+	for k in 0 ..< taps {
+		uv := uv0 - motion.xy * ((f32(k) + 0.5) / f32(taps) - 0.5)
+		if uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1 {
+			continue
+		}
+		s := Vec4{1, 1, 1, 1}
+		if .Color_Map in m.flags {
+			s = read_map(job, m, nil, .Color, m.color_map, uv, uv1, d0x, d0y, d1x, d1y)
+			if .Premultiplied in m.flags {
+				s.rgb = linalg.clamp(s.rgb / s.a, 0, 1) if s.a > 0 else 0
+			}
+		}
+		acc += {srgb_to_linear(s.r) * s.a, srgb_to_linear(s.g) * s.a, srgb_to_linear(s.b) * s.a, s.a}
+	}
+	if acc.a <= 0 {
+		return {}
+	}
+	c := acc.rgb / acc.a
+	return {linear_to_srgb_exact(c.r), linear_to_srgb_exact(c.g), linear_to_srgb_exact(c.b), acc.a / f32(taps)}
 }
 
 // Where a triplanar lane reads its maps: its position projected along x,
@@ -744,23 +811,23 @@ read_layers :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^T
 // and grazing views, so never faded to the shape's mean (`curves.fade`),
 // which it reaches by itself once the footprint holds the whole shape.
 @(private = "file")
-curve_coverage :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, even_odd: bool) -> f32 {
+curve_coverage :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, rule: curves.Fill_Rule) -> f32 {
 	if len(words) == 0 {
 		return 0
 	}
-	return curves.coverage_affine(words, rc, dx, dy, even_odd)
+	return curves.coverage_affine(words, rc, dx, dy, rule)
 }
 
 // The pixel's samples inside the shape: the shape coordinate at each sample
 // position from the centre's and its derivatives.
 @(private = "file")
-curve_samples :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, even_odd: bool) -> (inside: Sample_Mask) {
+curve_samples :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, rule: curves.Fill_Rule) -> (inside: Sample_Mask) {
 	if len(words) == 0 {
 		return
 	}
 	for k in 0 ..< SAMPLES {
 		o := SAMPLE_OFFSETS[k] - 0.5
-		if curves_inside(words, rc + dx * o.x + dy * o.y, even_odd) {
+		if curves_inside(words, rc + dx * o.x + dy * o.y, rule) {
 			inside += {k}
 		}
 	}
@@ -898,7 +965,7 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 			c := q.colours[qi * 4 + l]
 			a := clamp(c.a, 0, 1)
 			k: f32 = a if blend != .Opaque else 1
-			write_samples(s, width, dz, x, y, q.covered[qi][l], {c.r * k, c.g * k, c.b * k, a}, blend)
+			write_samples(s, width, dz, x, y, q.covered[qi][l], {c.r * k, c.g * k, c.b * k, a}, blend, nil, 0, false)
 		}
 	}
 	return taken
@@ -959,9 +1026,11 @@ coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (
 // A pixel's light (premultiplied) into its covered samples that pass the
 // depth test: replacing them (depth written), over them, or added to them
 // (light added, alpha over; depth kept), in half floats as the GPU's
-// target blends.
+// target blends. In the mirror's pass (`RUNS`), its run past the mirror
+// (`mirror_run`) and coverage into `runs` too, the run premultiplied by
+// the coverage, both blended as its alpha is (the GPU's second target).
 @(private = "file")
-write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask, light: [4]f32, blend: Blend) {
+write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask, light: [4]f32, blend: Blend, runs: [][2]f16, run: f32, $RUNS: bool) {
 	px := to_halves(light)
 	for k in covered {
 		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
@@ -978,6 +1047,13 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz:
 		case .Add:
 			dst := from_halves(s.light[i])
 			s.light[i] = to_halves({light.r + dst.r, light.g + dst.g, light.b + dst.b, light.a + dst.a * (1 - light.a)})
+		}
+		when RUNS {
+			r := [2]f32{run * light.a, light.a}
+			if blend != .Opaque {
+				r += [2]f32{from_half(runs[i].x), from_half(runs[i].y)} * (1 - light.a)
+			}
+			runs[i] = {to_half(r.x), to_half(r.y)}
 		}
 	}
 }

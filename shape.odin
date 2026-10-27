@@ -3,10 +3,13 @@ package o3d
 import "core:math"
 import "core:slice"
 
-// Shapes: three.js's Shape, ShapeUtils, ShapePath.toShapes, ShapeGeometry
-// and ExtrudeGeometry, over outlines already flattened to points (what
-// three.js's `shape.extractPoints(curveSegments)` gives: fonts' and SVGs'
-// curves are flattened by the caller, so there is no curveSegments here).
+import curves "deps:ocurves"
+
+// Shapes: three.js's ShapePath.toShapes, ShapeUtils, ShapeGeometry and
+// ExtrudeGeometry. A path's contours (ocurves' `Contours`, curve.odin) are
+// made shapes once (`shapes_from_contours`): what their fill rule fills, as
+// outlines with their holes, flattened to points; the geometries are built
+// from those.
 //
 // A shape's geometry is made once and kept like any other (`Geometries`
 // never frees): build it when the outline is first seen, keep the id, and
@@ -14,244 +17,151 @@ import "core:slice"
 // shapes are not looked up by their parameters, so calling `extrude_geometry`
 // every frame makes a new mesh every frame (`geometries_made` shows it).
 
-// An outline and its holes, as points in the XY plane (three.js's Shape
-// after extractPoints: `shape` and `holes`). Either winding is taken: the
-// geometries wind the outline clockwise and the holes counter-clockwise, as
-// three.js does. A closing point equal to the first is ignored.
-Shape :: struct {
-	contour: []Vec2,
-	holes:   [][]Vec2,
+// Shapes in one table: every ring's points in `points` (once round, no
+// closing point repeating the first), each ring's range of them in `rings`
+// (first, count), each shape's range of rings in `shapes` (first, count:
+// its outline, then its holes), so a shape's points are one range too.
+// Outlines wind clockwise (Y up), holes counter-clockwise, as three.js's
+// geometries wind them. `scratch` is the booleans', kept warm across calls.
+Shapes :: struct {
+	points:  [dynamic]Vec2,
+	rings:   [dynamic][2]u32,
+	shapes:  [dynamic][2]u32,
+	scratch: curves.Bool_Scratch,
 }
 
-// SVG's fill rules, for `shapes_from_contours`.
-Fill_Rule :: enum u8 {
-	Nonzero,
-	Even_Odd,
+shapes_destroy :: proc(s: ^Shapes) {
+	delete(s.points)
+	delete(s.rings)
+	delete(s.shapes)
+	curves.bool_scratch_destroy(&s.scratch)
+	s^ = {}
+}
+
+// ShapePath.toShapes with getPoints(curve_segments): the area contours `c`
+// fill by `fill_rule`, as shapes written over `s`. Where three.js takes
+// each contour's winding and containment as given, this is the filled
+// area itself (ocurves' simplify): contours that cross or overlap are
+// merged, one that changes nothing is gone, a solid inside a hole is a
+// shape of its own. A line keeps its end; a curve takes `curve_segments`
+// points at even steps of its parameter, as three.js flattens it, and a
+// part of one (cut where contours meet) its share of them; a point equal
+// to the one before is dropped. On an error `s` is left empty.
+shapes_from_contours :: proc(s: ^Shapes, c: ^curves.Contours, fill_rule := curves.Fill_Rule.Non_Zero, curve_segments := 12) -> curves.Bool_Error {
+	clear(&s.points)
+	clear(&s.rings)
+	clear(&s.shapes)
+	input := [1]curves.Bool_Input{{count = u32(len(c.contours)), rule = fill_rule}}
+	budget := curves.DEFAULT_BUDGET
+	curves.bool_run(&s.scratch, c, input[:], .Union, &budget) or_return
+	n := max(curve_segments, 1)
+	out := &s.scratch.out
+	for f in s.scratch.faces {
+		first := u32(len(s.rings))
+		for ct, k in out.contours[f[0]:][:f[1]] {
+			start := len(s.points)
+			pts := out.pts[ct.start:][:3 * ct.segs + 1]
+			shapes_push(s, pts[0])
+			for kind, i in out.kinds[ct.seg:][:ct.segs] {
+				q := pts[3 * i:][:4]
+				if kind == .Line {
+					shapes_push(s, q[3])
+					continue
+				}
+				t := s.scratch.out_t[int(ct.seg) + i]
+				m := max(int(math.ceil(f64(n) * abs(f64(t[1]) - f64(t[0])))), 1)
+				p0, c1, c2, p3 := wide(q[0]), wide(q[1]), wide(q[2]), wide(q[3])
+				for j in 1 ..= m {
+					u := f64(j) / f64(m)
+					w := 1 - u
+					p := w * w * w * p0 + 3 * w * w * u * c1 + 3 * w * u * u * c2 + u * u * u * p3
+					shapes_push(s, {f32(p.x), f32(p.y)})
+				}
+			}
+			if len(s.points) - start > 1 && s.points[len(s.points) - 1] == s.points[start] {
+				pop(&s.points)
+			}
+			if len(s.points) - start < 3 {
+				resize(&s.points, start)
+				if k == 0 {
+					break // no outline: no shape
+				}
+				continue
+			}
+			append(&s.rings, [2]u32{u32(start), u32(len(s.points) - start)})
+		}
+		if u32(len(s.rings)) > first {
+			append(&s.shapes, [2]u32{first, u32(len(s.rings)) - first})
+		}
+	}
+	return .None
+}
+
+@(private = "file")
+shapes_push :: #force_inline proc(s: ^Shapes, p: Vec2) {
+	if len(s.points) == 0 || s.points[len(s.points) - 1] != p {
+		append(&s.points, p)
+	}
+}
+
+@(private = "file")
+wide :: #force_inline proc "contextless" (p: Vec2) -> [2]f64 {
+	return {f64(p.x), f64(p.y)}
+}
+
+// Ring `i` of `s`'s points.
+shapes_ring :: proc(s: ^Shapes, i: int) -> []Vec2 {
+	r := s.rings[i]
+	return s.points[r[0]:][:r[1]]
 }
 
 // ShapeUtils.area: the signed area, positive when counter-clockwise (Y up).
 shape_area :: proc "contextless" (contour: []Vec2) -> f32 {
-	return f32(signed_area_f64(contour))
+	return f32(ring_area(contour))
 }
 
 // ShapeUtils.isClockWise.
 shape_is_clockwise :: proc "contextless" (contour: []Vec2) -> bool {
-	return signed_area_f64(contour) < 0
+	return ring_area(contour) < 0
 }
 
+// A ring's signed area in f64, positive when counter-clockwise (Y up).
 @(private = "file")
-signed_area_f64 :: proc "contextless" (contour: []Vec2) -> f64 {
-	n := len(contour)
+ring_area :: proc "contextless" (r: [][2]$T) -> f64 {
 	a: f64
-	for p, q := n - 1, 0; q < n; p, q = q, q + 1 {
-		a += f64(contour[p].x) * f64(contour[q].y) - f64(contour[q].x) * f64(contour[p].y)
+	for p, q := len(r) - 1, 0; q < len(r); p, q = q, q + 1 {
+		a += f64(r[p].x) * f64(r[q].y) - f64(r[q].x) * f64(r[p].y)
 	}
 	return a * 0.5
 }
 
 // ShapeUtils.triangulateShape: earcut (mapbox/earcut, as three.js carries
-// it) of an outline with holes. Appends three indices per triangle into the
-// outline's points followed by each hole's, in order, every triangle
-// counter-clockwise (Y up) whatever the input's winding; returns how many
-// triangles it appended. Holes of fewer than three points are skipped.
-triangulate_shape :: proc(contour: []Vec2, holes: [][]Vec2, triangles: ^[dynamic]u32) -> int {
-	n := len(contour)
-	for h in holes {
-		n += len(h)
-	}
-	data := make([][2]f64, n)
-	defer delete(data)
-	// Each kept hole's range of points (a skipped hole's points stay in
-	// `data`, so the indices still count them).
-	hole_starts := make([dynamic]int, 0, len(holes))
-	defer delete(hole_starts)
-	hole_ends := make([dynamic]int, 0, len(holes))
-	defer delete(hole_ends)
-	k := 0
-	for p in contour {
-		data[k] = {f64(p.x), f64(p.y)}
-		k += 1
-	}
-	for h in holes {
-		if len(h) >= 3 {
-			append(&hole_starts, k)
-			append(&hole_ends, k + len(h))
-		}
-		for p in h {
-			data[k] = {f64(p.x), f64(p.y)}
-			k += 1
-		}
-	}
+// it) of shape `i` of `s`, its outline with its holes. Appends three
+// indices per triangle into the shape's points (from its first: the
+// outline's, then each hole's), every triangle counter-clockwise (Y up);
+// returns how many triangles it appended.
+triangulate_shape :: proc(s: ^Shapes, i: int, triangles: ^[dynamic]u32) -> int {
+	sp: Shape_Points
+	defer shape_points_destroy(&sp)
+	shape_points(&sp, s, i)
 	before := len(triangles)
-	e := Earcut{triangles = triangles}
-	defer delete(e.nodes)
-	earcut(&e, data, len(contour), hole_starts[:], hole_ends[:])
+	triangulate_rings(&sp, sp.points[:], triangles)
 	return (len(triangles) - before) / 3
-}
-
-// ShapePath.toShapes: groups closed contours (as a font's glyph or an SVG
-// path gives them: any windings, nested, with counters like the holes of
-// "B" and "8") into shapes with holes by `fill_rule`'s containment. A
-// contour that does not change what is filled (a second copy, a
-// same-direction contour inside a nonzero fill) is dropped, and a solid
-// inside a hole is a shape of its own. Shapes refer to `contours`' slices
-// (not copied: keep them alive); free the result with `shapes_destroy`.
-shapes_from_contours :: proc(contours: [][]Vec2, fill_rule := Fill_Rule.Nonzero, allocator := context.allocator) -> []Shape {
-	Entry :: struct {
-		contour:        int,
-		lo, hi:         [2]f64,
-		interior:       [2]f64,
-		abs_area:       f64,
-		winding:        int,
-		container:      int, // an entry, -1 for none
-		exclude, hole:  bool,
-		shape:          int,
-	}
-	inside :: proc(w: int, rule: Fill_Rule) -> bool {
-		return w != 0 if rule == .Nonzero else w & 1 != 0
-	}
-	entries := make([dynamic]Entry, 0, len(contours))
-	defer delete(entries)
-	for c, ci in contours {
-		if len(c) < 3 {
-			continue
-		}
-		area := signed_area_f64(c)
-		if area == 0 {
-			continue
-		}
-		lo, hi := [2]f64{math.F64_MAX, math.F64_MAX}, [2]f64{-math.F64_MAX, -math.F64_MAX}
-		for p in c {
-			q := [2]f64{f64(p.x), f64(p.y)}
-			lo, hi = {min(lo.x, q.x), min(lo.y, q.y)}, {max(hi.x, q.x), max(hi.y, q.y)}
-		}
-		append(&entries, Entry{contour = ci, lo = lo, hi = hi, interior = interior_point(c, lo, hi), abs_area = abs(area), winding = -1 if area < 0 else 1, container = -1})
-	}
-	// Largest first: whatever could contain an entry comes before it.
-	slice.stable_sort_by(entries[:], proc(a, b: Entry) -> bool {return a.abs_area > b.abs_area})
-	for i in 0 ..< len(entries) {
-		e := &entries[i]
-		container_winding := 0
-		for j := i - 1; j >= 0; j -= 1 {
-			c := &entries[j]
-			if !(c.lo.x <= e.lo.x && c.lo.y <= e.lo.y && e.hi.x <= c.hi.x && e.hi.y <= c.hi.y) {
-				continue
-			}
-			if !point_in_polygon(e.interior, contours[c.contour]) {
-				continue
-			}
-			e.container = c.container if c.exclude else j
-			container_winding = c.winding
-			e.winding += container_winding
-			break
-		}
-		if inside(e.winding, fill_rule) == inside(container_winding, fill_rule) {
-			e.exclude = true
-		}
-	}
-	shape_count := 0
-	for &e in entries {
-		if e.exclude {
-			continue
-		}
-		e.hole = e.container >= 0 && !entries[e.container].hole
-		if !e.hole {
-			e.shape = shape_count
-			shape_count += 1
-		}
-	}
-	hole_counts := make([]int, shape_count)
-	defer delete(hole_counts)
-	for e in entries {
-		if !e.exclude && e.hole {
-			hole_counts[entries[e.container].shape] += 1
-		}
-	}
-	shapes := make([]Shape, shape_count, allocator)
-	for e in entries {
-		if !e.exclude && !e.hole {
-			shapes[e.shape] = {contour = contours[e.contour], holes = make([][]Vec2, hole_counts[e.shape], allocator)}
-			hole_counts[e.shape] = 0
-		}
-	}
-	for e in entries {
-		if !e.exclude && e.hole {
-			s := &shapes[entries[e.container].shape]
-			s.holes[hole_counts[entries[e.container].shape]] = contours[e.contour]
-			hole_counts[entries[e.container].shape] += 1
-		}
-	}
-	return shapes
-}
-
-shapes_destroy :: proc(shapes: []Shape, allocator := context.allocator) {
-	for s in shapes {
-		delete(s.holes, allocator)
-	}
-	delete(shapes, allocator)
-}
-
-// Even-odd ray casting, for simple polygons.
-@(private = "file")
-point_in_polygon :: proc "contextless" (p: [2]f64, polygon: []Vec2) -> bool {
-	inside := false
-	n := len(polygon)
-	for i, j := 0, n - 1; i < n; j, i = i, i + 1 {
-		a := [2]f64{f64(polygon[i].x), f64(polygon[i].y)}
-		b := [2]f64{f64(polygon[j].x), f64(polygon[j].y)}
-		if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
-			inside = !inside
-		}
-	}
-	return inside
-}
-
-// A point inside a simple polygon: its bounds' centre, or else the middle of
-// the first two crossings of a horizontal line through it (paper.js's
-// getInteriorPoint, as ShapePath.toShapes uses it).
-@(private = "file")
-interior_point :: proc(polygon: []Vec2, lo, hi: [2]f64) -> [2]f64 {
-	p := (lo + hi) * 0.5
-	if point_in_polygon(p, polygon) {
-		return p
-	}
-	first, second := math.F64_MAX, math.F64_MAX
-	count := 0
-	n := len(polygon)
-	for i in 0 ..< n {
-		a := [2]f64{f64(polygon[i].x), f64(polygon[i].y)}
-		b := [2]f64{f64(polygon[(i + 1) % n].x), f64(polygon[(i + 1) % n].y)}
-		if (a.y > p.y) != (b.y > p.y) {
-			x := a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y)
-			count += 1
-			if x < first {
-				first, second = x, first
-			} else if x < second {
-				second = x
-			}
-		}
-	}
-	if count > 1 {
-		p.x = (first + second) / 2
-	}
-	return p
 }
 
 // ---- ShapeGeometry and ExtrudeGeometry ---------------------------------------------------
 
 // ShapeGeometry(shapes): the shapes' flat triangulated faces at z = 0,
 // facing +Z, with three.js's UVs (the points' x and y).
-shape_geometry :: proc(g: ^Geometries, shapes: []Shape) -> Geometry_Id {
+shape_geometry :: proc(g: ^Geometries, shapes: ^Shapes) -> Geometry_Id {
 	clear(&g.scratch.vertices)
 	clear(&g.scratch.indices)
 	s: Shape_Points
 	defer shape_points_destroy(&s)
 	tris: [dynamic]u32
 	defer delete(tris)
-	for shape in shapes {
-		if !shape_points(&s, shape, merge = false) {
-			continue
-		}
+	for i in 0 ..< len(shapes.shapes) {
+		shape_points(&s, shapes, i)
 		base := u32(len(g.scratch.vertices))
 		clear(&tris)
 		triangulate_rings(&s, s.points[:], &tris)
@@ -268,19 +178,25 @@ shape_geometry :: proc(g: ^Geometries, shapes: []Shape) -> Geometry_Id {
 
 // ExtrudeGeometry's options, three.js's names and defaults
 // (`EXTRUDE_DEFAULT`). Without a bevel the shape spans z in [0, depth]; a
-// bevel adds `bevel_thickness` beyond both ends and grows the outline by
-// `bevel_size + bevel_offset`.
+// bevel adds `bevel_thickness` beyond both ends, its caps the shape offset
+// by `bevel_offset`, its walls by `bevel_size + bevel_offset` (out of the
+// shape: positive), on a quarter ellipse between. An offset is the shape's
+// straight skeleton's: each edge moved that far along its normal, corners
+// where their lines meet, parts too thin for it gone and parts it brings
+// together joined, so any offset makes a closed solid (three.js's bevel
+// turns thin parts inside out).
 Extrude_Options :: struct {
 	depth:           f32, // 1
 	steps:           int, // 1: segments along the depth
 	bevel_enabled:   bool, // true
 	bevel_thickness: f32, // 0.2
 	bevel_size:      f32, // 0.1 (three.js: bevelThickness - 0.1)
-	// 0. An inward offset (or bevel_size around a hole) must stay under half
-	// the thinnest feature, or the bevel turns it inside out (as in
-	// three.js): `Extruded.folded` counts the contours where it did.
-	bevel_offset:    f32,
+	bevel_offset:    f32, // 0
 	bevel_segments:  int, // 3
+	// 4 (SVG's stroke-miterlimit): a corner the offset sharpens to more
+	// than this many times its distance out (a miter) is cut square across
+	// its bisector instead (1: every corner that juts).
+	miter_limit:     f32,
 	// o3d's own: side faces meeting at less than this angle (radians) share
 	// smoothed normals, so curved walls and round bevels shade smoothly. 0
 	// is three.js's: every face flat. Caps always stay flat, with hard
@@ -295,6 +211,7 @@ EXTRUDE_DEFAULT :: Extrude_Options {
 	bevel_thickness = 0.2,
 	bevel_size      = 0.1,
 	bevel_segments  = 3,
+	miter_limit     = 4,
 }
 
 // An extruded geometry and three.js's two material groups, each a geometry
@@ -303,12 +220,6 @@ EXTRUDE_DEFAULT :: Extrude_Options {
 // (group 1: the walls and bevels) with two.
 Extruded :: struct {
 	geometry, caps, sides: Geometry_Id,
-	// How many of the shapes' contours (outlines and holes) the bevel folds
-	// over: at one of its rings' offsets an edge turns back, the contour's
-	// winding flips, or it crosses itself or another contour of its shape,
-	// where unbevelled it did not. The geometry is still made, as three.js
-	// makes it (caps with holes or overlaps, walls inside out); 0 is clean.
-	folded:                int,
 }
 
 // ExtrudeGeometry(shapes, options): front and back caps, side walls and
@@ -316,7 +227,7 @@ Extruded :: struct {
 // smoothed walls by `crease_angle`), and the caps' triangles before the
 // sides' (three.js orders its groups per shape; here each group is one
 // range). `steps` below 1 is taken as 1, `bevel_segments` below 0 as 0.
-extrude_geometry :: proc(g: ^Geometries, shapes: []Shape, options := EXTRUDE_DEFAULT) -> Extruded {
+extrude_geometry :: proc(g: ^Geometries, shapes: ^Shapes, options := EXTRUDE_DEFAULT) -> Extruded {
 	o := options
 	o.steps = max(o.steps, 1)
 	if !o.bevel_enabled || o.bevel_segments <= 0 {
@@ -324,8 +235,8 @@ extrude_geometry :: proc(g: ^Geometries, shapes: []Shape, options := EXTRUDE_DEF
 	}
 	x: Extruder
 	defer extruder_destroy(&x)
-	for shape in shapes {
-		extrude_shape(&x, shape, o)
+	for i in 0 ..< len(shapes.shapes) {
+		extrude_shape(&x, shapes, i, o)
 	}
 	// Every triangle's corners, caps then sides, in order.
 	side_normals(&x, o.crease_angle)
@@ -351,7 +262,6 @@ extrude_geometry :: proc(g: ^Geometries, shapes: []Shape, options := EXTRUDE_DEF
 	shared_vertices(&x, g)
 	whole := geometry_add(g, g.scratch.vertices[:], g.scratch.indices[:])
 	return {
-		folded   = x.folded,
 		geometry = whole,
 		caps     = geometry_group(g, whole, 0, u32(cap_indices)),
 		sides    = geometry_group(g, whole, u32(cap_indices), u32(len(g.scratch.indices) - cap_indices)),
@@ -434,9 +344,8 @@ vec3 :: #force_inline proc "contextless" (p: [3]f64) -> Vec3 {
 	return {f32(p.x), f32(p.y), f32(p.z)}
 }
 
-// A shape's points, rewound (the outline clockwise, holes counter-clockwise)
-// and, for extrusion, with repeated points merged: `points` is the outline
-// then each hole, `rings` their lengths (each 3 or more).
+// A shape's points in f64: `points` is the outline then each hole, `rings`
+// their lengths.
 @(private = "file")
 Shape_Points :: struct {
 	points: [dynamic][2]f64,
@@ -456,48 +365,17 @@ shape_points_destroy :: proc(s: ^Shape_Points) {
 	delete(s.nodes)
 }
 
-// Fills `s` from `shape`; false when its outline has fewer than 3 points.
+// Fills `s` from shape `i` of `shapes`.
 @(private = "file")
-shape_points :: proc(s: ^Shape_Points, shape: Shape, merge: bool) -> bool {
+shape_points :: proc(s: ^Shape_Points, shapes: ^Shapes, i: int) {
 	clear(&s.points)
 	clear(&s.rings)
-	add :: proc(s: ^Shape_Points, ring: []Vec2, clockwise, merge: bool) -> bool {
-		start := len(s.points)
-		for p in ring {
-			append(&s.points, [2]f64{f64(p.x), f64(p.y)})
+	for r in shapes.rings[shapes.shapes[i][0]:][:shapes.shapes[i][1]] {
+		for p in shapes.points[r[0]:][:r[1]] {
+			append(&s.points, wide(p))
 		}
-		r := s.points[start:]
-		if (ring_area(r) < 0) != clockwise {
-			slice.reverse(r)
-		}
-		if merge {
-			resize(&s.points, start + merge_overlapping_points(r))
-		} else if len(r) > 2 && r[len(r) - 1] == r[0] {
-			pop(&s.points) // ShapeUtils's removeDupEndPts
-		}
-		if len(s.points) - start < 3 {
-			resize(&s.points, start)
-			return false
-		}
-		append(&s.rings, len(s.points) - start)
-		return true
+		append(&s.rings, int(r[1]))
 	}
-	if !add(s, shape.contour, true, merge) {
-		return false
-	}
-	for h in shape.holes {
-		add(s, h, false, merge)
-	}
-	return true
-}
-
-@(private = "file")
-ring_area :: proc "contextless" (r: [][2]f64) -> f64 {
-	a: f64
-	for p, q := len(r) - 1, 0; q < len(r); p, q = q, q + 1 {
-		a += r[p].x * r[q].y - r[q].x * r[p].y
-	}
-	return a * 0.5
 }
 
 // ShapeUtils.triangulateShape over `s`'s rings, at `points` (its points or
@@ -517,42 +395,15 @@ triangulate_rings :: proc(s: ^Shape_Points, points: [][2]f64, triangles: ^[dynam
 	s.nodes = e.nodes // as it grew
 }
 
-// ExtrudeGeometry's mergeOverlappingPoints: drops points (wrapping around)
-// within a scaled 1e-10 of the one before; returns how many are left at the
-// front of `points`.
-@(private = "file")
-merge_overlapping_points :: proc(points: [][2]f64) -> int {
-	THRESHOLD_SQ :: 1e-10 * 1e-10
-	n := len(points)
-	if n == 0 {
-		return 0
-	}
-	prev := points[0]
-	for i := 1; i <= n && n > 0; i += 1 {
-		cur_i := i % n
-		cur := points[cur_i]
-		d := cur - prev
-		scale := max(abs(cur.x), abs(cur.y), abs(prev.x), abs(prev.y))
-		if d.x * d.x + d.y * d.y <= THRESHOLD_SQ * scale * scale {
-			copy(points[cur_i:], points[cur_i + 1:n])
-			n -= 1
-			i -= 1
-			continue
-		}
-		prev = cur
-	}
-	return n
-}
-
 @(private = "file")
 Side_Triangle :: struct {
 	corners:  [3]u32, // into `Extruder.points`
 	u_from_x: bool, // WorldUVGenerator's wall u: the quad's x, else its y
 }
 
-// ExtrudeGeometry's state across its shapes: every shape's layered points
-// (three.js's placeholder), the cap and side triangles into them, then the
-// sides' corner normals and the emitted vertices.
+// ExtrudeGeometry's state across its shapes: every shape's points (three.js's
+// placeholder), the cap and side triangles into them, then the sides'
+// corner normals and the emitted vertices.
 @(private = "file")
 Extruder :: struct {
 	points:  [dynamic][3]f64,
@@ -567,19 +418,30 @@ Extruder :: struct {
 	point_start:  [dynamic]u32,
 	by_point:     [dynamic]u32,
 	first:        [dynamic]u32,
-	shape:   Shape_Points,
-	moves:   [dynamic][2]f64,
-	ring:    [dynamic][2]f64,
-	faces:   [dynamic]u32,
-	folded:  int,
-	// For `folded_contours`: the contours' segments, and per contour
-	// whether it crosses unbevelled and whether it folds.
-	segments: [dynamic]Segment,
-	crossed:  [dynamic]bool,
-	folds:    [dynamic]bool,
-	// Scratch per bevel ring: the points moved, and the contours crossing there.
-	moved:         [dynamic][2]f64,
-	moved_crossed: [dynamic]bool,
+	shape:        Shape_Points,
+	// The bevel's rings from the caps to the walls (`path`), those of one
+	// direction in the order its wavefront reaches them (`run`), the
+	// wavefront (`lines`, `wave`), and the loops at the caps' and the
+	// walls' rings.
+	path:         [dynamic]Ring_Entry,
+	run:          [dynamic]Ring_Entry,
+	lines:        [dynamic]Wave_Line,
+	wave:         [dynamic]Wave_Vertex,
+	samples:      [dynamic]Wave_Sample,
+	edge_lines:   [dynamic][3]f64,
+	edge_from:    [dynamic]i32,
+	chain_a:      [dynamic]i32,
+	chain_b:      [dynamic]i32,
+	seen:         [dynamic]bool,
+	cap_loops:    Loops,
+	wall_loops:   Loops,
+	// Scratch for the caps: one outline and its holes, their points'
+	// indices, the loops' areas, and the triangles.
+	cap_shape:    Shape_Points,
+	cap_ids:      [dynamic][2]u32,
+	areas:        [dynamic]f64,
+	outline_of:   [dynamic]int,
+	faces:        [dynamic]u32,
 }
 
 @(private = "file")
@@ -594,255 +456,758 @@ extruder_destroy :: proc(x: ^Extruder) {
 	delete(x.by_point)
 	delete(x.first)
 	shape_points_destroy(&x.shape)
-	delete(x.moves)
-	delete(x.ring)
+	delete(x.path)
+	delete(x.run)
+	delete(x.lines)
+	delete(x.wave)
+	delete(x.samples)
+	delete(x.edge_lines)
+	delete(x.edge_from)
+	delete(x.chain_a)
+	delete(x.chain_b)
+	delete(x.seen)
+	loops_destroy(&x.cap_loops)
+	loops_destroy(&x.wall_loops)
+	shape_points_destroy(&x.cap_shape)
+	delete(x.cap_ids)
+	delete(x.areas)
+	delete(x.outline_of)
 	delete(x.faces)
-	delete(x.segments)
-	delete(x.crossed)
-	delete(x.folds)
-	delete(x.moved)
-	delete(x.moved_crossed)
 }
 
-// ExtrudeGeometry's addShape, without extrudePath.
+// A ring of the bevel: its offset `d` from the contours (out: positive),
+// the cos of its angle on the bevel's quarter (its z from the walls' ends
+// is bevel_thickness times it), its place from the caps (0) to the walls
+// (bevel_segments), and in a run its wavefront time (the offset's size).
 @(private = "file")
-extrude_shape :: proc(x: ^Extruder, shape: Shape, o: Extrude_Options) {
+Ring_Entry :: struct {
+	t, d, c, b: f64,
+}
+
+// Loops of the wavefront kept at a ring, in the contours' winding: their
+// points (where, and their back and front bevel points), and their
+// lengths.
+@(private = "file")
+Loops :: struct {
+	at:          [dynamic][2]f64,
+	ids:         [dynamic][2]u32,
+	lens:        [dynamic]int,
+}
+
+@(private = "file")
+loops_destroy :: proc(l: ^Loops) {
+	delete(l.at)
+	delete(l.ids)
+	delete(l.lens)
+}
+
+@(private = "file")
+loops_clear :: proc(l: ^Loops) {
+	clear(&l.at)
+	clear(&l.ids)
+	clear(&l.lens)
+}
+
+// ExtrudeGeometry's addShape, without extrudePath. The bevel's rings are
+// the shape offset as its straight skeleton offsets it (`wave_run`): each
+// edge moved its distance along its normal, corners mitered where its
+// lines meet (cut square to their bisector past `miter_limit`), parts
+// that close up gone, parts that meet joined; the caps and walls are the
+// loops at its first and last ring. The bevel's faces run between its
+// rings and the times its wavefront changes, so they meet the caps and
+// walls whatever the offsets do to the outline.
+@(private = "file")
+extrude_shape :: proc(x: ^Extruder, shapes: ^Shapes, i: int, o: Extrude_Options) {
 	s := &x.shape
-	if !shape_points(s, shape, merge = true) {
-		return
-	}
-	vertices := s.points[:]
-	vlen := len(vertices)
-	// Each point's bevel direction, within its own ring.
-	resize(&x.moves, vlen)
-	{
-		k := 0
-		for n in s.rings {
-			ring := vertices[k:][:n]
-			for i in 0 ..< n {
-				x.moves[k + i] = bevel_vec(ring[i], ring[(i + n - 1) % n], ring[(i + 1) % n])
-			}
-			k += n
-		}
-	}
-	moves := x.moves[:]
+	shape_points(s, shapes, i)
+	loops_clear(&x.cap_loops)
+	loops_clear(&x.wall_loops)
 	segs := o.bevel_segments
-	if segs > 0 {
-		x.folded += folded_contours(x, s.rings[:], vertices, moves, o)
+	clear(&x.path)
+	for b in 0 ..= segs {
+		a := f64(b) / f64(max(segs, 1)) * math.PI / 2
+		append(&x.path, Ring_Entry{d = f64(o.bevel_offset) + f64(o.bevel_size) * math.sin(a), c = math.cos(a), b = f64(b)})
 	}
-	base := u32(len(x.points))
-	add_layer :: proc(x: ^Extruder, vertices, moves: [][2]f64, bs, z: f64) {
-		for v, i in vertices {
-			p := v + moves[i] * bs
-			append(&x.points, [3]f64{p.x, p.y, z})
+	// Where the offsets cross the contours, a ring there: both directions'
+	// wavefronts start from it.
+	for k := 0; k + 1 < len(x.path); k += 1 {
+		d0, d1 := x.path[k].d, x.path[k + 1].d
+		if (d0 < 0 && d1 > 0) || (d0 > 0 && d1 < 0) {
+			a := math.asin(clamp(-f64(o.bevel_offset) / f64(o.bevel_size), 0, 1))
+			inject_at(&x.path, k + 1, Ring_Entry{d = 0, c = math.cos(a), b = a / (math.PI / 2) * f64(segs)})
+			break
 		}
 	}
-	bevel_at :: proc(o: Extrude_Options, b: int) -> (z, bs: f64) {
-		t := f64(b) / f64(o.bevel_segments)
-		return f64(o.bevel_thickness) * math.cos(t * math.PI / 2), f64(o.bevel_size) * math.sin(t * math.PI / 2) + f64(o.bevel_offset)
+	// A wavefront out of the shape for the offsets out (or none moving),
+	// one into it for those in.
+	outward, inward := false, false
+	for e in x.path {
+		outward ||= e.d > 0
+		inward ||= e.d < 0
 	}
-	// The caps' triangles: the outline as the outermost bevel ring has it.
-	clear(&x.faces)
-	if segs == 0 {
-		triangulate_rings(s, vertices, &x.faces)
-	} else {
-		clear(&x.ring)
-		for v, i in vertices {
-			append(&x.ring, v + moves[i] * f64(o.bevel_offset))
-		}
-		triangulate_rings(s, x.ring[:], &x.faces)
-	}
-	// Layers, back to front: the back bevel's rings, the walls' steps + 1,
-	// the front bevel's rings.
-	for b in 0 ..< segs {
-		z, bs := bevel_at(o, b)
-		add_layer(x, vertices, moves, bs, -z)
-	}
-	wall := f64(o.bevel_size) + f64(o.bevel_offset)
-	for st in 0 ..= o.steps {
-		add_layer(x, vertices, moves, wall, f64(o.depth) / f64(o.steps) * f64(st))
-	}
-	for b := segs - 1; b >= 0; b -= 1 {
-		z, bs := bevel_at(o, b)
-		add_layer(x, vertices, moves, bs, f64(o.depth) + z)
-	}
-	// Back faces reversed, front faces as triangulated.
-	top := base + u32(vlen * (o.steps + 2 * segs))
-	for t := 0; t + 2 < len(x.faces); t += 3 {
-		f := x.faces[t:][:3]
-		append(&x.caps, [3]u32{base + f[2], base + f[1], base + f[0]})
-	}
-	for t := 0; t + 2 < len(x.faces); t += 3 {
-		f := x.faces[t:][:3]
-		append(&x.caps, [3]u32{top + f[0], top + f[1], top + f[2]})
-	}
-	// Side walls, ring by ring.
-	layers := o.steps + 2 * segs
-	offset := 0
-	for n in s.rings {
-		for i := n - 1; i >= 0; i -= 1 {
-			j, k := i, (i + n - 1) % n
-			for st in 0 ..< layers {
-				l1, l2 := vlen * st, vlen * (st + 1)
-				a := base + u32(offset + j + l1)
-				b := base + u32(offset + k + l1)
-				c := base + u32(offset + k + l2)
-				d := base + u32(offset + j + l2)
-				pa, pb := x.points[a], x.points[b]
-				from_x := abs(pa.y - pb.y) < abs(pa.x - pb.x)
-				append(&x.sides, Side_Triangle{{a, b, d}, from_x}, Side_Triangle{{b, c, d}, from_x})
-			}
-		}
-		offset += n
-	}
-}
-
-// How many of a shape's contours fold at some bevel ring's offset (the
-// caps' ring at `bevel_offset`, each bevel ring, the walls' ring at
-// `bevel_size + bevel_offset`): an edge reversed against the contour's, the
-// winding flipped, or a crossing the unbevelled contours do not have.
-@(private = "file")
-folded_contours :: proc(x: ^Extruder, rings: []int, vertices, moves: [][2]f64, o: Extrude_Options) -> int {
-	resize(&x.crossed, len(rings))
-	resize(&x.folds, len(rings))
-	slice.fill(x.folds[:], false)
-	slice.fill(x.crossed[:], false)
-	crossings(x, rings, vertices, x.crossed[:])
-	resize(&x.moved, len(vertices))
-	resize(&x.moved_crossed, len(rings))
-	moved, crossed := x.moved[:], x.moved_crossed[:]
-	for b in 0 ..= o.bevel_segments {
-		bs := f64(o.bevel_size) + f64(o.bevel_offset) // the walls' ring
-		if b < o.bevel_segments {
-			t := f64(b) / f64(o.bevel_segments)
-			bs = f64(o.bevel_size) * math.sin(t * math.PI / 2) + f64(o.bevel_offset)
-		}
-		if bs == 0 {
+	for sigma in ([2]f64{1, -1}) {
+		if (sigma > 0 && inward && !outward) || (sigma < 0 && !inward) {
 			continue
 		}
-		for v, i in vertices {
-			moved[i] = v + moves[i] * bs
-		}
-		k := 0
-		for n, r in rings {
-			was, now := vertices[k:][:n], moved[k:][:n]
-			if (ring_area(was) < 0) != (ring_area(now) < 0) {
-				x.folds[r] = true
-			}
-			for i in 0 ..< n {
-				j := (i + 1) % n
-				e, f := was[j] - was[i], now[j] - now[i]
-				if e.x * f.x + e.y * f.y < 0 {
-					x.folds[r] = true
-				}
-			}
-			k += n
-		}
-		slice.fill(crossed, false)
-		crossings(x, rings, moved, crossed)
-		for c, r in crossed {
-			if c && !x.crossed[r] {
-				x.folds[r] = true
+		clear(&x.run)
+		for e in x.path {
+			if sigma * e.d >= 0 {
+				r := e
+				r.t = sigma * e.d
+				append(&x.run, r)
 			}
 		}
+		forward := x.run[0].t <= x.run[len(x.run) - 1].t
+		if !forward {
+			slice.reverse(x.run[:])
+		}
+		wave_run(x, s, o, sigma, forward)
 	}
-	count := 0
-	for f in x.folds {
-		count += int(f)
-	}
-	return count
+	add_caps(x)
+	add_walls(x, o)
+}
+
+// A line of the wavefront: a contour's edge (or a corner's chamfer)
+// moving along `normal` at unit speed, its points x at time t where
+// dot(normal, x) = c + t; `dir` runs along it the loop's way (`normal` is
+// to its left).
+@(private = "file")
+Wave_Line :: struct {
+	normal, dir: [2]f64,
+	c:           f64,
+}
+
+// A vertex of the wavefront: at `p` at time `t0`, moving at `v` (where its
+// lines meet); its loop's neighbours, the line from it to `next` (the one
+// before it is `prev`'s), its last sample (-1: none yet), when its edge to
+// `next` began, and whether its lines turn away from where they move
+// (reflex: it can run into an edge ahead).
+@(private = "file")
+Wave_Vertex :: struct {
+	p, v:             [2]f64,
+	t0:               f64,
+	prev, next, line: i32,
+	sample:           i32,
+	since:            f64,
+	reflex, alive:    bool,
+}
+
+// Where a vertex was at time `t` (a ring, or an event that changed its
+// edges): its back and front bevel points, and its sample before in the
+// band (-1: none).
+@(private = "file")
+Wave_Sample :: struct {
+	back, front: u32,
+	t:           f64,
+	prev:        i32,
+}
+
+// A wavefront event at time `t`: edge `a` -> `a.next` shrinks to nothing,
+// or (`split`) reflex vertex `a` runs into edge `b` -> `b.next`.
+@(private = "file")
+Wave_Event :: struct {
+	t:     f64,
+	a, b:  i32,
+	split: bool,
 }
 
 @(private = "file")
-Segment :: struct {
-	a, b:   [2]f64,
-	lo, hi: [2]f64,
-	ring:   i32,
-	i, n:   i32, // the edge's index in its ring, the ring's length
+dot2 :: #force_inline proc "contextless" (a, b: [2]f64) -> f64 {
+	return a.x * b.x + a.y * b.y
 }
 
-// Marks in `crossed` the contours whose edges at `points` properly cross
-// an edge (not a neighbour) of their own or another contour: a sweep over
-// the edges sorted by their left end.
 @(private = "file")
-crossings :: proc(x: ^Extruder, rings: []int, points: [][2]f64, crossed: []bool) {
-	clear(&x.segments)
+cross2 :: #force_inline proc "contextless" (a, b: [2]f64) -> f64 {
+	return a.x * b.y - a.y * b.x
+}
+
+@(private = "file")
+wave_at :: #force_inline proc "contextless" (w: Wave_Vertex, t: f64) -> [2]f64 {
+	return w.p + w.v * (t - w.t0)
+}
+
+// Where two lines' meeting moves: v with dot(n1, v) = dot(n2, v) = 1; a
+// line's own normal when they run on as one; still when they face each
+// other.
+@(private = "file")
+wave_velocity :: proc "contextless" (a, b: Wave_Line) -> [2]f64 {
+	det := cross2(a.normal, b.normal)
+	if abs(det) < 1e-12 {
+		return a.normal if dot2(a.normal, b.normal) > 0 else {}
+	}
+	return {(b.normal.y - a.normal.y) / det, (a.normal.x - b.normal.x) / det}
+}
+
+// The shape's contours as a wavefront moving out of it (`sigma` 1: each
+// contour's left, away from the shape) or into it (-1: the loops run the
+// other way), its vertices in the points' order. Moving, a reflex corner
+// whose miter passes `miter` times the offset (or that turns right back)
+// is cut: a chamfer line through it along the lines' bisector, from
+// nothing.
+@(private = "file")
+wave_init :: proc(x: ^Extruder, s: ^Shape_Points, sigma: f64, moving: bool, miter: f64) {
+	clear(&x.lines)
+	clear(&x.wave)
 	k := 0
-	for n, r in rings {
+	for n in s.rings {
+		ring := s.points[k:][:n]
+		base := i32(len(x.wave))
 		for i in 0 ..< n {
-			a, b := points[k + i], points[k + (i + 1) % n]
-			append(&x.segments, Segment{a, b, {min(a.x, b.x), min(a.y, b.y)}, {max(a.x, b.x), max(a.y, b.y)}, i32(r), i32(i), i32(n)})
+			next := (i + 1) % n if sigma > 0 else (i + n - 1) % n
+			prev := (i + n - 1) % n if sigma > 0 else (i + 1) % n
+			d := ring[next] - ring[i]
+			dir := d / math.sqrt(dot2(d, d))
+			normal := [2]f64{-dir.y, dir.x}
+			append(&x.lines, Wave_Line{normal, dir, dot2(normal, ring[i])})
+			append(&x.wave, Wave_Vertex{p = ring[i], prev = base + i32(prev), next = base + i32(next), line = i32(len(x.lines) - 1), sample = -1, alive = true})
 		}
 		k += n
 	}
-	slice.sort_by(x.segments[:], proc(s, t: Segment) -> bool {return s.lo.x < t.lo.x})
-	side :: proc(a, b, p: [2]f64, eps: f64) -> int {
-		d := (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
-		return 1 if d > eps else -1 if d < -eps else 0
+	for i in 0 ..< len(x.wave) {
+		w := x.wave[i]
+		l_in, l_out := x.lines[x.wave[w.prev].line], x.lines[w.line]
+		turn := cross2(l_in.dir, l_out.dir)
+		back := abs(turn) < 1e-12 && dot2(l_in.dir, l_out.dir) < 0 && dot2(l_in.normal, x.wave[w.next].p - w.p) <= 0
+		x.wave[i].reflex = turn < -1e-12 || back
+		x.wave[i].v = wave_velocity(l_in, l_out)
+		v := x.wave[i].v
+		if !moving || !x.wave[i].reflex || (!back && dot2(v, v) <= miter * miter) {
+			continue
+		}
+		nc := l_in.normal + l_out.normal
+		nc = nc / math.sqrt(dot2(nc, nc)) if dot2(nc, nc) > 1e-18 else l_in.dir
+		chamfer := Wave_Line{nc, {nc.y, -nc.x}, dot2(nc, w.p)}
+		append(&x.lines, chamfer)
+		append(&x.wave, Wave_Vertex{p = w.p, prev = i32(i), next = w.next, line = w.line, sample = -1, alive = true, v = wave_velocity(chamfer, l_out), reflex = cross2(chamfer.dir, l_out.dir) < -1e-12})
+		second := i32(len(x.wave) - 1)
+		x.wave[w.next].prev = second
+		x.wave[i].next, x.wave[i].line = second, i32(len(x.lines) - 1)
+		x.wave[i].v = wave_velocity(l_in, chamfer)
+		x.wave[i].reflex = cross2(l_in.dir, chamfer.dir) < -1e-12
 	}
-	segs := x.segments[:]
-	for s, i in segs {
-		for t in segs[i + 1:] {
-			if t.lo.x > s.hi.x {
+}
+
+// The wavefront from the contours through `x.run`'s rings (`forward`: from
+// the caps' side), drawing its bevel faces (`wave_face`) between them and
+// the events between them, and keeping the loops at the caps' and walls'
+// rings. A ring samples every vertex and closes every edge's face; an
+// event only the vertices whose edges it changes and those edges' faces.
+@(private = "file")
+wave_run :: proc(x: ^Extruder, s: ^Shape_Points, o: Extrude_Options, sigma: f64, forward: bool) {
+	lo, hi := s.points[0], s.points[0]
+	for p in s.points {
+		lo, hi = {min(lo.x, p.x), min(lo.y, p.y)}, {max(hi.x, p.x), max(hi.y, p.y)}
+	}
+	eps := 1e-9 * max(hi.x - lo.x, hi.y - lo.y, 1e-9)
+	entries := x.run[:]
+	wave_init(x, s, sigma, entries[len(entries) - 1].t > eps, f64(o.miter_limit))
+	clear(&x.samples)
+	f := Wave_Faces{o = o, forward = forward, reversed = sigma < 0, eps = eps}
+	segs := f64(o.bevel_segments)
+	t: f64
+	// A skeleton has at most a few events a vertex; past that the input is
+	// degenerate and the rest of the run takes none.
+	budget := 4 * len(x.wave) + 16
+	// The next event to the last ring: the wavefront changes only at events,
+	// so it stands until one is made.
+	last := entries[len(entries) - 1].t
+	ev, ok := wave_next_event(x, t, last, eps)
+	for e, k in entries {
+		for ; budget > 0; budget -= 1 {
+			if !ok || ev.t >= e.t {
 				break
 			}
-			if t.lo.y > s.hi.y || s.lo.y > t.hi.y {
-				continue
+			// Its place on the bevel's quarter, by its offset (nothing
+			// moves with no bevel size).
+			f.c = 1
+			if o.bevel_size != 0 {
+				u := clamp((sigma * ev.t - f64(o.bevel_offset)) / f64(o.bevel_size), 0, 1)
+				f.c = math.sqrt(1 - u * u)
 			}
-			if s.ring == t.ring && ((s.i + 1) % s.n == t.i || (t.i + 1) % t.n == s.i) {
-				continue // neighbours share a point
+			wave_event(x, &f, ev, k > 0)
+			t = ev.t
+			ev, ok = wave_next_event(x, t, last, eps)
+		}
+		f.c = e.c
+		for i in 0 ..< len(x.wave) {
+			if x.wave[i].alive {
+				wave_sample(x, &f, i32(i), e.t)
 			}
-			ls, lt := s.b - s.a, t.b - t.a
-			eps := 1e-9 * math.sqrt((ls.x * ls.x + ls.y * ls.y) * (lt.x * lt.x + lt.y * lt.y))
-			if side(s.a, s.b, t.a, eps) * side(s.a, s.b, t.b, eps) < 0 && side(t.a, t.b, s.a, eps) * side(t.a, t.b, s.b, eps) < 0 {
-				crossed[s.ring], crossed[t.ring] = true, true
+		}
+		if k > 0 {
+			for i in 0 ..< len(x.wave) {
+				if x.wave[i].alive {
+					wave_face(x, &f, i32(i), e.t)
+				}
 			}
+		}
+		for &w in x.wave {
+			if w.alive {
+				w.since = e.t
+				x.samples[w.sample].prev = -1
+			}
+		}
+		t = e.t
+		if e.b == 0 {
+			wave_loops(x, &x.cap_loops, f.reversed, eps)
+		}
+		if e.b == segs {
+			wave_loops(x, &x.wall_loops, f.reversed, eps)
 		}
 	}
 }
 
-// ExtrudeGeometry's getBevelVec: where `p` moves for a unit bevel, the
-// meeting of its two edges' lines shifted one unit to their left (outward
-// on a clockwise outline), kept from spiking past sqrt(2).
+// The first event from `t` to `until` (none: not ok): an edge shrinking to
+// nothing, or a reflex vertex running into an edge ahead of it (within its
+// ends then), edges first at a tie.
 @(private = "file")
-bevel_vec :: proc "contextless" (p, prev, next: [2]f64) -> [2]f64 {
-	EPSILON :: 2.220446049250313e-16
-	vp := p - prev
-	vn := next - p
-	vp_lensq := vp.x * vp.x + vp.y * vp.y
-	collinear := vp.x * vn.y - vp.y * vn.x
-	trans: [2]f64
-	shrink: f64
-	if abs(collinear) > EPSILON {
-		vp_len := math.sqrt(vp_lensq)
-		vn_len := math.sqrt(vn.x * vn.x + vn.y * vn.y)
-		prev_shift := [2]f64{prev.x - vp.y / vp_len, prev.y + vp.x / vp_len}
-		next_shift := [2]f64{next.x - vn.y / vn_len, next.y + vn.x / vn_len}
-		sf := ((next_shift.x - prev_shift.x) * vn.y - (next_shift.y - prev_shift.y) * vn.x) / collinear
-		trans = prev_shift + vp * sf - p
-		lensq := trans.x * trans.x + trans.y * trans.y
-		if lensq <= 2 {
-			return trans
+wave_next_event :: proc(x: ^Extruder, t, until, eps: f64) -> (ev: Wave_Event, ok: bool) {
+	ev.t = until
+	for a, ai in x.wave {
+		if !a.alive {
+			continue
 		}
-		shrink = math.sqrt(lensq / 2)
-	} else {
-		same := false
-		if vp.x > EPSILON {
-			same = vn.x > EPSILON
-		} else if vp.x < -EPSILON {
-			same = vn.x < -EPSILON
-		} else {
-			same = math.sign(vp.y) == math.sign(vn.y)
+		b := x.wave[a.next]
+		l := x.lines[a.line]
+		rate := dot2(b.v - a.v, l.dir)
+		if rate >= 0 {
+			continue
 		}
-		if same {
-			trans = {-vp.y, vp.x}
-			shrink = math.sqrt(vp_lensq)
-		} else {
-			trans = vp
-			shrink = math.sqrt(vp_lensq / 2)
+		te := t + max(dot2(wave_at(b, t) - wave_at(a, t), l.dir), 0) / -rate
+		if te <= ev.t {
+			ev, ok = {te, i32(ai), a.next, false}, true
 		}
 	}
-	return trans / shrink
+	// The live edges' lines laid out for the sweep below: each reflex vertex
+	// against all of them, the extent checked only for the few that it
+	// would meet in time.
+	clear(&x.edge_lines)
+	clear(&x.edge_from)
+	for p, pi in x.wave {
+		if p.alive {
+			l := x.lines[p.line]
+			append(&x.edge_lines, [3]f64{l.normal.x, l.normal.y, l.c + t})
+			append(&x.edge_from, i32(pi))
+		}
+	}
+	for v, vi in x.wave {
+		if !v.alive || !v.reflex {
+			continue
+		}
+		pv := wave_at(v, t)
+		for e, k in x.edge_lines {
+			rate := e.x * v.v.x + e.y * v.v.y - 1
+			gap := e.x * pv.x + e.y * pv.y - e.z
+			if rate >= 0 || gap < -eps {
+				continue
+			}
+			te := t + max(gap, 0) / -rate
+			if te > ev.t || (ok && te == ev.t) {
+				continue
+			}
+			pi := x.edge_from[k]
+			p := x.wave[pi]
+			if pi == i32(vi) || p.next == i32(vi) {
+				continue
+			}
+			l := x.lines[p.line]
+			q := x.wave[p.next]
+			hit, from := wave_at(v, te), wave_at(p, te)
+			along, length := dot2(hit - from, l.dir), dot2(wave_at(q, te) - from, l.dir)
+			// At a neighbour's end of its edge it is that neighbour's
+			// edge shrinking (an edge event), not a split.
+			lo := eps if pi == v.next else -eps
+			hi := length - eps if p.next == v.prev else length + eps
+			if along < lo || along > hi {
+				continue
+			}
+			ev, ok = {te, i32(vi), pi, true}, true
+		}
+	}
+	return
+}
+
+// A vertex where lines `a` and `b` meet at `p` at time `t`.
+@(private = "file")
+wave_vertex :: proc(x: ^Extruder, p: [2]f64, t: f64, prev, next, line_in, line: i32) -> i32 {
+	a, b := x.lines[line_in], x.lines[line]
+	append(&x.wave, Wave_Vertex{p = p, t0 = t, v = wave_velocity(a, b), prev = prev, next = next, line = line, sample = -1, reflex = cross2(a.dir, b.dir) < -1e-12, alive = true})
+	i := i32(len(x.wave) - 1)
+	x.wave[prev].next, x.wave[next].prev = i, i
+	return i
+}
+
+// An event at its time on the bevel (`drawing`: within the run's rings):
+// the vertices whose edges it changes are sampled there and those edges'
+// faces closed, then the event made (`wave_apply`) and its new vertices
+// and edges start there.
+@(private = "file")
+wave_event :: proc(x: ^Extruder, f: ^Wave_Faces, ev: Wave_Event, drawing: bool) {
+	if drawing {
+		a := x.wave[ev.a]
+		// The vertices to sample, and the edges (by their first vertex) that
+		// end.
+		touched: [5]i32
+		ending: [3]i32
+		if ev.split {
+			p := x.wave[ev.b]
+			touched = {a.prev, ev.a, a.next, ev.b, p.next}
+			ending = {a.prev, ev.a, ev.b}
+		} else {
+			b := x.wave[ev.b]
+			touched = {a.prev, ev.a, ev.b, b.next, b.next}
+			ending = {a.prev, ev.a, ev.b}
+		}
+		for v in touched {
+			wave_sample(x, f, v, ev.t)
+		}
+		for e, i in ending {
+			if i == 0 || (e != ending[0] && (i == 1 || e != ending[1])) {
+				wave_face(x, f, e, ev.t)
+			}
+		}
+	}
+	first := len(x.wave)
+	wave_apply(x, ev)
+	if !drawing {
+		return
+	}
+	for i in first ..< len(x.wave) {
+		if x.wave[i].alive {
+			wave_sample(x, f, i32(i), ev.t)
+			x.wave[i].since = ev.t
+			x.wave[x.wave[i].prev].since = ev.t
+		}
+	}
+}
+
+// The event: a shrunk edge's ends become one vertex where its neighbours'
+// lines meet; a reflex vertex splits the edge it ran into, its loop then
+// two (or two loops one). Loops left with under three vertices are gone.
+@(private = "file")
+wave_apply :: proc(x: ^Extruder, ev: Wave_Event) {
+	a := x.wave[ev.a]
+	if !ev.split {
+		x.wave[ev.a].alive, x.wave[ev.b].alive = false, false
+		if a.prev == ev.b {
+			return
+		}
+		b := x.wave[ev.b]
+		c := wave_vertex(x, wave_at(a, ev.t), ev.t, a.prev, b.next, x.wave[a.prev].line, b.line)
+		wave_prune(x, c)
+		return
+	}
+	p := x.wave[ev.b]
+	hit := wave_at(a, ev.t)
+	x.wave[ev.a].alive = false
+	// Before the hit: the vertex's way in, then the edge on to its end; after
+	// it: the edge from its start, then the vertex's way out.
+	one := wave_vertex(x, hit, ev.t, a.prev, p.next, x.wave[a.prev].line, p.line)
+	two := wave_vertex(x, hit, ev.t, ev.b, a.next, p.line, a.line)
+	wave_prune(x, one)
+	wave_prune(x, two)
+}
+
+// Removes the loop through `i` when it has fewer than three vertices.
+@(private = "file")
+wave_prune :: proc(x: ^Extruder, i: i32) {
+	n, j := 1, x.wave[i].next
+	for ; j != i && n < 3; j = x.wave[j].next {
+		n += 1
+	}
+	if j != i {
+		return
+	}
+	for k := 0; k < n; k += 1 {
+		x.wave[j].alive = false
+		j = x.wave[j].next
+	}
+}
+
+// How a run draws its faces: the bevel's options, the faces' winding (the
+// rings' order from the caps, `forward`; the loops' way, `reversed` into
+// the shape), the cos of the bevel's quarter where it samples, and how
+// small an area is none.
+@(private = "file")
+Wave_Faces :: struct {
+	o:                 Extrude_Options,
+	forward, reversed: bool,
+	c, eps:            f64,
+}
+
+// Vertex `i` sampled at time `t` (once a time): its back and front bevel
+// points there.
+@(private = "file")
+wave_sample :: proc(x: ^Extruder, f: ^Wave_Faces, i: i32, t: f64) {
+	w := &x.wave[i]
+	if w.sample >= 0 && x.samples[w.sample].t == t {
+		return
+	}
+	p := wave_at(w^, t)
+	th, depth := f64(f.o.bevel_thickness), f64(f.o.depth)
+	back := add_point(x, {p.x, p.y, -th * f.c})
+	front := add_point(x, {p.x, p.y, depth + th * f.c})
+	append(&x.samples, Wave_Sample{back, front, t, w.sample})
+	w.sample = i32(len(x.samples) - 1)
+}
+
+@(private = "file")
+add_point :: #force_inline proc(x: ^Extruder, p: [3]f64) -> u32 {
+	append(&x.points, p)
+	return u32(len(x.points) - 1)
+}
+
+// The face edge `a` -> `a.next` swept from when it began to time `t` (both
+// ends sampled there), on the back and front bevels: its ends' samples
+// between (each a chain, in time), zipped into triangles from the caps'
+// side as three.js winds its layers' quads.
+@(private = "file")
+wave_face :: proc(x: ^Extruder, f: ^Wave_Faces, a: i32, t: f64) {
+	w := x.wave[a]
+	if w.since >= t {
+		return
+	}
+	chain :: proc(x: ^Extruder, out: ^[dynamic]i32, from: i32, since: f64) {
+		clear(out)
+		for j := from; j >= 0 && x.samples[j].t >= since; j = x.samples[j].prev {
+			append(out, j)
+		}
+	}
+	chain(x, &x.chain_a, w.sample, w.since)
+	chain(x, &x.chain_b, x.wave[w.next].sample, w.since)
+	// Chains run back in time: the back bevel's lower rings are the caps'
+	// side (early when forward), the front's the walls'.
+	wave_zip(x, f, x.chain_a[:], x.chain_b[:], !f.forward, false)
+	wave_zip(x, f, x.chain_a[:], x.chain_b[:], f.forward, true)
+}
+
+// Triangles between two chains of samples (`a`'s and `b`'s, late to early;
+// `late_low`: the late ones are the lower rings), advancing the side whose
+// next sample is lower (b at a tie, as three.js's quads split), wound as
+// `side_quad`'s.
+@(private = "file")
+wave_zip :: proc(x: ^Extruder, f: ^Wave_Faces, a, b: []i32, late_low, front: bool) {
+	m, n := len(a) - 1, len(b) - 1
+	if m < 0 || n < 0 {
+		return
+	}
+	// The k-th sample from the lower rings, and how high it is.
+	at :: proc(x: ^Extruder, chain: []i32, k: int, late_low, front: bool) -> (u32, f64) {
+		s := x.samples[chain[k if late_low else len(chain) - 1 - k]]
+		return s.front if front else s.back, -s.t if late_low else s.t
+	}
+	a0, _ := at(x, a, 0, late_low, front)
+	b0, _ := at(x, b, 0, late_low, front)
+	pa, pb := x.points[a0], x.points[b0]
+	if pa.xy == pb.xy {
+		am, _ := at(x, a, m, late_low, front)
+		bn, _ := at(x, b, n, late_low, front)
+		pa, pb = x.points[am], x.points[bn]
+	}
+	from_x := abs(pa.y - pb.y) < abs(pa.x - pb.x)
+	for i, j := 0, 0; i < m || j < n; {
+		ai, _ := at(x, a, i, late_low, front)
+		bj, _ := at(x, b, j, late_low, front)
+		advance_a := j >= n
+		if !advance_a && i < m {
+			_, ha := at(x, a, i + 1, late_low, front)
+			_, hb := at(x, b, j + 1, late_low, front)
+			advance_a = ha < hb
+		}
+		if advance_a {
+			an, _ := at(x, a, i + 1, late_low, front)
+			if f.reversed {
+				side_triangle(x, {ai, bj, an}, from_x, f.eps)
+			} else {
+				side_triangle(x, {ai, an, bj}, from_x, f.eps)
+			}
+			i += 1
+		} else {
+			bn, _ := at(x, b, j + 1, late_low, front)
+			if f.reversed {
+				side_triangle(x, {bj, bn, ai}, from_x, f.eps)
+			} else {
+				side_triangle(x, {bj, ai, bn}, from_x, f.eps)
+			}
+			j += 1
+		}
+	}
+}
+
+// A side quad from edge a -> b at its lower ring (`a_lo`, `b_lo`) to its
+// upper (three.js's layer order), the loop running the contours' way or
+// (`reversed`) against it; its triangles that have an area.
+@(private = "file")
+side_quad :: proc(x: ^Extruder, a_lo, b_lo, a_hi, b_hi: u32, reversed: bool, eps: f64) {
+	pa, pb := x.points[a_lo], x.points[b_lo]
+	if pa.xy == pb.xy {
+		pa, pb = x.points[a_hi], x.points[b_hi]
+	}
+	from_x := abs(pa.y - pb.y) < abs(pa.x - pb.x)
+	if reversed {
+		side_triangle(x, {a_lo, b_lo, a_hi}, from_x, eps)
+		side_triangle(x, {b_lo, b_hi, a_hi}, from_x, eps)
+	} else {
+		side_triangle(x, {b_lo, a_lo, b_hi}, from_x, eps)
+		side_triangle(x, {a_lo, a_hi, b_hi}, from_x, eps)
+	}
+}
+
+@(private = "file")
+side_triangle :: proc(x: ^Extruder, corners: [3]u32, from_x: bool, eps: f64) {
+	a, b, c := x.points[corners[0]], x.points[corners[1]], x.points[corners[2]]
+	u, v := b - a, c - a
+	n := [3]f64{u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z, u.x * v.y - u.y * v.x}
+	if n.x * n.x + n.y * n.y + n.z * n.z <= eps * eps * eps * eps {
+		return
+	}
+	append(&x.sides, Side_Triangle{corners, from_x})
+}
+
+// The wavefront's live loops into `loops`, each from its first vertex in
+// the contours' winding (`reversed`: against the loops' way), points that
+// fall together kept once; loops of under three points left out.
+@(private = "file")
+wave_loops :: proc(x: ^Extruder, loops: ^Loops, reversed: bool, eps: f64) {
+	resize(&x.seen, len(x.wave))
+	slice.fill(x.seen[:], false)
+	for w, i in x.wave {
+		if !w.alive || x.seen[i] {
+			continue
+		}
+		start := len(loops.at)
+		for j := i32(i); !x.seen[j]; j = x.wave[j].prev if reversed else x.wave[j].next {
+			x.seen[j] = true
+			q := x.samples[x.wave[j].sample]
+			p := x.points[q.back].xy
+			if len(loops.at) > start {
+				d := p - loops.at[len(loops.at) - 1]
+				if dot2(d, d) <= eps * eps {
+					continue
+				}
+			}
+			append(&loops.at, p)
+			append(&loops.ids, [2]u32{q.back, q.front})
+		}
+		for len(loops.at) - start > 1 {
+			d := loops.at[start] - loops.at[len(loops.at) - 1]
+			if dot2(d, d) > eps * eps {
+				break
+			}
+			pop(&loops.at)
+			pop(&loops.ids)
+		}
+		if len(loops.at) - start < 3 {
+			resize(&loops.at, start)
+			resize(&loops.ids, start)
+			continue
+		}
+		append(&loops.lens, len(loops.at) - start)
+	}
+}
+
+// The caps from the loops at the caps' ring: each outline (clockwise) with
+// the holes inside it (the smallest outline about each), triangulated,
+// the back's reversed.
+@(private = "file")
+add_caps :: proc(x: ^Extruder) {
+	l := &x.cap_loops
+	resize(&x.areas, len(l.lens))
+	resize(&x.outline_of, len(l.lens))
+	k := 0
+	for n, r in l.lens {
+		x.areas[r] = ring_area(l.at[k:][:n])
+		k += n
+	}
+	// Each hole's outline: the smallest one about its first point.
+	k = 0
+	for n, r in l.lens {
+		x.outline_of[r] = -1
+		if x.areas[r] > 0 {
+			best := max(f64)
+			j := 0
+			for m, q in l.lens {
+				if x.areas[q] < 0 && -x.areas[q] < best && inside_loop(l.at[k], l.at[j:][:m]) {
+					best, x.outline_of[r] = -x.areas[q], q
+				}
+				j += m
+			}
+		}
+		k += n
+	}
+	s := &x.cap_shape
+	k = 0
+	for n, r in l.lens {
+		if x.areas[r] >= 0 {
+			k += n
+			continue
+		}
+		clear(&s.points)
+		clear(&s.rings)
+		clear(&x.cap_ids)
+		append(&s.points, ..l.at[k:][:n])
+		append(&x.cap_ids, ..l.ids[k:][:n])
+		append(&s.rings, n)
+		j := 0
+		for m, q in l.lens {
+			if x.outline_of[q] == r {
+				append(&s.points, ..l.at[j:][:m])
+				append(&x.cap_ids, ..l.ids[j:][:m])
+				append(&s.rings, m)
+			}
+			j += m
+		}
+		clear(&x.faces)
+		triangulate_rings(s, s.points[:], &x.faces)
+		for t := 0; t + 2 < len(x.faces); t += 3 {
+			f := x.faces[t:][:3]
+			append(&x.caps, [3]u32{x.cap_ids[f[2]][0], x.cap_ids[f[1]][0], x.cap_ids[f[0]][0]})
+		}
+		for t := 0; t + 2 < len(x.faces); t += 3 {
+			f := x.faces[t:][:3]
+			append(&x.caps, [3]u32{x.cap_ids[f[0]][1], x.cap_ids[f[1]][1], x.cap_ids[f[2]][1]})
+		}
+		k += n
+	}
+}
+
+// Whether `p` is inside a loop (even-odd).
+@(private = "file")
+inside_loop :: proc "contextless" (p: [2]f64, loop: [][2]f64) -> bool {
+	inside := false
+	for i, j := 0, len(loop) - 1; i < len(loop); j, i = i, i + 1 {
+		a, b := loop[i], loop[j]
+		if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+			inside = !inside
+		}
+	}
+	return inside
+}
+
+// The walls along the loops at the walls' ring, from the back bevel's end
+// (z 0) to the front's (z depth) in `steps`.
+@(private = "file")
+add_walls :: proc(x: ^Extruder, o: Extrude_Options) {
+	l := &x.wall_loops
+	k := 0
+	for n in l.lens {
+		ids := l.ids[k:][:n]
+		for i in 0 ..< n {
+			a, b := ids[i], ids[(i + 1) % n]
+			a_lo, b_lo := a[0], b[0]
+			for st in 1 ..= o.steps {
+				a_hi, b_hi := a[1], b[1]
+				if st < o.steps {
+					z := f64(o.depth) / f64(o.steps) * f64(st)
+					a_hi = add_point(x, {x.points[a[0]].x, x.points[a[0]].y, z})
+					b_hi = add_point(x, {x.points[b[0]].x, x.points[b[0]].y, z})
+				}
+				side_quad(x, a_lo, b_lo, a_hi, b_hi, false, 0)
+				a_lo, b_lo = a_hi, b_hi
+			}
+		}
+		k += n
+	}
 }
 
 // A triangle's unit normal (counter-clockwise front), +Z when degenerate.

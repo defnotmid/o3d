@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 11 "../../ovg/shaders/curves.slang"
+#line 11 "../../ocurves/curves.slang"
 float curves_f_0(uint device* words_0, uint i_0)
 {
 
@@ -150,108 +150,108 @@ float curves_solve_monotone_0(float a_0, float b_0, float c_1, float v_0)
 }
 
 
-#line 471
+#line 482
 int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 {
 
-#line 471
+#line 482
     bool _S7;
     if((p_0.x) >= (curves_f_0(words_3, s_2 + 10U)))
     {
 
-#line 472
+#line 483
         _S7 = true;
 
-#line 472
+#line 483
     }
     else
     {
 
-#line 472
+#line 483
         _S7 = (p_0.y) < 0.0f;
 
-#line 472
+#line 483
     }
 
-#line 472
+#line 483
     if(_S7)
     {
 
-#line 472
+#line 483
         _S7 = true;
 
-#line 472
+#line 483
     }
     else
     {
 
-#line 472
+#line 483
         _S7 = (p_0.y) >= (curves_f_0(words_3, s_2 + 11U));
 
-#line 472
+#line 483
     }
 
-#line 472
+#line 483
     if(_S7)
     {
 
-#line 472
+#line 483
         return int(0);
     }
 
-#line 473
+#line 484
     Curves_Span_0 g_2 = curves_span_0(words_3, s_2, p_0, 0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 473
+#line 484
     thread Curves_Span_0 _S8 = g_2;
 
-#line 473
+#line 484
     uint _S9 = curves_cell_0(s_2, &_S8, g_2.i0_0, g_2.j0_0);
 
 
     int _S10 = int(words_3[_S9 + 2U]);
     uint _S11 = _S9 + 1U;
 
-#line 477
+#line 488
     uint _S12 = s_2 + words_3[_S9] + words_3[_S11];
     uint _S13 = words_3[_S9 + 3U];
 
-#line 478
+#line 489
     uint k_0 = 0U;
 
-#line 478
+#line 489
     int w_0 = _S10;
     for(;;)
     {
 
-#line 479
+#line 490
         if(k_0 < _S13)
         {
         }
         else
         {
 
-#line 479
+#line 490
             break;
         }
 
-#line 480
+#line 491
         uint _S14 = _S12 + 2U * k_0;
 
-#line 480
+#line 491
         if((curves_f_0(words_3, _S14)) <= (p_0.y))
         {
 
-#line 480
+#line 491
             w_0 = w_0 + int(words_3[_S14 + 1U]);
 
-#line 480
+#line 491
         }
 
-#line 479
+#line 490
         k_0 = k_0 + 1U;
 
-#line 479
+#line 490
     }
 
 
@@ -259,176 +259,182 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
     uint _S16 = s_2 + words_3[_S9];
     uint _S17 = words_3[_S11];
 
-#line 484
+#line 495
     k_0 = 0U;
     for(;;)
     {
 
-#line 485
+#line 496
         if(k_0 < _S17)
         {
         }
         else
         {
 
-#line 485
+#line 496
             break;
         }
 
-#line 486
+#line 497
         uint c_2 = _S15 + 6U * words_3[_S16 + k_0];
         float2 p1_0 = curves_point_0(words_3, c_2, p_0);
         float2 p2_0 = curves_point_0(words_3, c_2 + 2U, p_0);
         float2 p3_0 = curves_point_0(words_3, c_2 + 4U, p_0);
         float _S18 = p1_0.y;
 
-#line 490
+#line 501
         float _S19 = p3_0.y;
         float _S20 = max(_S18, _S19);
         if(0.0f < (min(_S18, _S19)))
         {
 
-#line 492
+#line 503
             _S7 = true;
 
-#line 492
+#line 503
         }
         else
         {
 
-#line 492
+#line 503
             _S7 = 0.0f >= _S20;
 
-#line 492
+#line 503
         }
 
-#line 492
+#line 503
         bool _S21;
 
-#line 492
+#line 503
         if(_S7)
         {
 
-#line 492
+#line 503
             _S21 = true;
 
-#line 492
+#line 503
         }
         else
         {
 
-#line 492
+#line 503
             _S21 = (max(p1_0.x, p3_0.x)) <= 0.0f;
 
-#line 492
+#line 503
         }
 
-#line 492
+#line 503
         if(_S21)
         {
 
-#line 492
+#line 503
             k_0 = k_0 + 1U;
 
-#line 485
+#line 496
             continue;
         }
 
-#line 493
+#line 504
         float _S22 = p2_0.y;
 
-#line 493
+#line 504
         float t_0 = curves_solve_monotone_0(_S18 - 2.0f * _S22 + _S19, 2.0f * (_S22 - _S18), _S18, 0.0f);
         float _S23 = p1_0.x;
 
-#line 494
+#line 505
         float _S24 = p2_0.x;
 
-#line 494
+#line 505
         int w_1;
 
-#line 494
+#line 505
         if((((_S23 - 2.0f * _S24 + p3_0.x) * t_0 + 2.0f * (_S24 - _S23)) * t_0 + _S23) > 0.0f)
         {
 
-#line 495
+#line 506
             if(_S19 > _S18)
             {
 
-#line 495
+#line 506
                 w_1 = int(1);
 
-#line 495
+#line 506
             }
             else
             {
 
-#line 495
+#line 506
                 w_1 = int(-1);
 
-#line 495
+#line 506
             }
 
-#line 495
+#line 506
             w_1 = w_0 + w_1;
 
-#line 494
+#line 505
         }
         else
         {
 
-#line 494
+#line 505
             w_1 = w_0;
 
-#line 494
+#line 505
         }
 
-#line 494
+#line 505
         w_0 = w_1;
 
-#line 485
+#line 496
         k_0 = k_0 + 1U;
 
-#line 485
+#line 496
     }
 
-#line 498
+#line 509
     return w_0;
 }
 
 
-#line 1009 "o3d.slang"
-bool curves_inside_0(uint device* words_4, uint s_3, float2 rc_2, bool even_odd_0)
+#line 1103 "o3d.slang"
+int curve_entry_rule_0(uint entry_0)
 {
 
-#line 1010
-    int w_2 = curves_winding_0(words_4, s_3, rc_2);
+#line 1104
+    return int(entry_0 >> 31U);
+}
 
-#line 1010
+
+#line 106 "../../ocurves/curves.slang"
+bool curves_fill_inside_0(int w_2, int rule_0)
+{
+
+#line 106
     bool _S25;
-    if(even_odd_0)
+    if(rule_0 == int(1))
     {
 
-#line 1011
+#line 107
         _S25 = (w_2 & int(1)) != int(0);
 
-#line 1011
+#line 107
     }
     else
     {
 
-#line 1011
+#line 107
         _S25 = w_2 != int(0);
 
-#line 1011
+#line 107
     }
 
-#line 1011
+#line 107
     return _S25;
 }
 
 
-#line 241
+#line 248 "o3d.slang"
 struct VS_Out_0
 {
     float4 position_0;
@@ -440,7 +446,7 @@ struct VS_Out_0
 };
 
 
-#line 279
+#line 286
 struct VS_Curves_Out_0
 {
     float4 position_1;
@@ -453,11 +459,11 @@ struct VS_Curves_Out_0
 };
 
 
-#line 289
+#line 296
 VS_Out_0 curves_surface_in_0(const VS_Curves_Out_0 thread* i_2)
 {
 
-#line 290
+#line 297
     thread VS_Out_0 o_0;
     (&o_0)->position_0 = i_2->position_1;
     (&o_0)->world_0 = i_2->world_1;
@@ -496,7 +502,7 @@ struct Material_0
 };
 
 
-#line 221
+#line 228
 struct KernelContext_0
 {
     Material_0 constant* material_0;
@@ -508,114 +514,114 @@ struct KernelContext_0
 };
 
 
-#line 1083
+#line 1195
 float shadow_depth_0(const VS_Out_0 thread* i_3, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1084
+#line 1196
     if(((kernelContext_0->material_0->flags_0) & 2048U) != 0U)
     {
 
-#line 1084
+#line 1196
         uint mask_slot_0;
 
 
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
-#line 1087
+#line 1199
             mask_slot_0 = 0U;
 
-#line 1087
+#line 1199
         }
         else
         {
 
-#line 1087
+#line 1199
             mask_slot_0 = 6U;
 
-#line 1087
+#line 1199
         }
 
-#line 1087
+#line 1199
         float2 raw_0;
         if((((kernelContext_0->material_0->uv_sets_0) >> mask_slot_0) & 1U) != 0U)
         {
 
-#line 1088
+#line 1200
             raw_0 = i_3->uv1_0;
 
-#line 1088
+#line 1200
         }
         else
         {
 
-#line 1088
+#line 1200
             raw_0 = i_3->uv_0;
 
-#line 1088
+#line 1200
         }
         float a_1 = kernelContext_0->material_0->color_2.w;
 
-#line 1089
+#line 1201
         float a_2;
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
             float3 _S26 = float3(raw_0, 1.0f);
 
-#line 1093
+#line 1205
             a_2 = a_1 * ((kernelContext_0->colorMap_texture_0).sample((kernelContext_0->colorMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[0U].xyz, _S26), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[1U].xyz, _S26))), level((0.0f)))).w;
 
-#line 1090
+#line 1202
         }
         else
         {
 
-#line 1090
+#line 1202
             a_2 = a_1;
 
-#line 1090
+#line 1202
         }
 
-#line 1096
+#line 1208
         if(((kernelContext_0->material_0->flags_0) & 16384U) != 0U)
         {
 
             float3 _S27 = float3(raw_0, 1.0f);
 
-#line 1099
+#line 1211
             a_2 = a_2 * ((kernelContext_0->shadowAlphaMap_texture_0).sample((kernelContext_0->shadowAlphaMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[12U].xyz, _S27), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[13U].xyz, _S27))), level((0.0f)))).y;
 
-#line 1096
+#line 1208
         }
 
-#line 1102
+#line 1214
         if(a_2 < (kernelContext_0->material_0->alpha_cutoff_0))
         {
 
-#line 1103
+#line 1215
             discard_fragment();
 
-#line 1102
+#line 1214
         }
 
-#line 1084
+#line 1196
     }
 
-#line 1106
+#line 1218
     return i_3->position_0.z;
 }
 
 
-#line 1106
+#line 1218
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 1106
+#line 1218
 struct pixelInput_0
 {
     float3 world_2 [[user(TEXCOORD)]];
@@ -629,70 +635,70 @@ struct pixelInput_0
 [[fragment]] pixelOutput_0 fs_shadow_curves(pixelInput_0 _S28 [[stage_in]], float4 position_2 [[position]], Material_0 constant* material_1 [[buffer(0)]], uint device* shadowCurveWords_1 [[buffer(1)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> shadowAlphaMap_texture_1 [[texture(1)]], sampler shadowAlphaMap_sampler_1 [[sampler(1)]])
 {
 
-#line 1116
+#line 1228
     thread KernelContext_0 kernelContext_1;
 
-#line 1116
+#line 1228
     (&kernelContext_1)->material_0 = material_1;
 
-#line 1116
+#line 1228
     (&kernelContext_1)->shadowCurveWords_0 = shadowCurveWords_1;
 
-#line 1116
+#line 1228
     (&kernelContext_1)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 1116
+#line 1228
     (&kernelContext_1)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 1116
+#line 1228
     (&kernelContext_1)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
 
-#line 1116
+#line 1228
     (&kernelContext_1)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
-    uint entry_0 = shadowCurveWords_1[material_1->curve_table_0 + _S28.quad_1];
-    if(!curves_inside_0(shadowCurveWords_1, entry_0 & 2147483647U, _S28.uv1_2, (entry_0 & 2147483648U) != 0U))
+    uint entry_1 = shadowCurveWords_1[material_1->curve_table_0 + _S28.quad_1];
+    if(!curves_fill_inside_0(curves_winding_0(shadowCurveWords_1, entry_1 & 2147483647U, _S28.uv1_2), curve_entry_rule_0(entry_1)))
     {
 
-#line 1119
+#line 1231
         discard_fragment();
 
-#line 1118
+#line 1230
     }
 
-#line 1118
+#line 1230
     thread VS_Curves_Out_0 _S29;
 
-#line 1118
+#line 1230
     (&_S29)->position_1 = position_2;
 
-#line 1118
+#line 1230
     (&_S29)->world_1 = _S28.world_2;
 
-#line 1118
+#line 1230
     (&_S29)->normal_1 = _S28.normal_2;
 
-#line 1118
+#line 1230
     (&_S29)->uv_1 = _S28.uv_2;
 
-#line 1118
+#line 1230
     (&_S29)->uv1_1 = _S28.uv1_2;
 
-#line 1118
+#line 1230
     (&_S29)->quad_0 = _S28.quad_1;
 
-#line 1118
+#line 1230
     (&_S29)->color_1 = _S28.color_3;
 
-#line 1118
+#line 1230
     VS_Out_0 _S30 = curves_surface_in_0(&_S29);
 
-#line 1118
+#line 1230
     thread VS_Out_0 _S31 = _S30;
 
-#line 1118
+#line 1230
     float _S32 = shadow_depth_0(&_S31, &kernelContext_1);
 
-#line 1118
+#line 1230
     pixelOutput_0 _S33 = { _S32 };
 
 

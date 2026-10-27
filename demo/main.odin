@@ -1,6 +1,6 @@
 // Renders the test scene with the GPU and the software renderer to PNGs:
 //
-//     odin run demo -collection:deps=.. -- out_dir   (deps: the directory holding o3d, oksl, ovg and odecs)
+//     odin run demo -collection:deps=.. -- out_dir   (deps: the directory holding o3d, oksl, ocurves and odecs)
 package o3d_demo
 
 import "core:fmt"

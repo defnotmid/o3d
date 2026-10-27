@@ -2,17 +2,19 @@ package o3d
 
 import "core:math/linalg"
 
-import "deps:ovg/curves"
+import curves "deps:ocurves"
 
-// Paths with their curves (three.js's Path and ShapePath: moveTo, lineTo,
-// quadraticCurveTo, bezierCurveTo), drawn two ways:
+// Paths with their curves are ocurves' `Contours` (lines and cubics in one
+// table: three.js's Path and ShapePath, moveTo as `curves.contours_begin`,
+// lineTo `curves.contours_line`, bezierCurveTo `curves.contours_cubic`,
+// quadraticCurveTo `curves.contours_quad`), drawn two ways:
 //
-// - flattened to points (`path_contours`, three.js's getPoints with
-//   `curve_segments` divisions per curve), for `shapes_from_contours`,
+// - flattened to points (`shapes_from_contours`, three.js's toShapes and
+//   getPoints with `curve_segments` divisions per curve), for
 //   `shape_geometry` and `extrude_geometry`;
 // - exact (`exact_shape_geometry`): one quad over the path's bounds whose
-//   pixels take their coverage from the curves themselves (ovg's curves
-//   package: the exact area of the pixel inside the shape, from the curve
+//   pixels take their coverage from the curves themselves (ocurves'
+//   curves package: the exact area of the pixel inside the shape, from the curve
 //   pieces in the grid cells it covers and their backdrop windings). No
 //   facets at any distance, and edges anti-aliased by the area each pixel
 //   covers rather than by 4x MSAA's samples.
@@ -41,142 +43,9 @@ import "deps:ovg/curves"
 // the bounds are drawn. A ShaderMaterial on an exact shape draws the bare
 // quad: `uv1` holds the shape coordinate (`curves`' units) for its own use.
 
-Path_Segment_Kind :: enum u8 {
-	Move,
-	Line,
-	Quadratic,
-	Cubic,
-}
-
-// A move, line, or curve to `to`, with its control points (`c1` for a
-// quadratic; `c1`, `c2` for a cubic).
-Path_Segment :: struct {
-	kind:       Path_Segment_Kind,
-	c1, c2, to: Vec2,
-}
-
-// Contours of lines and Bézier curves in the XY plane (Y up), each begun by
-// a move and closed when filled (three.js's ShapePath of subpaths); either
-// winding fills, holes are contours inside others by the fill rule.
-Path :: struct {
-	segments: [dynamic]Path_Segment,
-}
-
-path_destroy :: proc(p: ^Path) {
-	delete(p.segments)
-	p^ = {}
-}
-
-path_clear :: proc(p: ^Path) {
-	clear(&p.segments)
-}
-
-// Starts a contour at `to` (moveTo).
-path_move_to :: proc(p: ^Path, to: Vec2) {
-	append(&p.segments, Path_Segment{kind = .Move, to = to})
-}
-
-// lineTo; a path not yet begun begins at `to`.
-path_line_to :: proc(p: ^Path, to: Vec2) {
-	if len(p.segments) == 0 {
-		path_move_to(p, to)
-		return
-	}
-	append(&p.segments, Path_Segment{kind = .Line, to = to})
-}
-
-// quadraticCurveTo: control point `c`, end `to`.
-path_quadratic_curve_to :: proc(p: ^Path, c, to: Vec2) {
-	if len(p.segments) == 0 {
-		path_move_to(p, c)
-	}
-	append(&p.segments, Path_Segment{kind = .Quadratic, c1 = c, to = to})
-}
-
-// bezierCurveTo: control points `c1`, `c2`, end `to`.
-path_bezier_curve_to :: proc(p: ^Path, c1, c2, to: Vec2) {
-	if len(p.segments) == 0 {
-		path_move_to(p, c1)
-	}
-	append(&p.segments, Path_Segment{kind = .Cubic, c1 = c1, c2 = c2, to = to})
-}
-
-// closePath: a line back to the contour's start, unless it is there.
-path_close :: proc(p: ^Path) {
-	#reverse for s in p.segments {
-		if s.kind == .Move {
-			if last := p.segments[len(p.segments) - 1].to; last != s.to {
-				append(&p.segments, Path_Segment{kind = .Line, to = s.to})
-			}
-			return
-		}
-	}
-}
-
-// The contours flattened to points as three.js's getPoints(divisions) does:
-// a line is its end, a curve `curve_segments` points along it (at even
-// steps of its parameter, computed in f64 as three.js does), a point equal
-// to the one before dropped. Contours with fewer than 3 points are left
-// out. Free with `contours_destroy`.
-path_contours :: proc(p: ^Path, curve_segments := 12, allocator := context.allocator) -> [][]Vec2 {
-	n := max(curve_segments, 1)
-	out := make([dynamic][]Vec2, allocator)
-	points := make([dynamic]Vec2, context.temp_allocator)
-	push :: proc(points: ^[dynamic]Vec2, q: [2]f64) {
-		v := Vec2{f32(q.x), f32(q.y)}
-		if len(points) == 0 || points[len(points) - 1] != v {
-			append(points, v)
-		}
-	}
-	flush :: proc(out: ^[dynamic][]Vec2, points: ^[dynamic]Vec2, allocator := context.allocator) {
-		if len(points) >= 3 {
-			c := make([]Vec2, len(points), allocator)
-			copy(c, points[:])
-			append(out, c)
-		}
-		clear(points)
-	}
-	at: [2]f64
-	for s in p.segments {
-		p0 := at
-		c1 := [2]f64{f64(s.c1.x), f64(s.c1.y)}
-		c2 := [2]f64{f64(s.c2.x), f64(s.c2.y)}
-		to := [2]f64{f64(s.to.x), f64(s.to.y)}
-		switch s.kind {
-		case .Move:
-			flush(&out, &points, allocator)
-			push(&points, to)
-		case .Line:
-			push(&points, to)
-		case .Quadratic:
-			for i in 1 ..= n {
-				t := f64(i) / f64(n)
-				k := 1 - t
-				push(&points, k * k * p0 + 2 * k * t * c1 + t * t * to)
-			}
-		case .Cubic:
-			for i in 1 ..= n {
-				t := f64(i) / f64(n)
-				k := 1 - t
-				push(&points, k * k * k * p0 + 3 * k * k * t * c1 + 3 * k * t * t * c2 + t * t * t * to)
-			}
-		}
-		at = to
-	}
-	flush(&out, &points, allocator)
-	return out[:]
-}
-
-contours_destroy :: proc(contours: [][]Vec2, allocator := context.allocator) {
-	for c in contours {
-		delete(c, allocator)
-	}
-	delete(contours, allocator)
-}
-
 // A shape's curves kept in `Geometries` (made once, never freed) for any
 // number of exact geometries to draw: a path's (`curve_set_add`) or a
-// block ovg's curves package built (`curve_set_add_words`: an ovg font's
+// block ocurves built (`curve_set_add_words`: an ovg font's
 // glyph shapes). 0 is none.
 Curve_Set_Id :: distinct u32
 
@@ -188,40 +57,20 @@ Curve_Set :: struct {
 	origin:     Vec2,
 	extent:     f32,
 	lo, hi:     Vec2,
-	even_odd:   bool,
+	rule:       curves.Fill_Rule,
 }
 
 // A `.Curves` quad's entry in its geometry's table: its set's first word,
-// and this bit for the even-odd rule.
+// and this bit for the even-odd rule (shaders/o3d.slang reads it too).
 CURVE_EVEN_ODD :: u32(1) << 31
 
-// A path's curves as a curve set, in the path's units: cubics become
-// quadratics within `tolerance` (path units; 0: 1/4096 of each cubic's
-// size). 0 when the path fills nothing (no curves, or no extent).
-curve_set_add :: proc(g: ^Geometries, p: ^Path, fill_rule := Fill_Rule.Nonzero, tolerance: f32 = 0) -> Curve_Set_Id {
+// Contours' curves as a curve set, in their units: cubics become
+// quadratics within `tolerance` (their units; 0: 1/4096 of each cubic's
+// size). 0 when they fill nothing (no curves, or no extent).
+curve_set_add :: proc(g: ^Geometries, c: ^curves.Contours, fill_rule := curves.Fill_Rule.Non_Zero, tolerance: f32 = 0) -> Curve_Set_Id {
 	b := curves.Builder{tol = tolerance}
 	defer curves.builder_destroy(&b)
-	for s in p.segments {
-		switch s.kind {
-		case .Move:
-			curves.move_to(&b, s.to)
-		case .Line:
-			if !b.open {
-				curves.move_to(&b, b.last)
-			}
-			curves.line_to(&b, s.to)
-		case .Quadratic:
-			if !b.open {
-				curves.move_to(&b, b.last)
-			}
-			curves.quad_to(&b, s.c1, s.to)
-		case .Cubic:
-			if !b.open {
-				curves.move_to(&b, b.last)
-			}
-			curves.cubic_to(&b, s.c1, s.c2, s.to)
-		}
-	}
+	curves.builder_add_contours(&b, c, 0, len(c.contours))
 	words, origin, extent, ok := curves.build(&b)
 	if !ok {
 		return 0
@@ -230,11 +79,11 @@ curve_set_add :: proc(g: ^Geometries, p: ^Path, fill_rule := Fill_Rule.Nonzero, 
 	return curve_set_add_words(g, words, origin, extent, fill_rule)
 }
 
-// A block of ovg curves' words (`curves.build`'s, or an ovg `Shape`'s
+// A block of curves' words (`curves.build`'s, or an ovg `Shape`'s
 // `data` with its `origin` and `extent`: a font's glyph from
 // `font_glyph_shape`, in font units with y down) as a curve set, copied.
 // 0 when the block is too short for its header or fills nothing.
-curve_set_add_words :: proc(g: ^Geometries, words: []u32, origin: Vec2, extent: f32, fill_rule := Fill_Rule.Nonzero) -> Curve_Set_Id {
+curve_set_add_words :: proc(g: ^Geometries, words: []u32, origin: Vec2, extent: f32, fill_rule := curves.Fill_Rule.Non_Zero) -> Curve_Set_Id {
 	if len(words) < curves.HEADER || int(words[6]) > len(words) || !(extent > 0) {
 		return 0
 	}
@@ -243,7 +92,7 @@ curve_set_add_words :: proc(g: ^Geometries, words: []u32, origin: Vec2, extent: 
 		return 0
 	}
 	generation_take(&g.generation)
-	append(&g.curve_sets, Curve_Set{first_word = u32(len(g.curve_words)), origin = origin, extent = extent, lo = {x0, y0}, hi = {x1, y1}, even_odd = fill_rule == .Even_Odd})
+	append(&g.curve_sets, Curve_Set{first_word = u32(len(g.curve_words)), origin = origin, extent = extent, lo = {x0, y0}, hi = {x1, y1}, rule = fill_rule})
 	append(&g.curve_words, ..words)
 	return Curve_Set_Id(len(g.curve_sets))
 }
@@ -292,7 +141,7 @@ glyph_run_geometry :: proc(g: ^Geometries, glyphs: []Glyph, scale: Vec2 = 1) -> 
 		for k in order {
 			append(&indices, base + k)
 		}
-		append(&entries, set.first_word | (CURVE_EVEN_ODD if set.even_odd else 0))
+		append(&entries, set.first_word | (CURVE_EVEN_ODD if set.rule == .Even_Odd else 0))
 	}
 	if len(entries) == 0 {
 		return 0
@@ -304,14 +153,14 @@ glyph_run_geometry :: proc(g: ^Geometries, glyphs: []Glyph, scale: Vec2 = 1) -> 
 	return id
 }
 
-// ShapeGeometry with exact edges: one quad over the path's bounds at z = 0,
-// facing +Z, drawn with its curves' coverage per pixel (`Draw_Mode.Curves`;
-// see the top of this file): a run of one glyph, the path's curve set
-// (`curve_set_add`) at the origin. UVs are the points' x and y, as
-// ShapeGeometry's; `uv1` is the shape coordinate. 0 when the path fills
+// ShapeGeometry with exact edges: one quad over the contours' bounds at
+// z = 0, facing +Z, drawn with their curves' coverage per pixel
+// (`Draw_Mode.Curves`; see the top of this file): a run of one glyph, their
+// curve set (`curve_set_add`) at the origin. UVs are the points' x and y,
+// as ShapeGeometry's; `uv1` is the shape coordinate. 0 when they fill
 // nothing.
-exact_shape_geometry :: proc(g: ^Geometries, p: ^Path, fill_rule := Fill_Rule.Nonzero, tolerance: f32 = 0) -> Geometry_Id {
-	set := curve_set_add(g, p, fill_rule, tolerance)
+exact_shape_geometry :: proc(g: ^Geometries, c: ^curves.Contours, fill_rule := curves.Fill_Rule.Non_Zero, tolerance: f32 = 0) -> Geometry_Id {
+	set := curve_set_add(g, c, fill_rule, tolerance)
 	if set == 0 {
 		return 0
 	}
@@ -322,12 +171,12 @@ exact_shape_geometry :: proc(g: ^Geometries, p: ^Path, fill_rule := Fill_Rule.No
 // The words of a `.Curves` quad's set from its table entry (offsets are
 // relative to its first word), and its fill rule.
 @(private)
-curve_entry_words :: #force_inline proc "contextless" (g: ^Geometries, entry: u32) -> (words: []u32, even_odd: bool) {
+curve_entry_words :: #force_inline proc "contextless" (g: ^Geometries, entry: u32) -> (words: []u32, rule: curves.Fill_Rule) {
 	first := int(entry &~ CURVE_EVEN_ODD)
 	if first >= len(g.curve_words) {
 		return
 	}
-	return g.curve_words[first:], entry & CURVE_EVEN_ODD != 0
+	return g.curve_words[first:], .Even_Odd if entry & CURVE_EVEN_ODD != 0 else .Non_Zero
 }
 
 // The table entry of a `.Curves` geometry's quad (its vertices
@@ -343,9 +192,8 @@ curve_quad_entry :: #force_inline proc "contextless" (g: ^Geometries, geo: Geome
 
 // Whether the shape covers the point `rc` (shape units) by its fill rule.
 @(private)
-curves_inside :: #force_inline proc "contextless" (words: []u32, rc: Vec2, even_odd: bool) -> bool {
-	w := curves.winding(words, rc)
-	return w & 1 != 0 if even_odd else w != 0
+curves_inside :: #force_inline proc "contextless" (words: []u32, rc: Vec2, rule: curves.Fill_Rule) -> bool {
+	return curves.fill_inside(curves.winding(words, rc), rule)
 }
 
 // The quads of a `.Curves` geometry (each four vertices in its object's XY

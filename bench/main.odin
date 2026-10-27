@@ -8,6 +8,8 @@ import "core:slice"
 import "core:thread"
 import "core:time"
 
+import curves "deps:ocurves"
+
 import o3d ".."
 
 Allocation_Guard :: struct {
@@ -202,14 +204,15 @@ main :: proc() {
 		scene: o3d.Scene
 		defer o3d.scene_destroy(&scene)
 		build_small_scene(&scene, &geos, nil)
-		path: o3d.Path
-		defer o3d.path_destroy(&path)
+		path: curves.Contours
+		defer curves.contours_destroy(&path)
 		k: f32 = 0.5522847498
-		o3d.path_move_to(&path, {1, 0})
-		o3d.path_bezier_curve_to(&path, {1, k}, {k, 1}, {0, 1})
-		o3d.path_bezier_curve_to(&path, {-k, 1}, {-1, k}, {-1, 0})
-		o3d.path_bezier_curve_to(&path, {-1, -k}, {-k, -1}, {0, -1})
-		o3d.path_bezier_curve_to(&path, {k, -1}, {1, -k}, {1, 0})
+		curves.contours_begin(&path, {1, 0})
+		curves.contours_cubic(&path, {1, k}, {k, 1}, {0, 1})
+		curves.contours_cubic(&path, {-k, 1}, {-1, k}, {-1, 0})
+		curves.contours_cubic(&path, {-1, -k}, {-k, -1}, {0, -1})
+		curves.contours_cubic(&path, {k, -1}, {1, -k}, {1, 0})
+		curves.contours_end(&path, true, false)
 		circle := o3d.exact_shape_geometry(&geos, &path)
 		solid := o3d.MATERIAL_DEFAULT
 		solid.color = {0.95, 0.3, 0.3}

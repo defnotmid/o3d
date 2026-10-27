@@ -9,7 +9,7 @@ these (onimite's notices list them).
 | Component | What it does | License file |
 | --- | --- | --- |
 | oksl | compiles ShaderMaterials (`deps:oksl`) | `LICENSES/oksl-MIT.txt` |
-| ovg's curves package | exact shapes' per-pixel coverage (`deps:ovg/curves`, and `shaders/curves.slang` compiled into the curve shaders) | `LICENSES/ovg-MIT.txt` |
+| ocurves | exact shapes' per-pixel coverage (`deps:ocurves`, and its `curves.slang` compiled into the curve shaders) | `LICENSES/ocurves-MIT.txt` |
 | odecs' image package | texture decoding (PNG, JPEG, GIF, BMP, TGA, QOI, WebP; `deps:odecs/image`) and the demo's and gpu_check's PNG writing | `LICENSES/odecs-MIT.txt` |
 | OpenUSD (Pixar) | `usd_read.odin` reads USD's binary layers as OpenUSD's `crateFile.cpp`, `integerCoding.cpp` and `fastCompression.cpp` lay them out (sections, value reps, integer coding, LZ4 framing) | `LICENSES/OpenUSD-TOST.txt` |
 | libwebp | odecs' WebP decoder is a restructured port of libwebp's decoder and copies its tables | `LICENSES/libwebp-BSD-3-Clause.txt` |

@@ -100,12 +100,19 @@ Software :: struct {
 	snapshot_tex:  Texture,
 	snapshot_light: [dynamic][4]f32,
 	// The scene mirrored in its reflector (`mirror_view`), drawn first in
-	// the same samples at its size, its light resolved into level 0 of
-	// `reflection_tex` (texture 1), mipmapped as the GPU's, then its levels
-	// read as floats (`reflection_light`) by the draws that show it.
+	// the same samples at its size, with each sample's run (`mirror_run`)
+	// premultiplied by its coverage, and the coverage, blended as the light
+	// (`mirror_runs`): its light resolved into level 0 of `reflection_tex`
+	// (texture 1), its runs into the same levels of texture 2 (red and
+	// green, alpha 1, as the GPU's second layer), both mipmapped as the
+	// GPU's, then their levels read as floats (`reflection_light`,
+	// `reflection_runs`: converted once, read a dozen texels a pixel) by the
+	// draws that show it.
 	reflection:    Textures,
 	reflection_tex: Texture,
 	reflection_light: [dynamic][4]f32,
+	reflection_runs: [dynamic][4]f32,
+	mirror_runs:   [dynamic][2]f16,
 	// With depth of field: the frame's light per pixel, resolved by the
 	// bands, and the gather's tables (depth_of_field.odin).
 	frame:         [dynamic][4]f32,
@@ -127,6 +134,8 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.snapshot_light)
 	textures_destroy(&s.reflection)
 	delete(s.reflection_light)
+	delete(s.reflection_runs)
+	delete(s.mirror_runs)
 	delete(s.frame)
 	focus_tables_destroy(&s.focus)
 	delete(s.order)
@@ -268,8 +277,11 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	shading_materials(scene_materials(active), &s.materials, textures)
 	transmission_scale(s.materials[:len(active.draws)], active.draws.model[:len(active.draws)])
 	sprite_materials(active, geos, &s.expanded, s.materials[:])
+	// The mirror's view first: its receivers count for the shadows' fit.
+	mv, reflect := mirror_view(active, s.materials[:], geos, view, proj, width, height, &s.expanded)
+	views := [2]Mat4{proj * view, proj * mv.view}
 	shadows: [MAX_SHADOWS]Shadow
-	ns := frame_shadows(active, &shadows)
+	ns := frame_shadows(active, geos, shaders, views[:1 + int(reflect)], &shadows, &s.expanded)
 	shader_blocks(active, shaders, view, proj, shadows[:ns], &s.blocks)
 	table_grow_non_zero(&s.frames, len(active.draws))
 	for m, i in s.materials[:len(active.draws)] {
@@ -301,6 +313,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		bg_lod        = bg_lod,
 		clear         = to_halves(background_clear_light(active)),
 		eye           = active.camera.position,
+		ortho         = active.camera.orthographic,
 		shadows       = shadows,
 		shadow_count  = ns,
 		tone_mapping  = active.tone_mapping,
@@ -330,7 +343,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	} else {
 		clear(&s.depth_map)
 	}
-	if mv, ok := mirror_view(active, s.materials[:], geos, view, proj, width, height, &s.expanded); ok {
+	if reflect {
 		// The mirror's light in the frame's samples at its size: its pass
 		// with the mirrored camera, front faces turned, what is behind the
 		// plane clipped, cleared to nothing (the environment shows there).
@@ -341,15 +354,23 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		s.reflection_tex = texture_grow(&s.reflection.hdr_texels, mv.width, mv.height)
 		s.reflection_tex.hdr = true
 		s.reflection_tex.levels = u32(mv.levels)
+		runs_tex := texture_grow(&s.reflection.hdr_texels, mv.width, mv.height)
+		runs_tex.hdr = true
+		runs_tex.levels = u32(mv.levels)
+		table_grow_non_zero(&s.mirror_runs, mv.width * mv.height * SAMPLES)
 		mj := job
 		mj.view_proj, mj.width, mj.height, mj.depth_only = proj * mv.view, mv.width, mv.height, false
 		mj.eye, mj.mirrored, mj.clip, mj.blocks = mv.eye, true, mv.plane, &s.mirror_blocks
 		mj.bg_tex, mj.clear = 0, {}
 		mj.capture_into = s.reflection.hdr_texels[s.reflection_tex.mips[0]:][:mv.width * mv.height]
+		mj.runs = s.mirror_runs[:mv.width * mv.height * SAMPLES]
+		mj.capture_runs = s.reflection.hdr_texels[runs_tex.mips[0]:][:mv.width * mv.height]
 		run_pass(s, active, geos, &mj, pool, draw_band, 0, len(s.order))
 		texture_finish(&s.reflection, &s.reflection_tex, blit = true)
+		texture_finish(&s.reflection, &runs_tex, blit = true)
 		job.reflection, job.reflection_tex = light_levels(&s.reflection, &s.reflection_tex, &s.reflection_light), s.reflection_tex
-		job.reflection_last = f32(mv.levels - 1)
+		job.reflection_runs = light_levels(&s.reflection, &runs_tex, &s.reflection_runs)
+		job.reflection_last, job.reflection_focal = f32(mv.levels - 1), mv.focal
 	}
 	snapshot := draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
 	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
@@ -371,7 +392,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.snapshot, job.snapshot_tex = light_levels(&s.snapshot, &s.snapshot_tex, &s.snapshot_light), s.snapshot_tex
 		job.keep = true
 	}
-	focus, blurred := focus_of(active.depth_of_field, height)
+	focus, blurred := focus_of(active.camera, height)
 	if blurred {
 		table_grow_non_zero(&s.frame, width * height)
 		job.light_into = s.frame[:width * height]
@@ -475,6 +496,10 @@ Frame_Job :: struct {
 	// (`light_into`), not tone mapped into its pixels.
 	capture_into:  [][4]f16,
 	light_into:    [][4]f32,
+	// The mirror's pass: its samples' runs and coverage
+	// (Software.mirror_runs), resolved into `capture_runs`.
+	runs:          [][2]f16,
+	capture_runs:  [][4]f16,
 	// The frame's snapshot for the transmissive draws (nil: none): its
 	// levels' light, laid out as `snapshot_tex`.
 	snapshot:      [][4]f32,
@@ -485,10 +510,15 @@ Frame_Job :: struct {
 	mirrored:      bool,
 	clip:          Vec4,
 	// The frame's reflection for the draws that show it (nil: none): its
-	// levels' light, laid out as `reflection_tex`, and its last level.
+	// levels' light and runs, laid out as `reflection_tex`, its last level,
+	// and its scale (Mirror_View.focal) through an orthographic camera or
+	// not.
 	reflection:    [][4]f32,
+	reflection_runs: [][4]f32,
 	reflection_tex: Texture,
 	reflection_last: f32,
+	reflection_focal: f32,
+	ortho:         bool,
 }
 
 @(private = "file")

@@ -13,7 +13,7 @@ keeps its gills, eyes and mouths as layers a script switches by id, each
 colour one traced path, plus a hidden `silhouette` (all of Oxa as one
 outline with its hole) to extrude, morph or collide.
 
-MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ovg's curves,
+MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ocurves,
 odecs' image package, SDL 3, three.js's models, Odin's
 packages) is in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -26,15 +26,24 @@ What is known about three.js carries over:
 - Rotations are Euler angles in radians, applied in X, Y, Z order; a
   transform is position, rotation and scale (`compose`), like Object3D.
 - The camera's field of view is vertical, in degrees (PerspectiveCamera);
-  an orthographic camera takes the view's height.
+  an orthographic camera takes the view's height. A perspective camera has
+  a thin lens: `f_stop` (0: a pinhole), `focus` (metres along its axis) and
+  `film_height` (millimetres, 24 by default; with `fov` the focal length),
+  so a point at depth z blurs over a circle (f / f_stop) * f / (focus - f) *
+  |1 - focus / z| across on the film. One view gathers that blur from its
+  depth (`focus_of`); `lens`, a point on the unit aperture disc, draws the
+  view sharp through that point instead (the focus plane kept), so a host
+  averaging views over the aperture gets the exact depth of field. Its
+  `shutter` (seconds, centred on the frame's moment) smears particles along
+  their `velocity`.
 - Colours are sRGB; lighting is linear. The frame is drawn in light, as
   three.js's EffectComposer draws into a HalfFloat target: each fragment's
   light, blended toward `scene.fog` (`.Linear` between `near` and `far`, or
   `.Exp2` with `density`, by Euclidean camera distance), premultiplied by
   its coverage, blended and added there (half floats, 4x MSAA), resolved,
-  then once a pixel through `scene.depth_of_field` (fframes-three-d's
-  gather: what is not at `focus` blurs by `blur * |1 - focus / depth|`,
-  shares of the frame's height, at most `max_blur`), tone-mapped
+  then once a pixel through the camera's depth of field (a gather in
+  tiles of the largest blur near, at most a sixteenth of the frame's
+  height), tone-mapped
   (`scene.tone_mapping`: `.None` default, `.Linear`, `.Reinhard`,
   `.Cineon`, `.ACES_Filmic`, `.AgX`, `.Neutral`, scaled by
   `scene.tone_mapping_exposure`, default 1) and encoded to sRGB (three.js's
@@ -75,19 +84,28 @@ What is known about three.js carries over:
   GPU binds two; a map in a third is dropped on both renderers — none of
   the 150 Khronos sample models uses more than two). A ShaderMaterial
   behind glass is seen as it draws into the frame (its own tone mapping
-  included). Planar reflections as fframes-three-d draws them
-  (three.js's Reflector, physically): `Scene.reflector` is a plane
+  included). Planar reflections (three.js's Reflector, physically):
+  `Scene.reflector` is a plane
   (`point`, `normal` toward the side it mirrors, `scale` the reflection's
   share of the frame's size, 0.5 by default), and a material's
   `reflection` (0 to 1) is how much of the scene mirrored in it takes the
   place of the environment's reflection, through the same Fresnel (where
   the mirror shows nothing the environment shows; no environment is
-  needed), blurred by roughness (sqrt(roughness) of the way down its mip
-  levels, six at most; the clear coat by its own). The mirror is drawn
-  first, through the mirrored camera at its size, in linear light (blended
-  draws blended there), leaving out what is behind the plane (not for
-  ShaderMaterials), particles, shadow catchers and the surfaces that show
-  it; those read it where they are on the screen, so they belong on the
+  needed), blurred by roughness as far as the mirrored ray runs to what it
+  meets: GGX's lobe (alpha = roughness^2) spreads over about 1.29 alpha
+  times that run, seen from the eye that run further away, and the mip
+  level (a full chain) is the one whose texels are that blur across. What
+  touches the plane reflects sharp and what is far from it blurs most
+  (contact hardening); the clear coat blurs by its own roughness. The
+  mirror is drawn first, through the mirrored camera at its size, in
+  linear light (blended draws blended there), each sample's run beside
+  its light (premultiplied by coverage, a second target), leaving out
+  what is behind the plane (not for ShaderMaterials, which write no runs
+  either), particles, shadow catchers and the surfaces that show it.
+  Those read it where they are on the screen: the run where their ray
+  meets something, else the coverage-weighted runs about it at the level
+  an endless run would take, so the edge of what is mirrored blurs as it
+  does. They belong on the
   plane (a floor, a table top, a mirror). One reflector a scene; it is
   not drawn when the camera is behind it or nothing that shows it is in
   view; transmission takes a material's place of reflection, and glass in
@@ -122,13 +140,21 @@ What is known about three.js carries over:
   `pi/3`, `penumbra` 0..1 default 0), in three.js's units: a white directional
   light of intensity 1 lights a white surface facing it to 1/pi of white, so
   scenes use intensities around 2 to 3.
-- Shadows are DirectionalLightShadow's (orthographic) and SpotLightShadow's
-  (perspective, `fov = 2 * angle`) with PCF, for up to `MAX_SHADOWS = 4`
+- Shadows are three.js's light shadows with PCF, for up to `MAX_SHADOWS = 4`
   shadow-casting directional or spot lights per frame: a light with
-  `cast_shadow` and its `shadow` settings (`map_size`, `height` of a
-  directional light's square orthographic view, `near`, `far`, `bias`,
-  `normal_bias`; zero takes three.js's 512, 10, 0.5, 500 or the spot light's
-  `distance`), draws with `.Cast_Shadow` and `.Receive_Shadow` in their
+  `cast_shadow` and its `shadow` settings. A directional light's camera is
+  orthographic and, with no `height`, fitted to the frame: across the
+  light, the receivers in view (the mirror's too) where a caster is over
+  them; along it, from the nearest caster to the farthest such receiver;
+  its size rounded up to an eighth of a doubling and its corner on the
+  texel grid, so its texels hold still while the camera moves within a
+  step (only the light's direction counts). With a `height` it is that
+  square about the light's target, `near` to `far` from its position (0.5
+  and 500 by default). A spot light's is its cone (`fov = 2 * angle`, out to
+  `far`, else its `distance`). `map_size` (512 by default) texels a side;
+  `bias` and `normal_bias` are world units, the point compared moved away
+  from the light (negative: toward it) and along its normal. Draws with
+  `.Cast_Shadow` and `.Receive_Shadow` in their
   material's flags (three.js has them on the mesh; a draw's material is its
   own). Casters draw their other side (three.js's default shadowSide) and
   morphed/skinned geometry, discarding shadow texels below `alpha_cutoff` when
@@ -143,7 +169,8 @@ What is known about three.js carries over:
   it with everything else. It finishes as the standard material does by
   calling `fogged(color, worldPosition)` (the scene's fog, linear);
   `toneMapping(color)` and `linearToOutputTexel(value)` are as is (a render
-  target's), kept for three.js's sources. These, like `shadowAt`, are
+  target's), kept for three.js's sources; `sRGBTransferEOTF(value)` decodes
+  an sRGB colour to linear (three.js's). These, like `shadowAt`, are
   declared only for a shader that names them.
 - Geometry takes the three.js parameters: `box(w, h, d, segments...)`,
   `sphere(radius, widthSegments, heightSegments, phiStart, phiLength,
@@ -159,32 +186,40 @@ What is known about three.js carries over:
   endpoints), `polyline(positions, closed)` (connected path),
   `wireframe(src)` (edges of a triangle mesh), and `points(positions)` (point
   clouds). Outlines become geometry as three.js's Shape, ShapeGeometry and
-  ExtrudeGeometry: a `Shape` is an outline and its holes as points (curves
-  flattened by the caller), `shapes_from_contours(contours, fill_rule)` is
-  ShapePath.toShapes (a font's or SVG's closed contours grouped into shapes
-  with holes, nonzero or even-odd), `triangulate_shape(contour, holes)` is
-  ShapeUtils.triangulateShape (earcut), `shape_geometry(shapes)` the flat
-  faces, and `extrude_geometry(shapes, options)` the solid (`depth`,
+  ExtrudeGeometry. A path is ocurves' `curves.Contours` (lines and cubics
+  in one table: `contours_begin` is moveTo, `contours_line` lineTo,
+  `contours_cubic` bezierCurveTo, `contours_quad` quadraticCurveTo).
+  `shapes_from_contours(&shapes, &contours, fill_rule, curve_segments)` is
+  ShapePath.toShapes with getPoints: the area the contours fill by the rule
+  (`curves.Fill_Rule`: `.Non_Zero` or `.Even_Odd`)
+  (ocurves' simplify, so contours that cross or overlap are merged where
+  three.js keeps them overlapping), as outlines with their holes,
+  flattened at `curve_segments` points a curve, into one `Shapes` table
+  (points, rings as ranges of them, shapes as ranges of rings).
+  `triangulate_shape(&shapes, i)` is ShapeUtils.triangulateShape (earcut),
+  `shape_geometry(&shapes)` the flat faces, and
+  `extrude_geometry(&shapes, options)` the solid (`depth`,
   `steps`, `bevel_enabled`, `bevel_thickness`, `bevel_size`, `bevel_offset`,
-  `bevel_segments` from `EXTRUDE_DEFAULT`, WorldUVGenerator's UVs), with its
-  two material groups as geometries of their own (`caps`, `sides`;
-  `geometry_group` is addGroup). three.js's extrusions are flat-faceted;
-  `crease_angle` smooths the walls and bevels instead, caps kept flat.
-  `Extruded.folded` counts the contours a bevel turned inside out (an
-  inward `bevel_offset` over half the thinnest feature, a `bevel_size`
-  over half a hole, pixels touching at a corner under an outward bevel):
-  made as three.js makes them, but a host can warn. A `Path` keeps the
-  curves (three.js's Path / ShapePath: `path_move_to`, `path_line_to`,
-  `path_quadratic_curve_to`, `path_bezier_curve_to`, `path_close`);
-  `path_contours(path, curve_segments)` flattens it as getPoints does, for
-  the above, and `exact_shape_geometry(path, fill_rule)` is ShapeGeometry
+  `bevel_segments`, `miter_limit` from `EXTRUDE_DEFAULT`, WorldUVGenerator's
+  UVs), with its two material groups as geometries of their own (`caps`,
+  `sides`; `geometry_group` is addGroup). three.js's extrusions are
+  flat-faceted; `crease_angle` smooths the walls and bevels instead, caps
+  kept flat. The bevel offsets the shape as its straight skeleton does
+  (three.js moves each point along its corner's direction, which turns
+  thin parts inside out): each edge moves its distance along its normal,
+  corners stay where its lines meet unless that is more than `miter_limit`
+  times the distance out (4, SVG's; then they are cut across their
+  bisector), parts thinner than twice an inward offset close up, holes
+  narrower than an outward one close, and parts an offset brings together
+  join, so every offset makes a closed solid whose caps are the offset
+  outlines. `exact_shape_geometry(&contours, fill_rule)` is ShapeGeometry
   with exact edges: one quad whose pixels take their coverage from the
-  curves (the exact area each pixel covers, by ovg's curves package), so the outline has
+  curves (the exact area each pixel covers, by ocurves), so the outline has
   no facets at any distance. Any standard material draws it: a
   `.Transparent` one blends each pixel by the area it covers (the exact
   edge), an opaque one writes the samples inside the curves (4x MSAA's
   edge, exact curves, no sorting); shadows take the outline. Text is the
-  same with a quad per glyph: `curve_set_add(path)` (or
+  same with a quad per glyph: `curve_set_add(&contours)` (or
   `curve_set_add_words` for an ovg font's glyph shapes) keeps a glyph's
   curves once, and `glyph_run_geometry(glyphs, scale)` places them as the
   caller's layout says (positions in run units; a negative y scale takes
@@ -227,7 +262,7 @@ scene.tone_mapping, scene.tone_mapping_exposure = .ACES_Filmic, 1.0
 scene.fog = {kind = .Exp2, color = {0.05, 0.06, 0.08}, density = 0.04}
 append(&scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.2, 0.15, 0.2}, intensity = 1.5})
 append(&scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {3, 5, 2},
-	cast_shadow = true, shadow = {map_size = 1024, bias = -0.0005}})
+	cast_shadow = true, shadow = {map_size = 1024, bias = -0.005}})
 m := o3d.MATERIAL_DEFAULT
 m.color, m.roughness, m.color_map = {1, 0.35, 0.3}, 0.4, albedo
 m.flags = {.Cast_Shadow, .Receive_Shadow}
@@ -285,21 +320,22 @@ scene.depth = true                                                   // then ren
 hidden := o3d.point_hidden(scene.camera, o3d.software_depth(&sw), 1920, 1080, sun_position)   // GPU: read_depth(&g, o3d_sdlgpu.depth(&g), ...)
 o3d.depth_image(scene.camera, o3d.software_depth(&sw), 1920, 1080, far, rgba16f)   // distance (a 1 where drawn); GPU: record_depth_into
 
-// Text and logos: outlines (flattened to points) grouped into shapes, extruded once, drawn per frame
-shapes := o3d.shapes_from_contours(glyph_contours)          // ShapePath.toShapes; holes found by containment
+// Text and logos: a path's filled area as shapes (flattened), extruded once, drawn per frame
+shapes: o3d.Shapes                                          // kept warm for the next path
+o3d.shapes_from_contours(&shapes, &glyph_contours)          // ShapePath.toShapes: outlines and holes as filled
 opts := o3d.EXTRUDE_DEFAULT
 opts.depth, opts.bevel_segments, opts.crease_angle = 0.4, 4, math.PI / 4
-letter := o3d.extrude_geometry(&geos, shapes, opts)         // kept: .geometry, or .caps and .sides
-o3d.shapes_destroy(shapes)
+letter := o3d.extrude_geometry(&geos, &shapes, opts)        // kept: .geometry, or .caps and .sides
+o3d.shapes_destroy(&shapes)
 append(&scene.draws, o3d.Draw{letter.caps, o3d.compose({0, 1, 0}, {0, t, 0}), face}, o3d.Draw{letter.sides, o3d.compose({0, 1, 0}, {0, t, 0}), rim})
 
 // Flat outlines with exact edges: the curves kept, one quad, coverage per pixel
-logo: o3d.Path
-o3d.path_move_to(&logo, {0, -1})
-o3d.path_bezier_curve_to(&logo, {-1.6, -0.1}, {-0.9, 1.2}, {0, 0.5})
-o3d.path_bezier_curve_to(&logo, {0.9, 1.2}, {1.6, -0.1}, {0, -1})
+logo: curves.Contours                                       // import curves "deps:ocurves"
+curves.contours_begin(&logo, {0, -1})
+curves.contours_cubic(&logo, {-1.6, -0.1}, {-0.9, 1.2}, {0, 0.5})
+curves.contours_cubic(&logo, {0.9, 1.2}, {1.6, -0.1}, {0, -1})
 heart := o3d.exact_shape_geometry(&geos, &logo)           // kept, like any geometry
-o3d.path_destroy(&logo)
+curves.contours_destroy(&logo)
 ink := o3d.MATERIAL_DEFAULT
 ink.flags = {.Transparent}                                  // coverage by area (opaque: by sample)
 append(&scene.draws, o3d.Draw{heart, o3d.compose({0, 2, 0}), ink})
@@ -345,17 +381,17 @@ pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &t
 // or into the host's own image, with no copy: o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures, out = image_pixels)
 ```
 
-o3d imports oksl as `deps:oksl`, ovg's core-only curves package as
-`deps:ovg/curves` and odecs' image package (texture decoding, PNG writing)
+o3d imports oksl as `deps:oksl`, ocurves' core-only curves package as
+`deps:ocurves` and odecs' image package (texture decoding, PNG writing)
 as `deps:odecs/image`: clone [oksl](https://github.com/defnotmid/oksl),
-[ovg](https://github.com/defnotmid/ovg) and
+[ocurves](https://github.com/defnotmid/ocurves) and
 [odecs](https://github.com/defnotmid/odecs) next to o3d, and builds pass
 `-collection:deps=..` (the directory holding them). `shaders/build.sh`
-includes ovg's `shaders/curves.slang` from there too, and records the
-curves format it reads (ovg's `curves.FORMAT`) in
-`sdlgpu/curves_format.odin`: o3d_sdlgpu does not compile against an ovg
-of another format (each o3d tag names the ovg it needs), where its curve
-shaders would draw garbage.
+includes ocurves' `curves.slang` from there too, and records the curves
+format it reads (`curves.FORMAT`) in `sdlgpu/curves_format.odin`:
+o3d_sdlgpu does not compile against an ocurves of another format (each o3d
+tag names the ocurves it needs), where its curve shaders would draw
+garbage.
 
 - `odin test . -collection:deps=..` and `odin test sdlgpu
   -collection:deps=..`: the CPU and GPU tests. A GPU test fails without a
@@ -517,23 +553,39 @@ shaders would draw garbage.
   named in `Model.warnings`; the `Limits` table bounds it as glTF's. Checked
   against OpenUSD (pxr) on 115 files: every composed mesh's triangles,
   world bounds and materials.
-- **Shapes (`shape.odin`):** three.js's code ported: earcut (mapbox/earcut
-  as three.js carries it, nodes in a pool linked by index),
-  ShapePath.toShapes' containment (largest first, an interior point tested
-  against the innermost enclosing contour, fill-rule windings), and
-  ExtrudeGeometry's layers (back bevel rings, `steps + 1` wall rings, front
-  bevel rings; getBevelVec's offsets). They run in f64 as three.js does in
-  JavaScript, so the geometry is three.js's, triangle for triangle (checked
-  against three.js r186 to 1e-6, but for a wall's UV on an edge at exactly
-  45°, where x and y tie). Holes are always rewound against the outline
+- **Shapes (`shape.odin`):** a path's contours go through ocurves'
+  `bool_run` once (one operand under its fill rule, its simplify), which
+  arranges every piece, keeps the faces the rule fills and gives each
+  connected region its outline (clockwise, Y up) and holes
+  (counter-clockwise) as ranges of its result, each segment with the range
+  of its source it covers; each is flattened from there (a curve
+  `curve_segments` points over its whole parameter, so an uncut one as
+  three.js flattens it) into the `Shapes` table. Then three.js's code
+  ported: earcut (mapbox/earcut as three.js carries it, nodes in a pool
+  linked by index) and ExtrudeGeometry's layers (back bevel, walls, front bevel). They run in
+  f64 as three.js does in JavaScript, so an unbevelled extrusion is
+  three.js's triangle for triangle (checked against three.js r186 to 1e-6,
+  but for a wall's UV on an edge at exactly 45°, where x and y tie), and a
+  bevel that changes nothing about the outline has three.js's rings and
+  quads. The bevel's rings come from a wavefront (`wave_run`): each edge a
+  line moving at unit speed along its normal, each vertex where its two
+  lines meet; edge events (an edge shrinks to nothing: its ends become one
+  vertex) and split events (a reflex vertex runs into an edge ahead: the
+  loop splits, or two loops join) are taken in time order, each the
+  earliest of a scan over the live edges and the reflex vertices against
+  them. A ring samples every vertex; an event samples only the vertices
+  whose edges it changes, so each edge's face (planar in x, y and time)
+  is the zip of its two ends' sample chains between when it began and
+  ended, with no T-junctions, and the faces stay one quad a ring where
+  nothing happens. A corner past `miter_limit` starts as a chamfer line of
+  no length along its bisector. The caps triangulate the loops at the
+  first ring (outlines with the holes inside them), the walls stand on the
+  loops at the last. Holes are always rewound against the outline
   (three.js only does so when it reverses the outline). The output is
   indexed, corners with equal position, normal and UV shared, the caps'
   triangles first so each group is one index range. With `crease_angle`,
   a wall corner's normal sums the wall faces there within the angle,
-  weighted by their corner angles. Folds are found per shape at each bevel
-  ring's offset: an edge reversed against the contour's, a winding
-  flipped, or a proper crossing (a sweep over the edges) that the
-  unbevelled contours do not have.
+  weighted by their corner angles.
 - **Tables:** primitives are made by `PRIMITIVES`, indexed by `Primitive`.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, spot cone
@@ -582,7 +634,8 @@ shaders would draw garbage.
 - **Particles:** `scene_particles` keeps a frame's particles as rows
   (position, size as width and height (three.js's Sprite.scale) in world
   units or pixels, rotation in the view plane,
-  sRGB colour and opacity); expansion turns each into a camera-facing quad
+  sRGB colour and opacity, velocity); expansion turns each into a
+  camera-facing quad
   (farthest first unless `.Additive`) with a row in the frame's sprite
   table, which both renderers read per quad as exact shapes read their
   curve tables (the GPU through the curves' vertex shader and
@@ -595,7 +648,13 @@ shaders would draw garbage.
   label's anchor); the material's `depth_offset` moves the quads that far
   toward the camera along the ray to each (scaled about the eye, so the
   same on screen; not past the near plane), so a label pinned to a surface
-  draws in front of it and still behind what is nearer. Particles test
+  draws in front of it and still behind what is nearer. A particle moving
+  while the camera's shutter is open smears: its quad is grown along its
+  way on the frame and each pixel averages its sprite (nothing past its
+  edges) at a moment a pixel of that way apart (up to `SMEAR_TAPS = 64`),
+  its light premultiplied and linear, its coverage the share of the
+  shutter it was there; the sprite only moves, it does not grow as it
+  nears the camera. Particles test
   the frame's depth as everything blended does: an alpha-masked net hides
   them behind its wires, not its gaps. The emitter (where particles are,
   frame by frame) is the host's. A material's `occlusion_radius` (pixels)
@@ -713,8 +772,9 @@ shaders would draw garbage.
   as one buffer and the rasterizer gathers whole vertices by index.
 - **Shadows** (shadow.odin) are drawn first for up to `MAX_SHADOWS = 4`
   shadow-casting directional (orthographic) or spot (perspective) lights
-  (`frame_shadows`): the casters' depth from each light (`shadow_casters`,
-  culled to its view), one sample per texel centre, nearest kept (discarding
+  (`frame_shadows`, a fitted directional camera from the draws' bounding
+  spheres, `fit_shadows`): the casters' depth from each light
+  (`shadow_casters`, culled to its view), one sample per texel centre, nearest kept (discarding
   texels below `alpha_cutoff` for `.Alpha_Mask` casters with a `color_map`);
   the software renderer runs the same phases in a depth-only mode at each
   map's size, the GPU renders into R32_FLOAT colour targets (sampleable on
@@ -733,7 +793,7 @@ shaders would draw garbage.
   a transparent exact shape) farthest first, without writing depth
   (`draw_order`, shared by both renderers).
 - **Exact shapes and text (`curve.odin`):** a path's contours go to
-  ovg's curves package as they are (cubics split into quadratics within a
+  ocurves' builder as they are (`builder_add_contours`) (cubics split into quadratics within a
   tolerance), which builds the shape's block of 32-bit words (monotone
   pieces in a grid of cells, each cell with its backdrop winding, so a
   pixel's cost is the pieces near it; and a mean coverage), or an ovg

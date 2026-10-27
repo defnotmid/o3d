@@ -94,7 +94,8 @@ Job :: struct {
 	snapshot_tex:         ^sdl.GPUTexture,
 	snapshot_size:        [2]u32,
 	// The mirror's pass (`o3d.mirror_view`) when the frame has one, drawn
-	// first: its draws, camera and lighting; its light into
+	// first: its draws, camera and lighting; its light and runs (in
+	// `runs_target`, resolved into `runs_resolved`) into the two layers of
 	// `reflection_tex` (width, height and levels in `reflection_size`),
 	// mipmapped, for the draws that show it.
 	reflect:              bool,
@@ -102,6 +103,8 @@ Job :: struct {
 	mirror_view_proj:     o3d.Mat4,
 	mirror_lighting:      Lighting_Uniforms,
 	reflection_tex:       ^sdl.GPUTexture,
+	runs_target:          ^sdl.GPUTexture,
+	runs_resolved:        ^sdl.GPUTexture,
 	reflection_size:      [3]u32,
 	// The depth of field (`o3d.focus_of`) when the frame has one: its
 	// post passes' uniforms and its tables (tiles, near, half light, half
@@ -516,7 +519,11 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	o3d.shading_materials(o3d.scene_materials(active), &job.materials, textures)
 	o3d.transmission_scale(job.materials[:len(active.draws)], active.draws.model[:len(active.draws)])
 	o3d.sprite_materials(active, geos, &job.expanded, job.materials[:])
-	ns := o3d.frame_shadows(active, &job.shadows)
+	// The mirror's view first: its receivers count for the shadows' fit.
+	mv: o3d.Mirror_View
+	mv, job.reflect = o3d.mirror_view(active, job.materials[:], geos, view, proj, int(width), int(height), &job.expanded)
+	views := [2]o3d.Mat4{proj * view, proj * mv.view}
+	ns := o3d.frame_shadows(active, geos, shaders, views[:1 + int(job.reflect)], &job.shadows, &job.expanded)
 	o3d.shader_blocks(active, shaders, view, proj, job.shadows[:ns], &job.blocks)
 	for si in 0 ..< ns {
 		if !ensure_shadow(g, job, si, u32(job.shadows[si].size)) {
@@ -548,6 +555,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	for si in 0 ..< ns {
 		lu.shadow_matrix[si] = job.shadows[si].view_proj
 		lu.shadow_params[si] = {f32(job.shadows[si].size), job.shadows[si].bias, job.shadows[si].normal_bias, 0}
+		lu.shadow_from[si] = job.shadows[si].from
 	}
 	env := job.env
 	fog_near, fog_far, fog_density := o3d.fog_terms(active.fog)
@@ -557,7 +565,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	far := active.camera.far if active.camera.far > near else near * 1e4
 	lu.frame_params = {f32(width), f32(height), near, far}
 	focus: o3d.Focus
-	focus, job.focus = o3d.focus_of(active.depth_of_field, int(height))
+	focus, job.focus = o3d.focus_of(active.camera, int(height))
 	if job.focus {
 		if !ensure_focus(g, job, width, height) {
 			return .Out_Of_Memory
@@ -584,8 +592,6 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 			shadowed = u32(l.shadowed),
 		}
 	}
-	mv: o3d.Mirror_View
-	mv, job.reflect = o3d.mirror_view(active, job.materials[:], geos, view, proj, int(width), int(height), &job.expanded)
 	if job.reflect {
 		if !ensure_reflection(g, job, u32(mv.width), u32(mv.height), u32(mv.levels)) || !ensure_mirror_pass(g) {
 			return .Out_Of_Memory
@@ -593,7 +599,7 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 		o3d.mirror_order(active, geos, shaders, job.materials[:], mv.view, proj, &job.mirror_order, &job.expanded)
 		o3d.shader_blocks(active, shaders, mv.view, proj, job.shadows[:ns], &job.mirror_blocks, mv.eye)
 		job.mirror_view_proj = proj * mv.view
-		lu.reflect_params = {f32(mv.levels - 1), 0, 0, 0}
+		lu.reflect_params = {f32(mv.levels - 1), mv.focal, f32(int(active.camera.orthographic)), 0}
 		// The mirror's pass: through the mirrored camera at its size, what
 		// is behind the plane left out.
 		ml := &job.mirror_lighting
@@ -684,12 +690,17 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	// A pass of light into the frame's targets' top-left w x h: cleared to
 	// `clear`, the background under the draws when there is one, resolved.
 	light_pass :: proc(g: ^GPU, job: ^Job, cmd: ^sdl.GPUCommandBuffer, w, h: u32, clear: [4]f32, background: bool, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture, mirrored: bool) {
-		color := sdl.GPUColorTargetInfo{texture = g.color, clear_color = sdl.FColor(clear), load_op = .CLEAR, store_op = .STORE}
+		// The mirror's pass draws its runs too (none where nothing is).
+		colors := [2]sdl.GPUColorTargetInfo {
+			{texture = g.color, clear_color = sdl.FColor(clear), load_op = .CLEAR, store_op = .STORE},
+			{texture = job.runs_target, load_op = .CLEAR, store_op = .STORE},
+		}
 		if g.samples != ._1 {
-			color.store_op, color.resolve_texture = .RESOLVE, g.resolved
+			colors[0].store_op, colors[0].resolve_texture = .RESOLVE, g.resolved
+			colors[1].store_op, colors[1].resolve_texture = .RESOLVE, job.runs_resolved
 		}
 		depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
-		pass := sdl.BeginGPURenderPass(cmd, &color, 1, &depth)
+		pass := sdl.BeginGPURenderPass(cmd, &colors[0], 2 if mirrored else 1, &depth)
 		defer sdl.EndGPURenderPass(pass)
 		sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(w), h = f32(h), min_depth = 0, max_depth = 1})
 		sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(w), h = i32(h)})
@@ -712,6 +723,14 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		copy_pass := sdl.BeginGPUCopyPass(cmd)
 		sdl.CopyGPUTextureToTexture(copy_pass, {texture = light}, {texture = job.reflection_tex}, w, h, 1, false)
 		sdl.EndGPUCopyPass(copy_pass)
+		// The runs into the second layer's red and green (alpha 1), exactly.
+		runs := job.runs_resolved if g.samples != ._1 else job.runs_target
+		sdl.BlitGPUTexture(cmd, {
+			source = {texture = runs, w = w, h = h},
+			destination = {texture = job.reflection_tex, layer_or_depth_plane = 1, w = w, h = h},
+			load_op = .DONT_CARE,
+			filter = .NEAREST,
+		})
 		sdl.GenerateMipmapsForGPUTexture(cmd, job.reflection_tex)
 	}
 	if job.snapshot < len(job.order) {

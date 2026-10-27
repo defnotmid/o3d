@@ -43,10 +43,12 @@ Builtin :: enum u8 {
 	// white without one) and 0-based index.
 	Instance_Color,
 	Instance_Id,
-	// `shadowAt`'s: the first shadow-casting light's view-projection, and
-	// its map's size, bias, normal bias and 1 (0: no light casts).
+	// `shadowAt`'s: the first shadow-casting light's view-projection, its
+	// map's size, bias, normal bias and 1 (0: no light casts), and where
+	// its light comes from (`Shadow.from`).
 	Shadow_Matrix,
 	Shadow_Params,
+	Shadow_From,
 	// `fogged`'s: the fog's linear colour; its kind (`Fog_Kind`), near, far
 	// and density (`fog_terms`).
 	Fog_Color,
@@ -71,6 +73,7 @@ BUILTINS := [Builtin]struct {
 	.Instance_Id       = {"instanceId", "float", true, {}},
 	.Shadow_Matrix     = {"o3dShadowMatrix", "mat4", true, {.Shadow_At}},
 	.Shadow_Params     = {"o3dShadowParams", "vec4", true, {.Shadow_At}},
+	.Shadow_From       = {"o3dShadowFrom", "vec4", true, {.Shadow_At}},
 	.Fog_Color         = {"o3dFogColor", "vec3", true, {.Fogged}},
 	.Fog_Params        = {"o3dFogParams", "vec4", true, {.Fogged}},
 }
@@ -97,6 +100,9 @@ Prelude_Function :: enum u8 {
 	// `vec4 linearToOutputTexel(vec4 value)`: as is (light; the frame is
 	// encoded after).
 	Linear_To_Output,
+	// `vec4 sRGBTransferEOTF(vec4 value)`: a display (sRGB) colour as light,
+	// alpha as is: what a colour picked by eye is, to write it.
+	Srgb_To_Linear,
 }
 
 @(rodata)
@@ -107,6 +113,7 @@ PRELUDE_FUNCTIONS := [Prelude_Function]struct {
 	.Tone_Mapping     = {"toneMapping", TONE_PRELUDE},
 	.Fogged           = {"fogged", FOG_PRELUDE},
 	.Linear_To_Output = {"linearToOutputTexel", OUTPUT_PRELUDE},
+	.Srgb_To_Linear   = {"sRGBTransferEOTF", SRGB_PRELUDE},
 }
 
 // The shadow map's sampler `shadowAt` reads (a channel of its own).
@@ -124,13 +131,16 @@ float shadowAt(vec3 worldPosition, vec3 worldNormal) {
 	if (o3dShadowParams.w == 0.0) {
 		return 1.0;
 	}
-	vec4 c = o3dShadowMatrix * vec4(worldPosition + normalize(worldNormal) * o3dShadowParams.z, 1.0);
+	vec3 p = worldPosition + normalize(worldNormal) * o3dShadowParams.z;
+	vec3 toward = o3dShadowFrom.xyz - p * o3dShadowFrom.w;
+	p -= (dot(toward, toward) > 0.0 ? normalize(toward) : vec3(0.0)) * o3dShadowParams.y;
+	vec4 c = o3dShadowMatrix * vec4(p, 1.0);
 	if (c.w <= 1e-6) {
 		return 1.0;
 	}
 	float u = c.x / c.w * 0.5 + 0.5;
 	float v = 0.5 - c.y / c.w * 0.5;
-	float z = c.z / c.w - o3dShadowParams.y;
+	float z = c.z / c.w;
 	if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0 || z < 0.0 || z > 1.0) {
 		return 1.0;
 	}
@@ -185,6 +195,13 @@ FOG_PRELUDE :: `vec3 fogged(vec3 color, vec3 worldPosition) {
 @(private = "file")
 OUTPUT_PRELUDE :: `vec4 linearToOutputTexel(vec4 value) {
 	return value;
+}
+`
+
+// three.js's, the sRGB curve exactly.
+@(private = "file")
+SRGB_PRELUDE :: `vec4 sRGBTransferEOTF(vec4 value) {
+	return vec4(mix(pow(value.rgb * 0.9478672986 + vec3(0.0521327014), vec3(2.4)), value.rgb * 0.0773993808, vec3(lessThanEqual(value.rgb, vec3(0.04045)))), value.a);
 }
 `
 
@@ -572,6 +589,8 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadow
 					} else {
 						put(dst, [4]f32{})
 					}
+				case .Shadow_From:
+					put(dst, shadows[0].from if len(shadows) > 0 else Vec4{})
 				case .Fog_Color:
 					put(dst, linear(scene.fog.color))
 				case .Fog_Params:

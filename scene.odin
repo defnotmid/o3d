@@ -20,6 +20,25 @@ Camera :: struct {
 	// OrthographicCamera instead: the view's height in world units.
 	orthographic: bool,
 	height:       f32,
+	// The lens, a thin lens as a physical camera's (perspective only): the
+	// aperture's f-number (0: a pinhole, everything sharp), the distance in
+	// focus along the camera's axis (world units taken as metres), and the
+	// film's height in millimetres (0: 24, 35 mm film's), which with `fov`
+	// gives the focal length. A point at depth z blurs over a circle
+	// (f / f_stop) * f / (focus - f) * |1 - focus / z| across on the film.
+	f_stop:       f32,
+	focus:        f32,
+	film_height:  f32,
+	// Where on the aperture this view is drawn from, a point on the unit
+	// disc: sharp through it, a pinhole there with the focus plane kept
+	// (`camera_matrices`), so a host averaging views over the aperture gets
+	// depth of field exactly, what a blurred foreground hides included.
+	// Unset with an f-stop: the depth of field is gathered from one view
+	// (`focus_of`).
+	lens:         Maybe(Vec2),
+	// How long the shutter is open, seconds (0: an instant): particles
+	// smear along their velocity over it.
+	shutter:      f32,
 }
 
 CAMERA_DEFAULT :: Camera{position = {0, 0, 5}, fov = 50, near = 0.1, far = 2000}
@@ -69,26 +88,18 @@ Fog :: struct {
 	density:   f32, // Exp2 (0 defaults to 0.00025)
 }
 
-// Depth of field (fframes-three-d's Focus; three.js's BokehPass): what is
-// not at `focus` blurs, a pixel by blur * |1 - focus / depth| (the depth
-// along the camera's axis of the nearest opaque surface there; where
-// nothing is drawn, infinitely far), at most `max_blur`, gathered from the
-// frame's light before it is tone mapped, as fframes gathers it: a
+// A frame's depth of field gathered from one view (`focus_of`): the
+// distance in focus, and in pixels the blur radius of what is infinitely
+// far behind it and the most any pixel blurs. A pixel blurs by
+// blur * |1 - focus / depth| (the depth along the camera's axis of the
+// nearest opaque surface there; where nothing is drawn, infinitely far),
+// gathered from the frame's light before it is tone mapped: a
 // golden-angle spiral out to the largest blur near the pixel (per 16-pixel
 // tile), each sample counting where its own blur reaches back, one behind
 // a sharp pixel blurring into it no more than twice that pixel's blur;
-// samples past 6 pixels read a half-size copy. None with no blur.
-Depth_Of_Field :: struct {
-	focus:    f32, // the sharp distance along the camera's axis
-	// The blur radius of what is infinitely far behind the focus, and the
-	// most any pixel blurs, as shares of the frame's height (fframes' blur
-	// pixels / 1080; max 0: fframes', 1.6 blur up to 40/1080; at most
-	// FOCUS_MAX_BLUR).
-	blur:     f32,
-	max_blur: f32,
-}
-
-// A frame's depth of field in pixels (`focus_of`).
+// samples past 6 pixels read a half-size copy (fframes-three-d's gather,
+// after Gustafsson). What a blurred foreground hides is not there: views
+// averaged over the aperture (`Camera.lens`) have it.
 Focus :: struct {
 	focus, blur, max_blur: f32,
 }
@@ -96,19 +107,41 @@ Focus :: struct {
 // The gather's tiles (their largest blur) and the radius past which it
 // reads the half-size copy, in pixels; the most any pixel blurs, a share
 // of the frame's height (its samples grow with the square of its blur: a
-// bound on a frame's time, above fframes' 40/1080).
+// bound on a frame's time; views averaged over the aperture have none).
 FOCUS_TILE :: 16
 FOCUS_INNER :: 6
 FOCUS_MAX_BLUR :: 1.0 / 16
 
-// A scene's depth of field on a frame `height` pixels tall.
-focus_of :: proc "contextless" (d: Depth_Of_Field, height: int) -> (f: Focus, ok: bool) {
-	if !(d.blur > 0) {
+// 35 mm film's height, the film a camera has unless it says.
+FILM_HEIGHT :: 24
+
+// The camera's focal length (millimetres) and aperture radius (world
+// units, metres), from its field of view, film and f-stop.
+lens_of :: proc "contextless" (c: Camera) -> (focal, aperture: f32) {
+	film := c.film_height if c.film_height > 0 else FILM_HEIGHT
+	focal = film * 0.5 / math.tan((c.fov if c.fov > 0 else 50) * math.RAD_PER_DEG * 0.5)
+	if c.f_stop > 0 {
+		aperture = focal / c.f_stop * 0.5 / 1000
+	}
+	return
+}
+
+// A camera's depth of field gathered on a frame `height` pixels tall: a
+// perspective camera with an f-stop and a focus, not drawn from a point of
+// its aperture (`Camera.lens`).
+focus_of :: proc "contextless" (c: Camera, height: int) -> (f: Focus, ok: bool) {
+	_, from_lens := c.lens.?
+	if c.orthographic || !(c.f_stop > 0) || !(c.focus > 0) || from_lens {
 		return
 	}
+	focal, _ := lens_of(c)
+	film := c.film_height if c.film_height > 0 else FILM_HEIGHT
+	// The circle's radius on the film for a point at infinity, in pixels.
+	s := max(c.focus * 1000, focal * 1.001)
 	h := f32(height)
-	f.focus, f.blur = d.focus, d.blur * h
-	f.max_blur = min(d.max_blur * h if d.max_blur > 0 else min(1.6 * f.blur, 40 * h / 1080), h * FOCUS_MAX_BLUR)
+	f.focus = c.focus
+	f.blur = 0.5 * (focal / c.f_stop) * focal / (s - focal) / film * h
+	f.max_blur = min(f.blur, h * FOCUS_MAX_BLUR)
 	return f, true
 }
 
@@ -123,15 +156,15 @@ focus_blur :: #force_inline proc "contextless" (f: Focus, key: f32) -> f32 {
 	return min(f.blur * abs(1 - f.focus * key), f.max_blur)
 }
 
-// A plane mirroring the scene (three.js's Reflector, as fframes-three-d
-// draws it): before the frame, the scene is drawn mirrored in it, at
-// `scale` of the frame's size, leaving out what is behind it, the
-// particles, the shadow catchers and the surfaces that show it; those
-// (`Material.reflection`) read it where they are on the screen, blurred
-// for their roughness (its levels halve while both sides pass 8 pixels,
-// six at most; sqrt(roughness) of the way down them). Not drawn when the
-// camera is behind it or no surface that shows it is in view.
-// ShaderMaterials are mirrored unclipped.
+// A plane mirroring the scene (three.js's Reflector): before the frame, the
+// scene is drawn mirrored in it, at `scale` of the frame's size, leaving
+// out what is behind it, the particles, the shadow catchers and the
+// surfaces that show it, with how far each sample's mirrored ray ran past
+// the plane (`mirror_run`); those (`Material.reflection`) read it where
+// they are on the screen, blurred for their roughness as far as their ray
+// runs (`reflection_lod`, `reflected_run`): sharp where things touch it.
+// Not drawn when the camera is behind it or no surface that shows it is in
+// view. ShaderMaterials are mirrored unclipped, with no runs.
 Reflector :: struct {
 	// A point on the plane, and its normal toward the side it mirrors (a
 	// zero normal: no reflector).
@@ -442,7 +475,6 @@ Scene :: struct {
 	// The plane mirroring the scene for materials' `reflection` (none with
 	// a zero normal).
 	reflector:             Reflector,
-	depth_of_field:        Depth_Of_Field,
 	// Also draw the frame's depth (`software_depth`, `o3d_sdlgpu.depth` /
 	// `read_depth`): per pixel, the depth both renderers test (reversed: 1
 	// near, 0 far, 0 where nothing is) of the nearest opaque draw at its centre, as
@@ -488,7 +520,6 @@ scene_clear :: proc(s: ^Scene) {
 	s.tone_mapping_exposure = 0
 	s.fog = {}
 	s.reflector = {}
-	s.depth_of_field = {}
 	s.depth = false
 	clear(&s.lights)
 	clear(&s.draws)
@@ -658,13 +689,17 @@ scene_tube :: proc(s: ^Scene, points: []Vec3, radius: f32 = 0.08, radial_segment
 // sprite). `offset` is the quad's centre from `position` in its width and
 // height, x right and y up in the quad's turned frame: {0, 0} centred on
 // it, {0, 0.5} its bottom edge's middle on it (a label's anchor), turning
-// about it.
+// about it. `velocity` (world units a second, in the draw's frame) moves
+// it while the camera's shutter is open (`Camera.shutter`, centred on the
+// frame's moment): it is drawn smeared over the way it went, its light
+// spread along it (a spark's streak), as the film would take it.
 Particle :: struct {
 	position: Vec3,
 	size:     Vec2,
 	color:    Vec4,
 	rotation: f32,
 	offset:   Vec2,
+	velocity: Vec3,
 }
 
 // Per-frame particles in `s`: draw the geometry with a transparent (or
@@ -886,13 +921,20 @@ Expanded_Draws :: struct {
 }
 
 // A drawn particle quad's colour (sRGB, times the material's) and opacity,
-// and where its visibility is probed (`Material.occlusion_radius`): the
+// where its visibility is probed (`Material.occlusion_radius`): the
 // particle's position on the frame (pixels from the top left), its depth,
-// and the disc's radius (0: not probed).
+// and the disc's radius (0: not probed); and its smear over the shutter:
+// how far it moved in its sprite's uv, and how many moments its pixels
+// average (1: none; the quad grown to hold the sprite's whole way).
 Sprite_Row :: struct {
-	color: Vec4,
-	probe: Vec4,
+	color:  Vec4,
+	probe:  Vec4,
+	motion: Vec4,
 }
+
+// The most moments a smeared particle's pixels average (one a pixel of its
+// way on the frame, up to this).
+SMEAR_TAPS :: 64
 
 @(private)
 Sprite_Key :: struct {
@@ -961,6 +1003,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 	eye := scene.camera.position
 	near := scene.camera.near if scene.camera.near > 0 else 0.1
 	probe_radius := max(d.material.occlusion_radius, 0)
+	shutter := max(scene.camera.shutter, 0)
 	default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
 	run_insts := insts if len(insts) > 0 else default_inst[:]
 	for inst in run_insts {
@@ -994,7 +1037,33 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 			rx := (cam_right * c + cam_up * sn) * half.x
 			uy := (cam_up * c - cam_right * sn) * half.y
 			centre := w + (rx * p.offset.x + uy * p.offset.y) * 2
-			corners := [4]Vec3{centre - rx - uy, centre + rx - uy, centre + rx + uy, centre - rx + uy}
+			// Its way over the shutter, as the frame sees it: the ends
+			// projected, their displacement back in the quad's plane at its
+			// depth, in the sprite's uv (1: its width, its height).
+			motion: Vec2
+			taps := 1
+			if shutter > 0 && p.velocity != {} {
+				m := (M * Vec4{p.velocity.x, p.velocity.y, p.velocity.z, 0}).xyz * shutter
+				c0 := view_proj * Vec4{w.x - m.x * 0.5, w.y - m.y * 0.5, w.z - m.z * 0.5, 1}
+				c1 := view_proj * Vec4{w.x + m.x * 0.5, w.y + m.y * 0.5, w.z + m.z * 0.5, 1}
+				if c0.w > 1e-6 && c1.w > 1e-6 {
+					depth := (view_proj * Vec4{w.x, w.y, w.z, 1}).w if !scene.camera.orthographic else 1
+					px := (c1.xy / c1.w - c0.xy / c0.w) * frame * 0.5
+					way := px * scale_px * depth
+					motion = {(way.x * c + way.y * sn) / (2 * half.x), (way.y * c - way.x * sn) / (2 * half.y)}
+					taps = min(1 + int(math.ceil(linalg.length(px))), SMEAR_TAPS)
+				}
+			}
+			// The quad over the sprite's whole way (its uv past 0..1).
+			lo, hi := Vec2{0, 0}, Vec2{1, 1}
+			if taps > 1 {
+				lo, hi = -0.5 * linalg.abs(motion), 1 + 0.5 * linalg.abs(motion)
+			}
+			at :: #force_inline proc "contextless" (centre, rx, uy: Vec3, uv: Vec2) -> Vec3 {
+				return centre + rx * (2 * uv.x - 1) + uy * (2 * uv.y - 1)
+			}
+			uvs := [4]Vec2{lo, {hi.x, lo.y}, hi, {lo.x, hi.y}}
+			corners := [4]Vec3{at(centre, rx, uy, uvs[0]), at(centre, rx, uy, uvs[1]), at(centre, rx, uy, uvs[2]), at(centre, rx, uy, uvs[3])}
 			if offset != 0 {
 				if scene.camera.orthographic {
 					for &v in corners {
@@ -1011,9 +1080,9 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 				}
 			}
 			base := u32(len(exp.vertices)) - first_v
-			append(&exp.vertices, Vertex{position = corners[0], normal = cam_back, uv = {0, 0}}, Vertex{position = corners[1], normal = cam_back, uv = {1, 0}}, Vertex{position = corners[2], normal = cam_back, uv = {1, 1}}, Vertex{position = corners[3], normal = cam_back, uv = {0, 1}})
+			append(&exp.vertices, Vertex{position = corners[0], normal = cam_back, uv = uvs[0]}, Vertex{position = corners[1], normal = cam_back, uv = uvs[1]}, Vertex{position = corners[2], normal = cam_back, uv = uvs[2]}, Vertex{position = corners[3], normal = cam_back, uv = uvs[3]})
 			append(&exp.indices, base, base + 1, base + 2, base, base + 2, base + 3)
-			row := Sprite_Row{color = p.color}
+			row := Sprite_Row{color = p.color, motion = {motion.x, motion.y, f32(taps), 0}}
 			if probe_radius > 0 {
 				// Behind the camera: off the frame.
 				row.probe = {-1e6, -1e6, -1, probe_radius}
@@ -1084,7 +1153,6 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	out.tone_mapping_exposure = scene.tone_mapping_exposure
 	out.fog = scene.fog
 	out.reflector = scene.reflector
-	out.depth_of_field = scene.depth_of_field
 	out.depth = scene.depth
 	append(&out.lights, ..scene.lights[:])
 	append(&out.uniforms, ..scene.uniforms[:])
@@ -1402,15 +1470,29 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 // The camera's view and projection for a `width x height` target.
 camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, proj: Mat4) {
 	up := c.up if c.up != {} else Vec3{0, 1, 0}
-	view = look_at(c.position, c.target, up)
 	aspect := f32(max(width, 1)) / f32(max(height, 1))
 	near := c.near if c.near > 0 else 0.1
 	far := c.far if c.far > near else near * 1e4
 	if c.orthographic {
-		proj = orthographic(c.height if c.height > 0 else 2, aspect, near, far)
-	} else {
-		proj = perspective(c.fov if c.fov > 0 else 50, aspect, near, far)
+		return look_at(c.position, c.target, up), orthographic(c.height if c.height > 0 else 2, aspect, near, far)
 	}
+	proj = perspective(c.fov if c.fov > 0 else 50, aspect, near, far)
+	lens, from_lens := c.lens.?
+	_, aperture := lens_of(c)
+	if !from_lens || aperture == 0 || !(c.focus > 0) {
+		return look_at(c.position, c.target, up), proj
+	}
+	// From a point of the aperture: the eye moved across the camera's
+	// plane, the projection sheared so the focus plane falls where it does
+	// through the centre.
+	o := lens * aperture
+	forward := linalg.normalize(c.target - c.position)
+	right := linalg.normalize(linalg.cross(forward, up))
+	cam_up := linalg.cross(right, forward)
+	shift := right * o.x + cam_up * o.y
+	view = look_at(c.position + shift, c.target + shift, up)
+	proj[0, 2] = -proj[0, 0] * o.x / c.focus
+	proj[1, 2] = -proj[1, 1] * o.y / c.focus
 	return
 }
 
@@ -1427,7 +1509,7 @@ sprite_materials :: proc "contextless" (scene: ^Scene, geos: ^Geometries, exp: ^
 // Whether a frame needs its depth drawn: asked for, depth of field, soft
 // particles or probed ones.
 needs_depth :: proc "contextless" (scene: ^Scene) -> bool {
-	if scene.depth || scene.depth_of_field.blur > 0 {
+	if _, blurred := focus_of(scene.camera, 1); scene.depth || blurred {
 		return true
 	}
 	for m in scene.draws.material[:len(scene.draws)] {
@@ -1673,19 +1755,17 @@ hdr_tap :: #force_inline proc "contextless" (mip: [][4]f32, w, h: int, q: Vec2) 
 // The scene mirrored in its reflector for a frame (`mirror_view`): the
 // view through the mirror (the camera's times the reflection), the eye's
 // image, the plane (`dot(plane.xyz, p) + plane.w`, how far a point is in
-// front of it; what is behind is left out) and the reflection's size and
-// levels.
+// front of it; what is behind is left out), the reflection's size and
+// levels (a full chain), and its texels per unit of the view's tangent
+// (orthographic: per world unit).
 Mirror_View :: struct {
 	view:          Mat4,
 	eye:           Vec3,
 	plane:         Vec4,
 	width, height: int,
 	levels:        int,
+	focal:         f32,
 }
-
-// The reflection's levels at most (fframes-three-d's: the last 1/32 of
-// the first).
-REFLECTION_LEVELS :: 6
 
 // The frame's view of the scene in `Scene.reflector`: there when the camera
 // is in front of it and a surface that shows it (`.Reflection` in
@@ -1722,8 +1802,14 @@ mirror_view :: proc(scene: ^Scene, materials: []Shading_Material, geos: ^Geometr
 	mv.width = max(int(math.ceil(f32(width) * scale)), 1)
 	mv.height = max(int(math.ceil(f32(height) * scale)), 1)
 	mv.levels = 1
-	for w, h := mv.width, mv.height; mv.levels < REFLECTION_LEVELS && w > 8 && h > 8; w, h = w / 2, h / 2 {
+	for w, h := mv.width, mv.height; w > 1 || h > 1; w, h = max(w >> 1, 1), max(h >> 1, 1) {
 		mv.levels += 1
+	}
+	c := scene.camera
+	if c.orthographic {
+		mv.focal = f32(mv.height) / max(c.height, 1e-6)
+	} else {
+		mv.focal = f32(mv.height) * 0.5 / math.tan(clamp(c.fov, 1e-3, 179) * math.RAD_PER_DEG * 0.5)
 	}
 	mv.view = view * mirror
 	mv.eye = eye - 2 * n * (linalg.dot(n, eye) - d)
@@ -1767,10 +1853,42 @@ reflection_bilinear :: #force_inline proc "contextless" (texels: [][4]f32, tex: 
 	return hdr_tap(texels[tex.mips[level] - tex.first_texel:][:w * h], w, h, {uv.x * f32(w), uv.y * f32(h)})
 }
 
-// The reflection's level for a roughness: sqrt(roughness) of the way down
-// to its last (fframes-three-d's; a mirror's is the sharpest).
-reflection_lod :: #force_inline proc "contextless" (roughness, last: f32) -> f32 {
-	return math.sqrt(clamp(roughness, 0, 1)) * last
+// The reflection's level for a surface of `roughness` whose mirrored ray,
+// `d` from the eye to the surface, runs `run` past it to what it meets
+// (`reflected_run`): GGX's lobe (alpha = roughness^2) spreads that light
+// over about 1.29 alpha (its half width at half height) times the run,
+// which the eye sees `d + run` away (orthographic: at the view's scale,
+// `focal`, Mirror_View's); the level whose texels are that blur across. A
+// mirror reads the first level, what touches the surface is sharp, what is
+// far blurs most.
+reflection_lod :: #force_inline proc "contextless" (roughness, run, d, focal: f32, ortho: bool, last: f32) -> f32 {
+	alpha := clamp(roughness, 0, 1) * clamp(roughness, 0, 1)
+	blur := 1.29 * alpha * focal * (run if ortho else run / (d + run))
+	return clamp(log2_fast(max(2 * blur, 1)), 0, last)
+}
+
+// A mirrored ray that meets nothing: as far as a run goes.
+REFLECTION_MISS :: 1e9
+
+// How far a reflective point's mirrored ray runs past it to what it meets,
+// from the reflection's runs (its second layer: the run premultiplied by
+// the coverage, and the coverage) at `uv`: the run where the ray meets
+// something; as far as it does not, the runs about it at level `far` (the
+// blur were it to meet nothing), so the edge of what it shows blurs as that
+// does; REFLECTION_MISS with nothing about it.
+reflected_run :: proc "contextless" (runs: [][4]f32, tex: ^Texture, uv: Vec2, far: f32) -> f32 {
+	near := reflection_at(runs, tex, uv, 0)
+	about := reflection_at(runs, tex, uv, far)
+	beyond := about.r / about.g if about.g > 0 else REFLECTION_MISS
+	return near.r + (1 - near.g) * beyond
+}
+
+// How far the mirror's ray from the eye's image `eye` to `p` runs past the
+// mirror's `plane` (Mirror_View's): the share of its length in front of it.
+mirror_run :: #force_inline proc "contextless" (p, eye: Vec3, plane: Vec4) -> f32 {
+	h := linalg.dot(plane.xyz, p) + plane.w
+	below := -(linalg.dot(plane.xyz, eye) + plane.w)
+	return linalg.length(p - eye) * max(h, 0) / max(h + below, 1e-6)
 }
 
 // The cubic B-spline's two amplitudes and offsets per axis (three.js's g0,

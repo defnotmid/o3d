@@ -3,7 +3,7 @@ package o3d
 import "core:math"
 import "core:thread"
 
-// Depth of field on the software renderer (`Scene.depth_of_field`;
+// Depth of field gathered on the software renderer (`focus_of`;
 // shaders/post.slang's fs_focus_* do the same on the GPU): once the frame's
 // pass has resolved its light into `Software.frame`, each pixel's key and
 // blur from the frame's depth, the largest blur per tile and near it, a

@@ -224,7 +224,7 @@ Geometries :: struct {
 	skin_vertices: [dynamic]Skin_Vertex,
 	morph_deltas:  [dynamic]Morph_Delta,
 	indices:       [dynamic]u32,
-	// Curve sets' blocks of ovg curves' words, and `.Curves` geometries'
+	// Curve sets' blocks of curves' words, and `.Curves` geometries'
 	// tables of their quads' sets (curve.odin).
 	curve_words:   [dynamic]u32,
 	curve_sets:    [dynamic]Curve_Set,

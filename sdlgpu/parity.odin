@@ -4,10 +4,11 @@ import "core:encoding/base64"
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
+import "core:slice"
 
 import sdl "vendor:sdl3"
 
-import "deps:ovg/curves"
+import curves "deps:ocurves"
 
 import o3d ".."
 
@@ -72,6 +73,8 @@ PARITY_CASES := [?]Parity_Case {
 	{"transmission_mips", 270, 170, build_transmission_mips},
 	{"reflector", 270, 170, build_reflector},
 	{"depth_of_field", 271, 171, build_depth_of_field},
+	{"lens_view", 271, 171, build_lens_view},
+	{"smear", 240, 180, build_smear},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -176,7 +179,7 @@ build_alpha_map :: proc(a: ^Parity_Assets) -> string {
 	s := &a.scene
 	o3d.scene_clear(s)
 	s.camera = {position = {2.2, 2.4, 4.2}, target = {0, 0.4, 0}, fov = 45, near = 0.1, far = 30}
-	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1.5, 5, 2}, cast_shadow = true, shadow = {map_size = 512, bias = -0.0005}})
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1.5, 5, 2}, cast_shadow = true, shadow = {map_size = 512, bias = -0.005}})
 	append(&s.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
 	floor := o3d.MATERIAL_DEFAULT
 	floor.color, floor.roughness, floor.flags = {0.7, 0.72, 0.75}, 0.9, {.Receive_Shadow}
@@ -402,7 +405,7 @@ build_shadow :: proc(a: ^Parity_Assets) -> string {
 	for &l in a.scene.lights {
 		if l.kind == .Directional {
 			l.cast_shadow = true
-			l.shadow = {map_size = 1024, height = 9, bias = -0.0005, normal_bias = 0.01}
+			l.shadow = {map_size = 1024, bias = -0.005, normal_bias = 0.01}
 		}
 	}
 	append(&a.scene.lights, o3d.Light{
@@ -416,7 +419,7 @@ build_shadow :: proc(a: ^Parity_Assets) -> string {
 		angle       = 32 * math.RAD_PER_DEG,
 		penumbra    = 0.35,
 		cast_shadow = true,
-		shadow      = {map_size = 512, bias = -0.001, normal_bias = 0.01},
+		shadow      = {map_size = 512, bias = -0.01, normal_bias = 0.01},
 	})
 	for i in 0 ..< len(a.scene.draws) {
 		a.scene.draws.material[i].flags += {.Cast_Shadow, .Receive_Shadow}
@@ -593,7 +596,7 @@ build_shadow_only :: proc(a: ^Parity_Assets) -> string {
 	clear(&s.draws)
 	s.fog = {}
 	s.background_blurriness = 0
-	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2, position = {2, 6, 3}, cast_shadow = true, shadow = {map_size = 1024, height = 8, bias = -0.0005, normal_bias = 0.01}})
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2, position = {2, 6, 3}, cast_shadow = true, shadow = {map_size = 1024, bias = -0.005, normal_bias = 0.01}})
 	catcher := o3d.MATERIAL_DEFAULT
 	catcher.color, catcher.opacity, catcher.flags = {0.1, 0.05, 0.2}, 0.6, {.Shadow_Only}
 	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 6, 6), o3d.compose({0, 0, 0}, {-math.PI / 2, 0, 0}), catcher})
@@ -669,6 +672,55 @@ build_particles :: proc(a: ^Parity_Assets) -> string {
 	add := o3d.MATERIAL_DEFAULT
 	add.color_map, add.flags = puff, {.Additive}
 	append(&s.draws, o3d.Draw{o3d.scene_particles(s, sparks[:]), o3d.compose({0.6, 0.2, 0.6}), add})
+	return ""
+}
+
+// Particles over a 1/30 s shutter: additive sparks flung from a point (each
+// its own velocity, some toward and away from the camera), a few turned
+// blended puffs drifting, and a still one.
+@(private = "file")
+build_smear :: proc(a: ^Parity_Assets) -> string {
+	T :: 32
+	puff_px: [T * T * 4]u8
+	for y in 0 ..< T {
+		for x in 0 ..< T {
+			q := o3d.Vec2{f32(x) + 0.5, f32(y) + 0.5} / T - 0.5
+			r := math.sqrt(q.x * q.x + q.y * q.y) * 2
+			i := (y * T + x) * 4
+			fall := clamp(1 - r, 0, 1)
+			puff_px[i], puff_px[i + 1], puff_px[i + 2], puff_px[i + 3] = 255, u8(200 + 55 * fall), 255, u8(fall * fall * (3 - 2 * fall) * 255)
+		}
+	}
+	puff := o3d.texture_add(&a.textures, puff_px[:], T, T)
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.background_color = {0.05, 0.06, 0.1, 1}
+	s.camera = {position = {0, 1, 4}, target = {0, 0.6, 0}, fov = 45, near = 0.1, far = 30, shutter = 1.0 / 30}
+	seed: u32 = 777
+	rnd :: proc(seed: ^u32) -> f32 {
+		seed^ = seed^ * 1664525 + 1013904223
+		return f32(seed^ >> 8) / f32(1 << 24)
+	}
+	sparks: [60]o3d.Particle
+	for &p in sparks {
+		dir := o3d.Vec3{rnd(&seed) - 0.5, rnd(&seed) * 0.8 + 0.2, rnd(&seed) - 0.5}
+		p.position = dir * rnd(&seed) * 1.2
+		p.velocity = dir * (4 + 8 * rnd(&seed))
+		p.size = 0.04 + 0.05 * rnd(&seed)
+		p.color = {1, 0.5 + 0.4 * rnd(&seed), 0.15, 1}
+	}
+	add := o3d.MATERIAL_DEFAULT
+	add.color_map, add.flags = puff, {.Additive}
+	append(&s.draws, o3d.Draw{o3d.scene_particles(s, sparks[:]), o3d.compose({0, 0.2, 0}), add})
+	puffs := [4]o3d.Particle{
+		{position = {-1, 1.1, 0}, size = 0.6, rotation = 0.5, color = {0.6, 0.8, 1, 0.8}, velocity = {9, 0, 0}},
+		{position = {1, 0.4, -0.5}, size = 0.5, rotation = 1.2, color = {1, 0.7, 0.6, 0.7}, velocity = {-3, 6, 2}},
+		{position = {0.2, 1.4, 0.5}, size = 0.4, color = {0.8, 1, 0.7, 0.9}, velocity = {0, -2, 20}},
+		{position = {-0.4, 0.2, 0.3}, size = 0.5, color = {1, 1, 1, 0.6}},
+	}
+	m := o3d.MATERIAL_DEFAULT
+	m.color_map = puff
+	append(&s.draws, o3d.Draw{o3d.scene_particles(s, puffs[:]), o3d.compose({0, 0, 0}), m})
 	return ""
 }
 
@@ -1277,7 +1329,7 @@ build_skinned :: proc(a: ^Parity_Assets) -> string {
 		position    = {2, 4, 3},
 		target      = {0, 0.5, 0},
 		cast_shadow = true,
-		shadow      = {map_size = 512, height = 6, bias = -0.002, normal_bias = 0.01},
+		shadow      = {map_size = 512, bias = -0.01, normal_bias = 0.01},
 	})
 	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
 	floor := o3d.MATERIAL_DEFAULT
@@ -1380,7 +1432,7 @@ build_morph :: proc(a: ^Parity_Assets) -> string {
 		position    = {2, 4, 3},
 		target      = {0, 0.5, 0},
 		cast_shadow = true,
-		shadow      = {map_size = 512, height = 6, bias = -0.002, normal_bias = 0.01},
+		shadow      = {map_size = 512, height = 6, bias = -0.01, normal_bias = 0.01},
 	})
 	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.35})
 	floor := o3d.MATERIAL_DEFAULT
@@ -1501,6 +1553,18 @@ build_shapes :: proc(a: ^Parity_Assets) -> string {
 	return ""
 }
 
+// The polygons as closed contours of lines, appended to `c`.
+@(private = "file")
+polygons :: proc(c: ^curves.Contours, rings: ..[]o3d.Vec2) {
+	for r in rings {
+		curves.contours_begin(c, r[0])
+		for p in r[1:] {
+			curves.contours_line(c, p)
+		}
+		curves.contours_end(c, true, false)
+	}
+}
+
 // ExtrudeGeometry from contours grouped by shapes_from_contours: a bevelled
 // "B" with smoothed walls, its caps and sides drawn with two materials, a
 // flat-faceted ring through it, and a ShapeGeometry plate behind.
@@ -1513,11 +1577,15 @@ build_extrude :: proc(a: ^Parity_Assets) -> string {
 	body := []o3d.Vec2{{0, 0}, {2.2, 0}, {3, 0.8}, {3, 2.2}, {2.6, 2.5}, {3, 2.8}, {3, 4.2}, {2.2, 5}, {0, 5}}
 	upper := []o3d.Vec2{{1, 3}, {1, 4}, {2, 4}, {2, 3}}
 	lower := []o3d.Vec2{{1, 1}, {1, 2}, {2, 2}, {2, 1}}
-	shapes := o3d.shapes_from_contours({upper, body, lower})
-	defer o3d.shapes_destroy(shapes)
+	c: curves.Contours
+	defer curves.contours_destroy(&c)
+	shapes: o3d.Shapes
+	defer o3d.shapes_destroy(&shapes)
+	polygons(&c, upper, body, lower)
+	o3d.shapes_from_contours(&shapes, &c)
 	o := o3d.EXTRUDE_DEFAULT
 	o.depth, o.bevel_thickness, o.bevel_size, o.bevel_segments, o.crease_angle = 0.8, 0.2, 0.15, 4, math.PI / 4
-	b := o3d.extrude_geometry(&a.geos, shapes, o)
+	b := o3d.extrude_geometry(&a.geos, &shapes, o)
 	at := o3d.compose({-0.9, -1.2, 0}, {0, -0.5, 0}, {0.5, 0.5, 0.5})
 	caps := o3d.MATERIAL_DEFAULT
 	caps.color, caps.roughness = {0.95, 0.35, 0.3}, 0.35
@@ -1531,33 +1599,40 @@ build_extrude :: proc(a: ^Parity_Assets) -> string {
 		outer[i] = {math.cos(t), math.sin(t)}
 		inner[i] = 0.6 * outer[i]
 	}
-	ring := []o3d.Shape{{outer[:], {inner[:]}}}
+	slice.reverse(inner[:])
+	curves.contours_clear(&c)
+	polygons(&c, outer[:], inner[:])
+	o3d.shapes_from_contours(&shapes, &c)
 	flat := o3d.EXTRUDE_DEFAULT
 	flat.depth, flat.bevel_thickness, flat.bevel_size, flat.bevel_segments = 0.3, 0.08, 0.05, 2
 	ring_mat := o3d.MATERIAL_DEFAULT
 	ring_mat.color, ring_mat.roughness = {0.3, 0.6, 0.95}, 0.5
-	append(&a.scene.draws, o3d.Draw{o3d.extrude_geometry(&a.geos, ring, flat).geometry, o3d.compose({0.9, 0, 0}, {0.4, 0.9, 0}), ring_mat})
+	append(&a.scene.draws, o3d.Draw{o3d.extrude_geometry(&a.geos, &shapes, flat).geometry, o3d.compose({0.9, 0, 0}, {0.4, 0.9, 0}), ring_mat})
 
-	plate := []o3d.Shape{{[]o3d.Vec2{{-2, -1.5}, {2, -1.5}, {2, 1.5}, {-2, 1.5}}, {inner[:]}}}
+	curves.contours_clear(&c)
+	polygons(&c, {{-2, -1.5}, {2, -1.5}, {2, 1.5}, {-2, 1.5}}, inner[:])
+	o3d.shapes_from_contours(&shapes, &c)
 	plate_mat := o3d.MATERIAL_DEFAULT
 	plate_mat.color, plate_mat.roughness = {0.85, 0.85, 0.8}, 0.8
-	append(&a.scene.draws, o3d.Draw{o3d.shape_geometry(&a.geos, plate), o3d.compose({0, 0, -1}), plate_mat})
+	append(&a.scene.draws, o3d.Draw{o3d.shape_geometry(&a.geos, &shapes), o3d.compose({0, 0, -1}), plate_mat})
 	return ""
 }
 
 // A heart of two cubics and a ring of two circles (cubic arcs), as paths.
 @(private = "file")
-curve_paths :: proc(heart, ring: ^o3d.Path) {
-	o3d.path_move_to(heart, {0, -1})
-	o3d.path_bezier_curve_to(heart, {-1.6, -0.1}, {-0.9, 1.2}, {0, 0.5})
-	o3d.path_bezier_curve_to(heart, {0.9, 1.2}, {1.6, -0.1}, {0, -1})
+curve_paths :: proc(heart, ring: ^curves.Contours) {
+	curves.contours_begin(heart, {0, -1})
+	curves.contours_cubic(heart, {-1.6, -0.1}, {-0.9, 1.2}, {0, 0.5})
+	curves.contours_cubic(heart, {0.9, 1.2}, {1.6, -0.1}, {0, -1})
+	curves.contours_end(heart, true, false)
 	for r in ([2]f32{1, 0.55}) {
 		k := r * 0.5522847498
-		o3d.path_move_to(ring, {r, 0})
-		o3d.path_bezier_curve_to(ring, {r, k}, {k, r}, {0, r})
-		o3d.path_bezier_curve_to(ring, {-k, r}, {-r, k}, {-r, 0})
-		o3d.path_bezier_curve_to(ring, {-r, -k}, {-k, -r}, {0, -r})
-		o3d.path_bezier_curve_to(ring, {k, -r}, {r, -k}, {r, 0})
+		curves.contours_begin(ring, {r, 0})
+		curves.contours_cubic(ring, {r, k}, {k, r}, {0, r})
+		curves.contours_cubic(ring, {-k, r}, {-r, k}, {-r, 0})
+		curves.contours_cubic(ring, {-r, -k}, {-k, -r}, {0, -r})
+		curves.contours_cubic(ring, {k, -r}, {r, -k}, {r, 0})
+		curves.contours_end(ring, true, false)
 	}
 }
 
@@ -1570,9 +1645,9 @@ build_curves :: proc(a: ^Parity_Assets) -> string {
 	a.scene.camera = {position = {0.3, 0.5, 4}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 30}
 	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {2, 3, 4}})
 	append(&a.scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.3, 0.2, 0.2}, intensity = 0.8})
-	heart, ring: o3d.Path
-	defer o3d.path_destroy(&heart)
-	defer o3d.path_destroy(&ring)
+	heart, ring: curves.Contours
+	defer curves.contours_destroy(&heart)
+	defer curves.contours_destroy(&ring)
 	curve_paths(&heart, &ring)
 	heart_geo := o3d.exact_shape_geometry(&a.geos, &heart)
 	ring_geo := o3d.exact_shape_geometry(&a.geos, &ring, .Even_Odd)
@@ -1608,11 +1683,11 @@ build_curves :: proc(a: ^Parity_Assets) -> string {
 build_curve_shadow :: proc(a: ^Parity_Assets) -> string {
 	o3d.scene_clear(&a.scene)
 	a.scene.camera = {position = {1.5, 2, 4}, target = {0, 0.4, 0}, fov = 45, near = 0.1, far = 30}
-	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1.5, 4, 2.5}, cast_shadow = true, shadow = {map_size = 1024, height = 6, bias = -0.0005, normal_bias = 0.01}})
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1.5, 4, 2.5}, cast_shadow = true, shadow = {map_size = 1024, bias = -0.005, normal_bias = 0.01}})
 	append(&a.scene.lights, o3d.Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
-	heart, ring: o3d.Path
-	defer o3d.path_destroy(&heart)
-	defer o3d.path_destroy(&ring)
+	heart, ring: curves.Contours
+	defer curves.contours_destroy(&heart)
+	defer curves.contours_destroy(&ring)
 	curve_paths(&heart, &ring)
 	floor := o3d.MATERIAL_DEFAULT
 	floor.color, floor.roughness, floor.flags = {0.8, 0.8, 0.75}, 0.9, {.Receive_Shadow}
@@ -1627,7 +1702,7 @@ build_curve_shadow :: proc(a: ^Parity_Assets) -> string {
 }
 
 // Glyph runs (curve.odin): sets shared across runs and glyphs, a y-down
-// glyph from ovg's builder (as a font's), glyphs whose quads overlap and a
+// glyph from curves' builder (as a font's), glyphs whose quads overlap and a
 // mark over another glyph. An opaque run stands tilted over a shadowed
 // floor and casts its glyphs' outlines; a transparent mirrored run (font
 // units, y down) lies far along the floor (grazing, small); a
@@ -1635,11 +1710,11 @@ build_curve_shadow :: proc(a: ^Parity_Assets) -> string {
 build_text :: proc(a: ^Parity_Assets) -> string {
 	o3d.scene_clear(&a.scene)
 	a.scene.camera = {position = {0.1, 1.2, 2.5}, target = {-0.1, 0.5, 0.4}, fov = 45, near = 0.1, far = 30}
-	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1, 4, 3}, cast_shadow = true, shadow = {map_size = 1024, height = 6, bias = -0.0005, normal_bias = 0.01}})
+	append(&a.scene.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {1, 4, 3}, cast_shadow = true, shadow = {map_size = 1024, bias = -0.005, normal_bias = 0.01}})
 	append(&a.scene.lights, o3d.Light{kind = .Hemisphere, color = {0.8, 0.9, 1}, ground = {0.3, 0.2, 0.2}, intensity = 0.8})
-	heart, ring: o3d.Path
-	defer o3d.path_destroy(&heart)
-	defer o3d.path_destroy(&ring)
+	heart, ring: curves.Contours
+	defer curves.contours_destroy(&heart)
+	defer curves.contours_destroy(&ring)
 	curve_paths(&heart, &ring)
 	heart_set := o3d.curve_set_add(&a.geos, &heart)
 	ring_set := o3d.curve_set_add(&a.geos, &ring, .Even_Odd)
@@ -2317,16 +2392,32 @@ build_reflector :: proc(a: ^Parity_Assets) -> string {
 	return ""
 }
 
-// The reflector's scene through a lens focused on its metal sphere: the
-// floor and what is nearer or farther blurred more as they are (the
-// mirror's light, additive and transparent draws among them), at an odd
-// size (the last tile and the half copy's last row and column partial).
+// The reflector's scene through a lens focused on its metal sphere, its
+// depth of field gathered: the floor and what is nearer or farther blurred
+// more as they are (the mirror's light, additive and transparent draws
+// among them), at an odd size (the last tile and the half copy's last row
+// and column partial).
 build_depth_of_field :: proc(a: ^Parity_Assets) -> string {
 	if e := build_reflector(a); e != "" {
 		return e
 	}
 	c := &a.scene.camera
 	axis := linalg.normalize(c.target - c.position)
-	a.scene.depth_of_field = {focus = linalg.dot(o3d.Vec3{-0.2, 0.4, 0.3} - c.position, axis), blur = 24.0 / 1080}
+	c.focus = linalg.dot(o3d.Vec3{-0.2, 0.4, 0.3} - c.position, axis)
+	// The f-stop blurring infinity by 24/1080 of the height.
+	focal, _ := o3d.lens_of(c^)
+	c.f_stop = 0.5 * focal * focal / (c.focus * 1000 - focal) / o3d.FILM_HEIGHT * 1080 / 24
+	return ""
+}
+
+// The reflector's scene drawn from a point of the camera's aperture: the
+// eye moved, the projection sheared to keep the focus plane (the mirror's
+// view through it too).
+build_lens_view :: proc(a: ^Parity_Assets) -> string {
+	if e := build_depth_of_field(a); e != "" {
+		return e
+	}
+	a.scene.camera.f_stop = 0.25
+	a.scene.camera.lens = o3d.Vec2{0.6, -0.5}
 	return ""
 }
