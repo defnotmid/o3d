@@ -37,9 +37,25 @@ Camera :: struct {
 	// (`focus_of`).
 	lens:         Maybe(Vec2),
 	// How long the shutter is open, seconds (0: an instant): particles
-	// smear along their velocity over it.
+	// smear along their velocity over it, and with anything's state at its
+	// opening (`opened` here, `Draw.opened`, `scene_set_draw_opened_joints`
+	// and `_morphs`) the frame blurs along its motion: from there to now,
+	// the shutter's middle, and on as far again.
 	shutter:      f32,
+	// The camera's pose at the shutter's opening (unset: it did not move).
+	opened:       Maybe(Camera_Pose),
+	// The longest half streak motion blurs over, a share of the frame's
+	// height (0: MOTION_MAX_BLUR); longer motion is cut to it.
+	max_blur:     f32,
 }
+
+// Where a camera is and looks (`Camera`'s fields of the same names).
+Camera_Pose :: struct {
+	position, target, up: Vec3,
+	fov, height:          f32,
+}
+
+MOTION_MAX_BLUR :: 0.04
 
 CAMERA_DEFAULT :: Camera{position = {0, 0, 5}, fov = 50, near = 0.1, far = 2000}
 
@@ -493,6 +509,19 @@ Scene :: struct {
 	joints:                [dynamic]Mat4,
 	// Morphed draws' target weights: draw i's are morph_weights[draw_morphs[i].first:][:draw_morphs[i].count].
 	draw_morphs:           [dynamic]Morph_Range,
+	// The draws at the shutter's opening (motion blur, `Camera.shutter`):
+	// their models (`scene_set_draw_opened`; none, or zero: where they are,
+	// moving only as the camera does), joints and weights (in the tables
+	// above; none: as now).
+	draw_opened:           [dynamic]Mat4,
+	// An instanced draw's instances at the opening, row for row with its
+	// own (a different count: they move only with the draw).
+	draw_opened_instances: [dynamic]Instance_Range,
+	draw_opened_joints:    [dynamic]Joint_Range,
+	draw_opened_morphs:    [dynamic]Morph_Range,
+	// A ShaderMaterial's uniforms at the opening, for its vertex stage
+	// (`scene_uniforms`'; none: as now).
+	draw_opened_uniforms:  [dynamic]Uniform_Range,
 	// Which instance each draw is (0-based), filled by expand_draws; a draw
 	// past its end is instance 0.
 	draw_instance_ids:     [dynamic]i32,
@@ -528,6 +557,11 @@ scene_clear :: proc(s: ^Scene) {
 	clear(&s.draw_joints)
 	clear(&s.joints)
 	clear(&s.draw_morphs)
+	clear(&s.draw_opened)
+	clear(&s.draw_opened_instances)
+	clear(&s.draw_opened_joints)
+	clear(&s.draw_opened_morphs)
+	clear(&s.draw_opened_uniforms)
 	clear(&s.draw_instance_ids)
 	clear(&s.morph_weights)
 	clear(&s.draw_instances)
@@ -771,31 +805,102 @@ scene_joints :: proc(s: ^Scene, matrices: []Mat4) -> Joint_Range {
 	return {u32(first), u32(len(matrices))}
 }
 
+// Draw `di`'s model at the shutter's opening (motion blur) this frame.
+scene_set_draw_opened :: proc(s: ^Scene, di: int, model: Mat4) {
+	draw_table_set(&s.draw_opened, di, model)
+}
+
+// Draw `di`'s instances at the shutter's opening (motion blur), from
+// `scene_instances`, row for row with its own.
+scene_set_draw_opened_instances :: proc(s: ^Scene, di: int, r: Instance_Range) {
+	if r.count > 0 {
+		draw_table_set(&s.draw_opened_instances, di, r)
+	}
+}
+
+// Draw `di`'s instances at the shutter's opening (nil: none).
+scene_draw_opened_instances :: proc "contextless" (s: ^Scene, di: int) -> []Instance {
+	if di < 0 || di >= len(s.draw_opened_instances) {
+		return nil
+	}
+	r := s.draw_opened_instances[di]
+	if r.count == 0 || int(r.first + r.count) > len(s.instances) {
+		return nil
+	}
+	return s.instances[r.first:][:r.count]
+}
+
+// Draw `di`'s model at the shutter's opening: zero when it has none.
+scene_draw_opened :: #force_inline proc "contextless" (s: ^Scene, di: int) -> Mat4 {
+	return s.draw_opened[di] if di >= 0 && di < len(s.draw_opened) else {}
+}
+
 // Associates `r` with draw `di` for this frame.
 scene_set_draw_joints :: proc(s: ^Scene, di: int, r: Joint_Range) {
-	if r.count == 0 {
+	if r.count > 0 {
+		draw_table_set(&s.draw_joints, di, r)
+	}
+}
+
+// Draw `di`'s joints at the shutter's opening (motion blur), from
+// `scene_joints` as its current ones.
+scene_set_draw_opened_joints :: proc(s: ^Scene, di: int, r: Joint_Range) {
+	if r.count > 0 {
+		draw_table_set(&s.draw_opened_joints, di, r)
+	}
+}
+
+// Draw `di`'s ShaderMaterial uniforms at the shutter's opening (motion
+// blur: its vertex stage run as it was then), from `scene_uniforms`.
+scene_set_draw_opened_uniforms :: proc(s: ^Scene, di: int, r: Uniform_Range) {
+	if r.count > 0 {
+		draw_table_set(&s.draw_opened_uniforms, di, r)
+	}
+}
+
+// Draw `di`'s uniforms at the shutter's opening (none: `ok` false).
+scene_draw_opened_uniforms :: #force_inline proc "contextless" (s: ^Scene, di: int) -> (r: Uniform_Range, ok: bool) {
+	if di < 0 || di >= len(s.draw_opened_uniforms) {
 		return
 	}
-	if len(s.draw_joints) <= di {
-		old := len(s.draw_joints)
-		table_grow_non_zero(&s.draw_joints, di + 1)
-		for i in old ..< di {
-			s.draw_joints[i] = {}
-		}
-	}
-	s.draw_joints[di] = r
+	r = s.draw_opened_uniforms[di]
+	return r, r.count > 0
 }
 
 // Draw `di`'s joint matrices (nil when unskinned).
 scene_draw_joints :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []Mat4 {
-	if di < 0 || di >= len(s.draw_joints) {
+	return joints_of(s, s.draw_joints[:], di)
+}
+
+// Draw `di`'s joint matrices at the shutter's opening (nil: as now).
+scene_draw_opened_joints :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []Mat4 {
+	return joints_of(s, s.draw_opened_joints[:], di)
+}
+
+@(private = "file")
+joints_of :: #force_inline proc "contextless" (s: ^Scene, ranges: []Joint_Range, di: int) -> []Mat4 {
+	if di < 0 || di >= len(ranges) {
 		return nil
 	}
-	r := s.draw_joints[di]
+	r := ranges[di]
 	if r.count == 0 || int(r.first + r.count) > len(s.joints) {
 		return nil
 	}
 	return s.joints[r.first:][:r.count]
+}
+
+// Sets draw `di`'s entry of a per-draw table, growing it to hold it (the
+// draws before without one).
+@(private = "file")
+draw_table_set :: proc(table: ^[dynamic]$T, di: int, value: T) {
+	if len(table) <= di {
+		old := len(table)
+		table_grow_non_zero(table, di + 1)
+		for i in old ..< di {
+			table[i] = {}
+		}
+	}
+	table[di] = value
 }
 
 // Keeps morph target weights in `s.morph_weights` this frame.
@@ -818,25 +923,35 @@ scene_morphs :: proc(s: ^Scene, weights: []f32) -> Morph_Range {
 
 // Associates morph weights `r` with draw `di` for this frame.
 scene_set_draw_morphs :: proc(s: ^Scene, di: int, r: Morph_Range) {
-	if r.count == 0 {
-		return
+	if r.count > 0 {
+		draw_table_set(&s.draw_morphs, di, r)
 	}
-	if len(s.draw_morphs) <= di {
-		old := len(s.draw_morphs)
-		table_grow_non_zero(&s.draw_morphs, di + 1)
-		for i in old ..< di {
-			s.draw_morphs[i] = {}
-		}
+}
+
+// Draw `di`'s morph weights at the shutter's opening (motion blur), from
+// `scene_morphs` as its current ones.
+scene_set_draw_opened_morphs :: proc(s: ^Scene, di: int, r: Morph_Range) {
+	if r.count > 0 {
+		draw_table_set(&s.draw_opened_morphs, di, r)
 	}
-	s.draw_morphs[di] = r
 }
 
 // Draw `di`'s morph target weights (nil when unmorphed).
 scene_draw_morphs :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []f32 {
-	if di < 0 || di >= len(s.draw_morphs) {
+	return morphs_of(s, s.draw_morphs[:], di)
+}
+
+// Draw `di`'s morph target weights at the shutter's opening (nil: as now).
+scene_draw_opened_morphs :: #force_inline proc "contextless" (s: ^Scene, di: int) -> []f32 {
+	return morphs_of(s, s.draw_opened_morphs[:], di)
+}
+
+@(private = "file")
+morphs_of :: #force_inline proc "contextless" (s: ^Scene, ranges: []Morph_Range, di: int) -> []f32 {
+	if di < 0 || di >= len(ranges) {
 		return nil
 	}
-	r := s.draw_morphs[di]
+	r := ranges[di]
 	if r.count == 0 || int(r.first + r.count) > len(s.morph_weights) {
 		return nil
 	}
@@ -856,17 +971,9 @@ scene_instances :: proc(s: ^Scene, items: []Instance) -> Instance_Range {
 
 // Associates instances `r` with draw `di` for this frame.
 scene_set_draw_instances :: proc(s: ^Scene, di: int, r: Instance_Range) {
-	if r.count == 0 {
-		return
+	if r.count > 0 {
+		draw_table_set(&s.draw_instances, di, r)
 	}
-	if len(s.draw_instances) <= di {
-		old := len(s.draw_instances)
-		table_grow_non_zero(&s.draw_instances, di + 1)
-		for i in old ..< di {
-			s.draw_instances[i] = {}
-		}
-	}
-	s.draw_instances[di] = r
 }
 
 // Draw `di`'s instances (nil when not instanced).
@@ -894,6 +1001,11 @@ scene_destroy :: proc(s: ^Scene) {
 	delete(s.draw_joints)
 	delete(s.joints)
 	delete(s.draw_morphs)
+	delete(s.draw_opened)
+	delete(s.draw_opened_instances)
+	delete(s.draw_opened_joints)
+	delete(s.draw_opened_morphs)
+	delete(s.draw_opened_uniforms)
 	delete(s.draw_instance_ids)
 	delete(s.morph_weights)
 	delete(s.draw_instances)
@@ -1174,7 +1286,15 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 		}
 		j_range := scene.draw_joints[di] if di < len(scene.draw_joints) else Joint_Range{}
 		m_range := scene.draw_morphs[di] if di < len(scene.draw_morphs) else Morph_Range{}
+		oj_range := scene.draw_opened_joints[di] if di < len(scene.draw_opened_joints) else Joint_Range{}
+		ou_range, _ := scene_draw_opened_uniforms(scene, di)
+		om_range := scene.draw_opened_morphs[di] if di < len(scene.draw_opened_morphs) else Morph_Range{}
+		d_opened := scene_draw_opened(scene, di)
 		insts := scene_draw_instances(scene, di)
+		opened_insts := scene_draw_opened_instances(scene, di)
+		if len(opened_insts) != len(insts) {
+			opened_insts = nil
+		}
 		mode := effective_draw_mode(d.material, geo)
 		if mode == .Curves && geo.mode != .Curves {
 			// Asked of geometry without curves: its triangles as they are.
@@ -1187,7 +1307,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 			default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
 			run_insts := insts if len(insts) > 0 else default_inst[:]
 			base_lin := linear(d.material.color)
-			for inst in run_insts {
+			for inst, k in run_insts {
 				M := d.model * inst.transform if len(insts) > 0 else d.model
 				first_v := u32(len(exp.vertices))
 				first_i := u32(len(exp.indices))
@@ -1208,6 +1328,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 				if len(insts) > 0 && (inst.has_color || inst.color != {}) {
 					mat.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
 				}
+				opened_set(out, len(out.draws), instance_opened(d.model, d_opened, opened_insts, k, inst.transform if len(insts) > 0 else 1))
 				append(&out.draws, Draw{geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos) - 1), model = M, material = mat})
 			}
 			continue
@@ -1284,7 +1405,12 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 				append(&out.draws, d)
 				scene_set_draw_joints(out, ei, j_range)
 				scene_set_draw_morphs(out, ei, m_range)
+				scene_set_draw_opened_joints(out, ei, oj_range)
+				scene_set_draw_opened_morphs(out, ei, om_range)
+				scene_set_draw_opened_uniforms(out, ei, ou_range)
+				opened_set(out, ei, d_opened)
 				if outline_geo_id != 0 {
+					opened_set(out, len(out.draws), d_opened)
 					append(&out.draws, Draw{geometry = outline_geo_id, model = d.model, material = outline_mat})
 				}
 			} else {
@@ -1301,7 +1427,13 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 					out.draw_instance_ids[ei] = i32(k)
 					scene_set_draw_joints(out, ei, j_range)
 					scene_set_draw_morphs(out, ei, m_range)
+					scene_set_draw_opened_joints(out, ei, oj_range)
+					scene_set_draw_opened_morphs(out, ei, om_range)
+					scene_set_draw_opened_uniforms(out, ei, ou_range)
+					opened := instance_opened(d.model, d_opened, opened_insts, k, inst.transform)
+					opened_set(out, ei, opened)
 					if outline_geo_id != 0 {
+						opened_set(out, len(out.draws), opened)
 						append(&out.draws, Draw{geometry = outline_geo_id, model = idraw.model, material = outline_mat})
 					}
 				}
@@ -1339,7 +1471,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 		base_lin := linear(d.material.color)
 		px_space := .No_Size_Attenuation in d.material.flags
 
-		for inst in run_insts {
+		for inst, k in run_insts {
 			M := d.model * inst.transform if len(insts) > 0 else d.model
 			m_scale := mat_scale(M)
 			first_v := u32(len(exp.vertices))
@@ -1461,10 +1593,53 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 			if len(insts) > 0 && (inst.has_color || inst.color != {}) {
 				mat.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
 			}
+			// Made in world space: its opened model takes the world to where
+			// it was.
+			if opened := instance_opened(d.model, d_opened, opened_insts, k, inst.transform if len(insts) > 0 else 1); opened != {} {
+				opened_set(out, len(out.draws), opened * linalg.inverse(M))
+			}
 			append(&out.draws, Draw{geometry = dyn_id, model = linalg.MATRIX4F32_IDENTITY, material = mat})
 		}
 	}
 	return out
+}
+
+// An expanded draw `ei`'s model at the shutter's opening (zero: none).
+@(private = "file")
+opened_set :: proc(out: ^Scene, ei: int, opened: Mat4) {
+	if opened != {} {
+		scene_set_draw_opened(out, ei, opened)
+	}
+}
+
+// Instance `k`'s model at the shutter's opening (zero: none): the draw's
+// then (`opened`, zero: its `model`) by the instance's then (`insts`, nil:
+// its `inst` now).
+@(private = "file")
+instance_opened :: proc "contextless" (model, opened: Mat4, insts: []Instance, k: int, inst: Mat4) -> Mat4 {
+	if insts != nil {
+		return (opened if opened != {} else model) * insts[k].transform
+	}
+	return opened * inst if opened != {} else {}
+}
+
+// The camera at the shutter's opening (motion blur): its pose then, the
+// rest as now; false when it has none.
+opened_camera :: proc "contextless" (c: Camera) -> (o: Camera, ok: bool) {
+	pose := c.opened.? or_return
+	o = c
+	o.position, o.target, o.up, o.fov, o.height = pose.position, pose.target, pose.up, pose.fov, pose.height
+	return o, true
+}
+
+// Whether the frame blurs along motion: the shutter open and something's
+// state at its opening known.
+motion_of :: proc "contextless" (s: ^Scene) -> bool {
+	if !(s.camera.shutter > 0) {
+		return false
+	}
+	_, moved := s.camera.opened.?
+	return moved || len(s.draw_opened) > 0 || len(s.draw_opened_instances) > 0 || len(s.draw_opened_joints) > 0 || len(s.draw_opened_morphs) > 0 || len(s.draw_opened_uniforms) > 0
 }
 
 // The camera's view and projection for a `width x height` target.

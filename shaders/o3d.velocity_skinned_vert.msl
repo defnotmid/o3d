@@ -1,0 +1,296 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+template<typename T, int A, int B>
+matrix<T,A,B> _slang_matrixCompMult(matrix<T,A,B> m1, matrix<T,A,B> m2)
+{
+    matrix<T,A,B> result;
+    for (int i = 0; i < A; i++)
+        result[i] = m1[i] * m2[i];
+    return result;
+}
+
+
+#line 180 "o3d.slang"
+struct _MatrixStorage_float4x4_ColMajornatural_0
+{
+    array<float4, int(4)> data_0;
+};
+
+
+#line 1296
+struct Draw_VS_natural_0
+{
+    _MatrixStorage_float4x4_ColMajornatural_0 mvp_0;
+    _MatrixStorage_float4x4_ColMajornatural_0 model_0;
+    _MatrixStorage_float4x4_ColMajornatural_0 normal_0;
+    array<uint4, int(2)> morph_bases_0;
+    array<float4, int(2)> morph_weights_0;
+    uint4 morph_info_0;
+};
+
+
+#line 1259
+struct Morph_Delta_natural_0
+{
+    packed_float4 position_0;
+    packed_float4 normal_1;
+};
+
+
+#line 1257
+struct Opened_VS_natural_0
+{
+    _MatrixStorage_float4x4_ColMajornatural_0 mvp_1;
+    array<uint4, int(2)> morph_bases_1;
+    array<float4, int(2)> morph_weights_1;
+    uint4 morph_info_1;
+};
+
+
+#line 181
+struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E64_0
+{
+    array<_MatrixStorage_float4x4_ColMajornatural_0, int(64)> data_1;
+};
+
+
+#line 181
+struct Joints_VS_natural_0
+{
+    _Array_natural_matrixx3Cfloatx2C4x2C4x3E64_0 mats_0;
+};
+
+
+#line 1258
+struct KernelContext_0
+{
+    Draw_VS_natural_0 constant* draw_0;
+    Morph_Delta_natural_0 device* velocitySkinnedMorphDeltas_0;
+    Opened_VS_natural_0 constant* openedSkinned_0;
+    Joints_VS_natural_0 constant* joints_0;
+    Joints_VS_natural_0 constant* openedJoints_0;
+};
+
+
+#line 1258
+matrix<float,int(4),int(4)>  skin_of_0(uint4 _S1, float4 _S2, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 1277
+    return _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(0)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(1)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(2)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(3)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(0)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(1)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(2)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(3)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(0)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(1)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(2)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(3)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(0)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(1)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(2)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.x].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x, _S2.x)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(0)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(1)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(2)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(3)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(0)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(1)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(2)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(3)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(0)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(1)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(2)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(3)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(0)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(1)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(2)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.y].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y, _S2.y)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(0)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(1)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(2)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(3)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(0)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(1)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(2)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(3)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(0)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(1)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(2)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(3)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(0)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(1)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(2)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.z].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z, _S2.z)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(0)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(1)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(2)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(3)][int(0)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(0)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(1)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(2)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(3)][int(1)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(0)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(1)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(2)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(3)][int(2)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(0)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(1)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(2)][int(3)], (&kernelContext_0->openedJoints_0->mats_0)->data_1[_S1.w].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w, _S2.w));
+}
+
+
+#line 1277
+matrix<float,int(4),int(4)>  skin_of_1(uint4 _S3, float4 _S4, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 1277
+    return _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(0)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(1)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(2)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(3)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(0)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(1)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(2)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(3)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(0)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(1)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(2)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(3)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(0)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(1)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(2)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.x].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x, _S4.x)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(0)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(1)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(2)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(3)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(0)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(1)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(2)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(3)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(0)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(1)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(2)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(3)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(0)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(1)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(2)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.y].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y, _S4.y)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(0)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(1)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(2)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(3)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(0)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(1)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(2)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(3)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(0)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(1)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(2)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(3)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(0)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(1)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(2)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.z].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z, _S4.z)) + _slang_matrixCompMult(matrix<float,int(4),int(4)> ((&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(0)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(1)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(2)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(3)][int(0)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(0)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(1)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(2)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(3)][int(1)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(0)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(1)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(2)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(3)][int(2)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(0)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(1)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(2)][int(3)], (&kernelContext_1->joints_0->mats_0)->data_1[_S3.w].data_0[int(3)][int(3)]), matrix<float,int(4),int(4)> (_S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w, _S4.w));
+}
+
+
+#line 3335 "core.meta.slang"
+float3 morphed_0(Morph_Delta_natural_0 device* _S5, float3 _S6, uint _S7, uint _S8, KernelContext_0 thread* kernelContext_2)
+{
+
+#line 3335
+    uint k_0 = 0U;
+
+#line 3335
+    float3 _S9 = _S6;
+
+#line 1270 "o3d.slang"
+    for(;;)
+    {
+
+#line 1270
+        if(k_0 < _S8)
+        {
+        }
+        else
+        {
+
+#line 1270
+            break;
+        }
+
+#line 1271
+        uint _S10 = k_0 >> 2U;
+
+#line 1271
+        uint _S11 = k_0 & 3U;
+
+#line 1271
+        float3 _S12 = _S9 + (float4(_S5[kernelContext_2->openedSkinned_0->morph_bases_1[_S10][_S11] + _S7].position_0) ).xyz * float3(kernelContext_2->openedSkinned_0->morph_weights_1[_S10][_S11]) ;
+
+#line 1270
+        k_0 = k_0 + 1U;
+
+#line 1270
+        _S9 = _S12;
+
+#line 1270
+    }
+
+
+    return _S9;
+}
+
+
+#line 1273
+float3 morphed_1(Morph_Delta_natural_0 device* _S13, float3 _S14, uint _S15, uint _S16, KernelContext_0 thread* kernelContext_3)
+{
+
+#line 1273
+    uint k_1 = 0U;
+
+#line 1273
+    float3 _S17 = _S14;
+
+#line 1270
+    for(;;)
+    {
+
+#line 1270
+        if(k_1 < _S16)
+        {
+        }
+        else
+        {
+
+#line 1270
+            break;
+        }
+
+#line 1271
+        uint _S18 = k_1 >> 2U;
+
+#line 1271
+        uint _S19 = k_1 & 3U;
+
+#line 1271
+        float3 _S20 = _S17 + (float4(_S13[kernelContext_3->draw_0->morph_bases_0[_S18][_S19] + _S15].position_0) ).xyz * float3(kernelContext_3->draw_0->morph_weights_0[_S18][_S19]) ;
+
+#line 1270
+        k_1 = k_1 + 1U;
+
+#line 1270
+        _S17 = _S20;
+
+#line 1270
+    }
+
+
+    return _S17;
+}
+
+
+#line 3335 "core.meta.slang"
+struct vs_velocity_skinned_Result_0
+{
+    float4 position_1 [[position]];
+    float2 uv_0 [[user(TEXCOORD)]];
+    float2 uv1_0 [[user(TEXCOORD_1)]];
+    float3 opened_0 [[user(TEXCOORD_2)]];
+    uint quad_0 [[user(TEXCOORD_3)]];
+};
+
+
+#line 3335
+struct vertexInput_0
+{
+    float3 position_2 [[attribute(0)]];
+    float3 normal_2 [[attribute(1)]];
+    float2 uv_1 [[attribute(2)]];
+    float2 uv1_1 [[attribute(3)]];
+    uint4 joints_1 [[attribute(4)]];
+    float4 weights_0 [[attribute(5)]];
+    float4 color_0 [[attribute(6)]];
+};
+
+
+#line 1261 "o3d.slang"
+struct VS_Velocity_Out_0
+{
+    float4 position_3;
+    float2 uv_2;
+    float2 uv1_2;
+    float3 opened_1;
+    [[flat]] uint quad_1;
+};
+
+
+#line 1261
+[[vertex]] vs_velocity_skinned_Result_0 vs_velocity_skinned(vertexInput_0 _S21 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_1 [[buffer(0)]], Morph_Delta_natural_0 device* velocitySkinnedMorphDeltas_1 [[buffer(4)]], Opened_VS_natural_0 constant* openedSkinned_1 [[buffer(2)]], Joints_VS_natural_0 constant* joints_2 [[buffer(1)]], Joints_VS_natural_0 constant* openedJoints_1 [[buffer(3)]])
+{
+
+#line 1261
+    thread KernelContext_0 kernelContext_4;
+
+#line 1261
+    (&kernelContext_4)->draw_0 = draw_1;
+
+#line 1261
+    (&kernelContext_4)->velocitySkinnedMorphDeltas_0 = velocitySkinnedMorphDeltas_1;
+
+#line 1261
+    (&kernelContext_4)->openedSkinned_0 = openedSkinned_1;
+
+#line 1261
+    (&kernelContext_4)->joints_0 = joints_2;
+
+#line 1261
+    (&kernelContext_4)->openedJoints_0 = openedJoints_1;
+
+#line 1261
+    float3 _S22 = morphed_1(velocitySkinnedMorphDeltas_1, _S21.position_2, vid_0, draw_1->morph_info_0.x, &kernelContext_4);
+
+#line 1261
+    float3 _S23 = morphed_0((&kernelContext_4)->velocitySkinnedMorphDeltas_0, _S21.position_2, vid_0, (&kernelContext_4)->openedSkinned_0->morph_info_1.x, &kernelContext_4);
+
+#line 1261
+    matrix<float,int(4),int(4)>  _S24 = skin_of_1(_S21.joints_1, _S21.weights_0, &kernelContext_4);
+
+#line 1298
+    float3 now_0 = (((float4(_S22, 1.0f)) * (_S24))).xyz;
+
+#line 1298
+    matrix<float,int(4),int(4)>  _S25 = skin_of_0(_S21.joints_1, _S21.weights_0, &kernelContext_4);
+    float3 then_0 = (((float4(_S23, 1.0f)) * (_S25))).xyz;
+
+#line 1295
+    thread VS_Velocity_Out_0 o_0;
+
+#line 1300
+    (&o_0)->position_3 = (((float4(now_0, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_4)->draw_0->mvp_0.data_0[int(0)][int(0)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(1)][int(0)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(2)][int(0)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(3)][int(0)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(0)][int(1)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(1)][int(1)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(2)][int(1)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(3)][int(1)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(0)][int(2)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(1)][int(2)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(2)][int(2)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(3)][int(2)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(0)][int(3)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(1)][int(3)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(2)][int(3)], (&kernelContext_4)->draw_0->mvp_0.data_0[int(3)][int(3)]))));
+    (&o_0)->opened_1 = (((float4(then_0, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(0)][int(0)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(1)][int(0)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(2)][int(0)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(3)][int(0)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(0)][int(1)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(1)][int(1)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(2)][int(1)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(3)][int(1)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(0)][int(2)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(1)][int(2)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(2)][int(2)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(3)][int(2)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(0)][int(3)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(1)][int(3)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(2)][int(3)], (&kernelContext_4)->openedSkinned_0->mvp_1.data_0[int(3)][int(3)])))).xyw;
+    (&o_0)->uv_2 = _S21.uv_1;
+    (&o_0)->uv1_2 = _S21.uv1_1;
+    (&o_0)->quad_1 = 0U;
+
+#line 1304
+    thread vs_velocity_skinned_Result_0 _S26;
+
+#line 1304
+    (&_S26)->position_1 = o_0.position_3;
+
+#line 1304
+    (&_S26)->uv_0 = o_0.uv_2;
+
+#line 1304
+    (&_S26)->uv1_0 = o_0.uv1_2;
+
+#line 1304
+    (&_S26)->opened_0 = o_0.opened_1;
+
+#line 1304
+    (&_S26)->quad_0 = o_0.quad_1;
+
+#line 1304
+    return _S26;
+}
+

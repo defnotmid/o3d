@@ -1,0 +1,234 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 90 "core"
+struct Morph_Delta_natural_0
+{
+    packed_float4 position_0;
+    packed_float4 normal_0;
+};
+
+
+#line 180 "o3d.slang"
+struct _MatrixStorage_float4x4_ColMajornatural_0
+{
+    array<float4, int(4)> data_0;
+};
+
+
+#line 1283
+struct Draw_VS_natural_0
+{
+    _MatrixStorage_float4x4_ColMajornatural_0 mvp_0;
+    _MatrixStorage_float4x4_ColMajornatural_0 model_0;
+    _MatrixStorage_float4x4_ColMajornatural_0 normal_1;
+    array<uint4, int(2)> morph_bases_0;
+    array<float4, int(2)> morph_weights_0;
+    uint4 morph_info_0;
+};
+
+
+#line 1256
+struct Opened_VS_natural_0
+{
+    _MatrixStorage_float4x4_ColMajornatural_0 mvp_1;
+    array<uint4, int(2)> morph_bases_1;
+    array<float4, int(2)> morph_weights_1;
+    uint4 morph_info_1;
+};
+
+
+#line 1256
+struct KernelContext_0
+{
+    Draw_VS_natural_0 constant* draw_0;
+    Morph_Delta_natural_0 device* skinnedMorphDeltas_0;
+    Opened_VS_natural_0 constant* opened_0;
+};
+
+
+#line 1256
+float3 morphed_0(Morph_Delta_natural_0 device* _S1, float3 _S2, uint _S3, uint _S4, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 1256
+    uint k_0 = 0U;
+
+#line 1256
+    float3 _S5 = _S2;
+
+#line 1270
+    for(;;)
+    {
+
+#line 1270
+        if(k_0 < _S4)
+        {
+        }
+        else
+        {
+
+#line 1270
+            break;
+        }
+
+#line 1271
+        uint _S6 = k_0 >> 2U;
+
+#line 1271
+        uint _S7 = k_0 & 3U;
+
+#line 1271
+        float3 _S8 = _S5 + (float4(_S1[kernelContext_0->opened_0->morph_bases_1[_S6][_S7] + _S3].position_0) ).xyz * float3(kernelContext_0->opened_0->morph_weights_1[_S6][_S7]) ;
+
+#line 1270
+        k_0 = k_0 + 1U;
+
+#line 1270
+        _S5 = _S8;
+
+#line 1270
+    }
+
+
+    return _S5;
+}
+
+
+#line 1273
+float3 morphed_1(Morph_Delta_natural_0 device* _S9, float3 _S10, uint _S11, uint _S12, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 1273
+    uint k_1 = 0U;
+
+#line 1273
+    float3 _S13 = _S10;
+
+#line 1270
+    for(;;)
+    {
+
+#line 1270
+        if(k_1 < _S12)
+        {
+        }
+        else
+        {
+
+#line 1270
+            break;
+        }
+
+#line 1271
+        uint _S14 = k_1 >> 2U;
+
+#line 1271
+        uint _S15 = k_1 & 3U;
+
+#line 1271
+        float3 _S16 = _S13 + (float4(_S9[kernelContext_1->draw_0->morph_bases_0[_S14][_S15] + _S11].position_0) ).xyz * float3(kernelContext_1->draw_0->morph_weights_0[_S14][_S15]) ;
+
+#line 1270
+        k_1 = k_1 + 1U;
+
+#line 1270
+        _S13 = _S16;
+
+#line 1270
+    }
+
+
+    return _S13;
+}
+
+
+#line 3335 "core.meta.slang"
+struct vs_velocity_Result_0
+{
+    float4 position_1 [[position]];
+    float2 uv_0 [[user(TEXCOORD)]];
+    float2 uv1_0 [[user(TEXCOORD_1)]];
+    float3 opened_1 [[user(TEXCOORD_2)]];
+    uint quad_0 [[user(TEXCOORD_3)]];
+};
+
+
+#line 3335
+struct vertexInput_0
+{
+    float3 position_2 [[attribute(0)]];
+    float3 normal_2 [[attribute(1)]];
+    float2 uv_1 [[attribute(2)]];
+    float2 uv1_1 [[attribute(3)]];
+    float4 color_0 [[attribute(4)]];
+};
+
+
+#line 1261 "o3d.slang"
+struct VS_Velocity_Out_0
+{
+    float4 position_3;
+    float2 uv_2;
+    float2 uv1_2;
+    float3 opened_2;
+    [[flat]] uint quad_1;
+};
+
+
+#line 1261
+[[vertex]] vs_velocity_Result_0 vs_velocity(vertexInput_0 _S17 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_1 [[buffer(0)]], Morph_Delta_natural_0 device* skinnedMorphDeltas_1 [[buffer(2)]], Opened_VS_natural_0 constant* opened_3 [[buffer(1)]])
+{
+
+#line 1261
+    thread KernelContext_0 kernelContext_2;
+
+#line 1261
+    (&kernelContext_2)->draw_0 = draw_1;
+
+#line 1261
+    (&kernelContext_2)->skinnedMorphDeltas_0 = skinnedMorphDeltas_1;
+
+#line 1261
+    (&kernelContext_2)->opened_0 = opened_3;
+
+#line 1261
+    float3 _S18 = morphed_1(skinnedMorphDeltas_1, _S17.position_2, vid_0, draw_1->morph_info_0.x, &kernelContext_2);
+
+#line 1261
+    float3 _S19 = morphed_0((&kernelContext_2)->skinnedMorphDeltas_0, _S17.position_2, vid_0, (&kernelContext_2)->opened_0->morph_info_1.x, &kernelContext_2);
+
+#line 1282
+    thread VS_Velocity_Out_0 o_0;
+
+
+    (&o_0)->position_3 = (((float4(_S18, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_2)->draw_0->mvp_0.data_0[int(0)][int(0)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(1)][int(0)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(2)][int(0)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(3)][int(0)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(0)][int(1)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(1)][int(1)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(2)][int(1)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(3)][int(1)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(0)][int(2)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(1)][int(2)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(2)][int(2)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(3)][int(2)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(0)][int(3)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(1)][int(3)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(2)][int(3)], (&kernelContext_2)->draw_0->mvp_0.data_0[int(3)][int(3)]))));
+    (&o_0)->opened_2 = (((float4(_S19, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_2)->opened_0->mvp_1.data_0[int(0)][int(0)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(1)][int(0)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(2)][int(0)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(3)][int(0)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(0)][int(1)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(1)][int(1)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(2)][int(1)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(3)][int(1)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(0)][int(2)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(1)][int(2)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(2)][int(2)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(3)][int(2)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(0)][int(3)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(1)][int(3)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(2)][int(3)], (&kernelContext_2)->opened_0->mvp_1.data_0[int(3)][int(3)])))).xyw;
+    (&o_0)->uv_2 = _S17.uv_1;
+    (&o_0)->uv1_2 = _S17.uv1_1;
+    (&o_0)->quad_1 = 0U;
+
+#line 1289
+    thread vs_velocity_Result_0 _S20;
+
+#line 1289
+    (&_S20)->position_1 = o_0.position_3;
+
+#line 1289
+    (&_S20)->uv_0 = o_0.uv_2;
+
+#line 1289
+    (&_S20)->uv1_0 = o_0.uv1_2;
+
+#line 1289
+    (&_S20)->opened_1 = o_0.opened_2;
+
+#line 1289
+    (&_S20)->quad_0 = o_0.quad_1;
+
+#line 1289
+    return _S20;
+}
+

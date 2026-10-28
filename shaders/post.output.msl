@@ -3,13 +3,15 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 12 "post.slang"
+#line 17 "post.slang"
 struct Post_FS_0
 {
     float4 tone_0;
     float4 lens_0;
     float4 camera_0;
     float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
 };
 
 
@@ -22,11 +24,11 @@ struct KernelContext_0
 };
 
 
-#line 51 "post.slang"
+#line 63 "post.slang"
 float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 52
+#line 64
     return ((kernelContext_0->lightMap_texture_0).sample((kernelContext_0->lightMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->tone_0.zw), level((0.0f))));
 }
 
@@ -249,16 +251,16 @@ float linear_to_srgb_0(float c_1)
 }
 
 
-#line 39 "post.slang"
+#line 51 "post.slang"
 float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 40
+#line 52
     float a_0 = saturate(light_0.w);
     if(a_0 <= 0.0f)
     {
 
-#line 42
+#line 54
         return float4(int4(int(0)) );
     }
     float3 c_2 = tone_map_0(light_0.xyz / float3(a_0) , uint(kernelContext_1->post_0->tone_0.x), kernelContext_1->post_0->tone_0.y);
@@ -269,36 +271,36 @@ float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_1)
 }
 
 
-#line 48
+#line 60
 struct pixelOutput_0
 {
     float4 output_1 [[color(0)]];
 };
 
 
-#line 72
+#line 84
 [[fragment]] pixelOutput_0 fs_output(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]])
 {
 
-#line 72
+#line 84
     thread KernelContext_0 kernelContext_2;
 
-#line 72
+#line 84
     (&kernelContext_2)->post_0 = post_1;
 
-#line 72
+#line 84
     (&kernelContext_2)->lightMap_texture_0 = lightMap_texture_1;
 
-#line 72
+#line 84
     (&kernelContext_2)->lightMap_sampler_0 = lightMap_sampler_1;
 
-#line 72
+#line 84
     float4 _S28 = light_at_0(int2(position_0.xy), &kernelContext_2);
 
-#line 72
+#line 84
     float4 _S29 = output_0(_S28, &kernelContext_2);
 
-#line 72
+#line 84
     pixelOutput_0 _S30 = { _S29 };
     return _S30;
 }

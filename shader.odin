@@ -306,7 +306,53 @@ Shader :: struct {
 	flat_count:     int,
 	// `shadowAt`'s map's channel (-1: the shader does not call it).
 	shadow_channel: i32,
+	// The frame's depth pass (o3d.slang's fs_velocity's for a
+	// ShaderMaterial): its own vertex stage, run once more by a tap toward
+	// where its position was at the shutter's opening (its uniforms then,
+	// its position and normal then as twins), and DEPTH_FRAGMENT. Its
+	// built-ins' offsets (each tap's `block_stride` on), its attributes'
+	// and their twins' locations (-1: unused), where the tap's position is
+	// among its varyings, and the fragment's frame uniforms' offsets.
+	depth:            ^oksl.Pipeline,
+	depth_builtins:   [Builtin]i32,
+	depth_attributes: [Vertex_Attribute]i32,
+	depth_twins:      [2]i32,
+	depth_opened:     i32,
+	depth_frame:      [2]i32,
 }
+
+// The depth pass's vertex prelude after the shader's (DEPTH_FRAGMENT's
+// input, and the twins the tap reads), and its fragment: the depth, and
+// the velocity and nearness as o3d.slang's velocity_out writes them.
+@(private = "file")
+DEPTH_VERTEX_PRELUDE :: `out vec4 o3dOpenedPosition;
+in vec3 o3dOpenPosition;
+in vec3 o3dOpenNormal;
+`
+
+@(private = "file")
+DEPTH_FRAGMENT :: `precision highp float;
+in vec4 o3dOpenedPosition;
+uniform vec4 o3dVelocityFrame;
+uniform float o3dVelocityOrtho;
+layout(location = 0) out float o3dDepth;
+layout(location = 1) out vec2 o3dVelocity;
+layout(location = 2) out float o3dNearness;
+void main() {
+	float z = gl_FragCoord.z;
+	o3dDepth = z;
+	vec3 o = o3dOpenedPosition.xyw;
+	o3dVelocity = vec2(0.0);
+	if (o.z > 1e-6) {
+		vec2 ndc = o.xy / o.z;
+		o3dVelocity = gl_FragCoord.xy - vec2((ndc.x * 0.5 + 0.5) * o3dVelocityFrame.x, (0.5 - ndc.y * 0.5) * o3dVelocityFrame.y);
+	}
+	float near = o3dVelocityFrame.z;
+	float far = o3dVelocityFrame.w;
+	float d = o3dVelocityOrtho > 0.5 ? far - z * (far - near) : near * far / (near + z * (far - near));
+	o3dNearness = -log(d);
+}
+`
 
 Shaders :: struct {
 	generation: Generation, // of these contents, for the GPU's pipelines
@@ -317,6 +363,9 @@ Shaders :: struct {
 shaders_destroy :: proc(s: ^Shaders) {
 	for &sh in s.list {
 		oksl.destroy_pipeline(sh.pipeline)
+		if sh.depth != nil {
+			oksl.destroy_pipeline(sh.depth)
+		}
 		delete(sh.errors)
 	}
 	for k in s.keys {
@@ -462,6 +511,47 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 			}
 		}
 	}
+	// The depth pass's: what compiled above compiles here too, with the tap.
+	taps := []oksl.Tap{{position = "o3dOpenedPosition", attributes = {{"position", "o3dOpenPosition"}, {"normal", "o3dOpenNormal"}}}}
+	vertex_prelude := strings.concatenate({prelude(.Vertex, glsl3, {}), DEPTH_VERTEX_PRELUDE}, context.temp_allocator)
+	d, depth_errors, depth_ok := oksl.compile_pipeline({vertex = vertex, fragment = DEPTH_FRAGMENT, vertex_prelude = vertex_prelude}, {taps = taps})
+	sh.depth = d
+	if !depth_ok {
+		sh.errors = make([]Shader_Error, len(depth_errors))
+		for e, i in depth_errors {
+			sh.errors[i] = {code = .Compile, stage = .Vertex, compile = e}
+		}
+		return
+	}
+	for b in Builtin {
+		offset, _, found := oksl.uniform_offset(d.vertex, BUILTINS[b].name)
+		sh.depth_builtins[b] = i32(offset) if found else -1
+	}
+	sh.depth_attributes, sh.depth_twins = {.Position = -1, .Normal = -1, .Uv = -1}, {-1, -1}
+	for v in d.vertex.stage_inputs {
+		switch v.name {
+		case "o3dOpenPosition":
+			sh.depth_twins[0] = i32(v.location)
+		case "o3dOpenNormal":
+			sh.depth_twins[1] = i32(v.location)
+		case:
+			for a in Vertex_Attribute {
+				if v.name == VERTEX_ATTRIBUTES[a].name {
+					sh.depth_attributes[a] = i32(v.location)
+				}
+			}
+		}
+	}
+	sh.depth_opened = -1
+	for v in d.vertex.stage_outputs {
+		if v.name == "o3dOpenedPosition" {
+			sh.depth_opened = i32(v.offset)
+		}
+	}
+	for name, k in ([2]string{"o3dVelocityFrame", "o3dVelocityOrtho"}) {
+		offset, _, found := oksl.uniform_offset(d.fragment, name)
+		sh.depth_frame[k] = i32(offset) if found else -1
+	}
 	return
 }
 
@@ -529,9 +619,6 @@ shader_blocks_destroy :: proc(b: ^Shader_Blocks) {
 // uniforms by name. `eye` (the camera's position when nil) is
 // cameraPosition: the mirror's pass draws through its image.
 shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadows: []Shadow, out: ^Shader_Blocks, eye: Maybe(Vec3) = nil) {
-	camera_position := eye.? or_else scene.camera.position
-	fog_near, fog_far, fog_density := fog_terms(scene.fog)
-	fog_params := [4]f32{f32(scene.fog.kind), fog_near, fog_far, fog_density}
 	n := len(scene.draws)
 	clear(&out.bytes)
 	table_grow_non_zero(&out.at, n)
@@ -543,7 +630,7 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadow
 		if sh == nil {
 			continue
 		}
-		model_view := view * models[i]
+		values := builtin_values(scene, i, models[i], view, proj, eye.? or_else scene.camera.position, shadows)
 		for stage in Shader_Stage {
 			mod := shader_module(sh, stage)
 			if mod.block_size == 0 {
@@ -551,56 +638,152 @@ shader_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj: Mat4, shadow
 			}
 			at := len(out.bytes)
 			table_grow(&out.bytes, at + mod.block_size)
-			block := out.bytes[at:]
 			out.at[i][stage] = i32(at)
-			for offset, b in sh.builtins[stage] {
-				if offset < 0 {
-					continue
+			write_builtins(out.bytes[at:], sh.builtins[stage], &values)
+			write_uniforms(scene, mod, out.bytes[at:], m.uniforms)
+		}
+	}
+}
+
+// The frame's depth pass's blocks (Shader.depth's): the vertex stage's
+// environment now, then at the shutter's opening (the draw's model and the
+// camera then, each as now when it has none, and the uniforms given then
+// over the ones now), and the fragment's frame (`width x height` through
+// the scene's camera).
+depth_blocks :: proc(scene: ^Scene, shaders: ^Shaders, view, proj, opened_view, opened_proj: Mat4, width, height: int, shadows: []Shadow, out: ^Shader_Blocks) {
+	n := len(scene.draws)
+	clear(&out.bytes)
+	table_grow_non_zero(&out.at, n)
+	materials := scene_materials(scene)
+	models := scene.draws.model[:n]
+	c := scene.camera
+	opened_eye := (opened_camera(c) or_else c).position
+	near := c.near if c.near > 0 else 0.1
+	far := c.far if c.far > near else near * 1e4
+	for m, i in materials {
+		out.at[i] = {.Vertex = -1, .Fragment = -1}
+		sh := shader_get(shaders, m.shader)
+		if sh == nil || sh.depth == nil {
+			continue
+		}
+		vm, fm := sh.depth.vertex, sh.depth.fragment
+		if vm.block_size > 0 {
+			at := len(out.bytes)
+			table_grow(&out.bytes, at + vm.block_size)
+			out.at[i][.Vertex] = i32(at)
+			block := out.bytes[at:]
+			now := builtin_values(scene, i, models[i], view, proj, c.position, shadows)
+			write_builtins(block, sh.depth_builtins, &now)
+			write_uniforms(scene, vm, block, m.uniforms)
+			model := scene_draw_opened(scene, i)
+			then := builtin_values(scene, i, model if model != {} else models[i], opened_view, opened_proj, opened_eye, shadows)
+			for tap in 1 ..= vm.taps {
+				env := block[tap * vm.block_stride:]
+				write_builtins(env, sh.depth_builtins, &then)
+				// Those given at the opening over the ones now.
+				write_uniforms(scene, vm, env, m.uniforms)
+				if r, ok := scene_draw_opened_uniforms(scene, i); ok {
+					write_uniforms(scene, vm, env, r)
 				}
-				dst := block[offset:]
-				switch b {
-				case .Model_Matrix:
-					put(dst, models[i])
-				case .Model_View_Matrix:
-					put(dst, model_view)
-				case .Projection_Matrix:
-					put(dst, proj)
-				case .View_Matrix:
-					put(dst, view)
-				case .Normal_Matrix:
-					// std140: three columns of a vec4 each.
-					nm := normal_matrix(model_view)
-					for c in 0 ..< 3 {
-						put(dst[c * 16:], [4]f32{nm[0, c], nm[1, c], nm[2, c], 0})
-					}
-				case .Camera_Position:
-					put(dst, camera_position)
-				case .Is_Orthographic:
-					put(dst, u32(1 if scene.camera.orthographic else 0))
-				case .Instance_Color:
-					put(dst, linear(m.color))
-				case .Instance_Id:
-					put(dst, f32(scene.draw_instance_ids[i] if i < len(scene.draw_instance_ids) else 0))
-				case .Shadow_Matrix:
-					put(dst, shadows[0].view_proj if len(shadows) > 0 else Mat4{})
-				case .Shadow_Params:
-					if len(shadows) > 0 {
-						put(dst, [4]f32{f32(shadows[0].size), shadows[0].bias, shadows[0].normal_bias, 1})
-					} else {
-						put(dst, [4]f32{})
-					}
-				case .Shadow_From:
-					put(dst, shadows[0].from if len(shadows) > 0 else Vec4{})
-				case .Fog_Color:
-					put(dst, linear(scene.fog.color))
-				case .Fog_Params:
-					put(dst, fog_params)
-				}
-			}
-			for u in scene.uniforms[m.uniforms.first:][:m.uniforms.count] {
-				write_uniform(mod, block, u.name, scene.uniform_floats[u.first:][:u.count])
 			}
 		}
+		if fm.block_size > 0 {
+			at := len(out.bytes)
+			table_grow(&out.bytes, at + fm.block_size)
+			out.at[i][.Fragment] = i32(at)
+			if o := sh.depth_frame[0]; o >= 0 {
+				put(out.bytes[at + int(o):], [4]f32{f32(width), f32(height), near, far})
+			}
+			if o := sh.depth_frame[1]; o >= 0 {
+				put(out.bytes[at + int(o):], f32(1 if c.orthographic else 0))
+			}
+		}
+	}
+}
+
+// What a draw's built-ins hold through a camera.
+@(private = "file")
+Builtin_Values :: struct {
+	model, view, proj: Mat4,
+	eye:               Vec3,
+	ortho:             bool,
+	color:             Vec3,
+	instance:          f32,
+	shadow:            Maybe(Shadow),
+	fog_color:         Vec3,
+	fog_params:        [4]f32,
+}
+
+@(private = "file")
+builtin_values :: proc(scene: ^Scene, i: int, model, view, proj: Mat4, eye: Vec3, shadows: []Shadow) -> Builtin_Values {
+	fog_near, fog_far, fog_density := fog_terms(scene.fog)
+	return {
+		model      = model,
+		view       = view,
+		proj       = proj,
+		eye        = eye,
+		ortho      = scene.camera.orthographic,
+		color      = linear(scene.draws[i].material.color),
+		instance   = f32(scene.draw_instance_ids[i] if i < len(scene.draw_instance_ids) else 0),
+		shadow     = shadows[0] if len(shadows) > 0 else nil,
+		fog_color  = linear(scene.fog.color),
+		fog_params = {f32(scene.fog.kind), fog_near, fog_far, fog_density},
+	}
+}
+
+// The built-ins a stage reads (at `offsets`, -1: unread) into its block.
+@(private = "file")
+write_builtins :: proc(block: []u8, offsets: [Builtin]i32, v: ^Builtin_Values) {
+	for offset, b in offsets {
+		if offset < 0 {
+			continue
+		}
+		dst := block[offset:]
+		switch b {
+		case .Model_Matrix:
+			put(dst, v.model)
+		case .Model_View_Matrix:
+			put(dst, v.view * v.model)
+		case .Projection_Matrix:
+			put(dst, v.proj)
+		case .View_Matrix:
+			put(dst, v.view)
+		case .Normal_Matrix:
+			// std140: three columns of a vec4 each.
+			nm := normal_matrix(v.view * v.model)
+			for c in 0 ..< 3 {
+				put(dst[c * 16:], [4]f32{nm[0, c], nm[1, c], nm[2, c], 0})
+			}
+		case .Camera_Position:
+			put(dst, v.eye)
+		case .Is_Orthographic:
+			put(dst, u32(1 if v.ortho else 0))
+		case .Instance_Color:
+			put(dst, v.color)
+		case .Instance_Id:
+			put(dst, v.instance)
+		case .Shadow_Matrix:
+			sh, ok := v.shadow.?
+			put(dst, sh.view_proj if ok else Mat4{})
+		case .Shadow_Params:
+			sh, ok := v.shadow.?
+			put(dst, [4]f32{f32(sh.size), sh.bias, sh.normal_bias, 1} if ok else [4]f32{})
+		case .Shadow_From:
+			sh, ok := v.shadow.?
+			put(dst, sh.from if ok else Vec4{})
+		case .Fog_Color:
+			put(dst, v.fog_color)
+		case .Fog_Params:
+			put(dst, v.fog_params)
+		}
+	}
+}
+
+// A material's uniforms (`r`, from `scene_uniforms`) by name into a block.
+@(private = "file")
+write_uniforms :: proc(scene: ^Scene, m: ^oksl.Module, block: []u8, r: Uniform_Range) {
+	for u in scene.uniforms[r.first:][:r.count] {
+		write_uniform(m, block, u.name, scene.uniform_floats[u.first:][:u.count])
 	}
 }
 

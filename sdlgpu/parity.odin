@@ -75,6 +75,10 @@ PARITY_CASES := [?]Parity_Case {
 	{"depth_of_field", 271, 171, build_depth_of_field},
 	{"lens_view", 271, 171, build_lens_view},
 	{"smear", 240, 180, build_smear},
+	{"motion", 271, 171, build_motion},
+	{"motion_focus", 271, 171, build_motion_focus},
+	{"motion_skinned", 160, 120, build_motion_skinned},
+	{"motion_custom", 240, 180, build_motion_custom},
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -2419,5 +2423,78 @@ build_lens_view :: proc(a: ^Parity_Assets) -> string {
 	}
 	a.scene.camera.f_stop = 0.25
 	a.scene.camera.lens = o3d.Vec2{0.6, -0.5}
+	return ""
+}
+
+// The reflector's scene blurred along its motion: the camera panning and
+// lowering, the metal sphere rising toward it, the red box turning (the
+// mirror, the additive and transparent draws, the ShaderMaterials and the
+// far plane where nothing is drawn among what streaks), at an odd size.
+build_motion :: proc(a: ^Parity_Assets) -> string {
+	if e := build_reflector(a); e != "" {
+		return e
+	}
+	c := &a.scene.camera
+	c.shutter, c.max_blur = 1.0 / 30, 0.08
+	c.opened = o3d.Camera_Pose{position = c.position + {-0.25, 0.15, 0}, target = c.target + {-0.1, 0.05, 0}, fov = c.fov}
+	o3d.scene_set_draw_opened(&a.scene, 1, o3d.compose({-1.3, 0.45, -0.4}, {0, 0.2, 0}))
+	o3d.scene_set_draw_opened(&a.scene, 2, o3d.compose({-0.1, 0.25, 0.1}))
+	return ""
+}
+
+// The same blurred along its motion, then through its depth of field.
+build_motion_focus :: proc(a: ^Parity_Assets) -> string {
+	if e := build_depth_of_field(a); e != "" {
+		return e
+	}
+	c := &a.scene.camera
+	c.shutter, c.max_blur = 1.0 / 30, 0.08
+	c.opened = o3d.Camera_Pose{position = c.position + {-0.25, 0.15, 0}, target = c.target + {-0.1, 0.05, 0}, fov = c.fov}
+	o3d.scene_set_draw_opened(&a.scene, 2, o3d.compose({-0.1, 0.25, 0.1}))
+	return ""
+}
+
+// The skinned bar blurred along its swing: its joints at the shutter's
+// opening those of a moment before (the glTF's animation at 0.5 against
+// 0.65), the whole of it moved too.
+build_motion_skinned :: proc(a: ^Parity_Assets) -> string {
+	if e := build_skinned(a); e != "" {
+		return e
+	}
+	s := &a.scene
+	n := len(s.draws)
+	o3d.gltf_draw(s, &a.model, anim = 0, time = 0.5, flags = {.Cast_Shadow, .Receive_Shadow})
+	// The second drawing's joints become the first's at the opening.
+	for di in 1 ..< n {
+		if r := s.draw_joints[di + n - 1] if di + n - 1 < len(s.draw_joints) else {}; r.count > 0 {
+			o3d.scene_set_draw_opened_joints(s, di, r)
+		}
+		o3d.scene_set_draw_opened(s, di, o3d.compose({-0.15, 0.05, 0}) * s.draws[di].model)
+	}
+	resize(&s.draws, n)
+	if len(s.draw_joints) > n {
+		resize(&s.draw_joints, n)
+	}
+	s.camera.shutter, s.camera.max_blur = 1.0 / 30, 0.1
+	return ""
+}
+
+// ShaderMaterials blurred along their motion: the waving sphere's wave
+// given at the shutter's opening (its uTime then: its own vertex stage run
+// then, by oksl's tap) as the camera pans.
+build_motion_custom :: proc(a: ^Parity_Assets) -> string {
+	if e := build_custom(a); e != "" {
+		return e
+	}
+	s := &a.scene
+	wave, _, _ := o3d.shader_find(&a.shaders, WAVE_VERT, WAVE_FRAG)
+	for m, di in s.draws.material[:len(s.draws)] {
+		if m.shader == wave {
+			o3d.scene_set_draw_opened_uniforms(s, di, o3d.scene_uniforms(s, {"uTime", {0.7}}))
+		}
+	}
+	c := &s.camera
+	c.shutter, c.max_blur = 1.0 / 30, 0.08
+	c.opened = o3d.Camera_Pose{position = c.position + {0.2, 0, 0}, target = c.target + {0.2, 0, 0}, fov = c.fov, height = c.height}
 	return ""
 }

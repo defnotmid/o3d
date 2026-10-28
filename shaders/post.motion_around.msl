@@ -1,0 +1,150 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 17 "post.slang"
+struct Post_FS_0
+{
+    float4 tone_0;
+    float4 lens_0;
+    float4 camera_0;
+    float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
+};
+
+
+#line 1095 "core"
+struct KernelContext_0
+{
+    Post_FS_0 constant* post_0;
+    texture2d<float, access::sample> motionMap_texture_0;
+    sampler motionMap_sampler_0;
+};
+
+
+#line 204 "post.slang"
+float2 motion_tile_0(int2 t_0, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 205
+    return ((kernelContext_0->motionMap_texture_0).sample((kernelContext_0->motionMap_sampler_0), ((float2(t_0) + float2(0.5f) ) / kernelContext_0->post_0->motion_size_0.zw), level((0.0f))).xy);
+}
+
+
+#line 205
+struct pixelOutput_0
+{
+    float2 output_0 [[color(0)]];
+};
+
+
+#line 248
+[[fragment]] pixelOutput_0 fs_motion_around(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> motionMap_texture_1 [[texture(7)]], sampler motionMap_sampler_1 [[sampler(7)]])
+{
+
+#line 248
+    thread KernelContext_0 kernelContext_1;
+
+#line 248
+    (&kernelContext_1)->post_0 = post_1;
+
+#line 248
+    (&kernelContext_1)->motionMap_texture_0 = motionMap_texture_1;
+
+#line 248
+    (&kernelContext_1)->motionMap_sampler_0 = motionMap_sampler_1;
+    int2 _S1 = int2(position_0.xy);
+    int2 _S2 = int2(post_1->motion_size_0.zw);
+
+    int _S3 = _S1.y;
+
+#line 252
+    int _S4 = max(_S3 - int(1), int(0));
+
+#line 252
+    float2 m_0 = float2(int2(int(0)) );
+
+#line 252
+    int y_0 = _S4;
+
+#line 252
+    for(;;)
+    {
+
+#line 252
+        if(y_0 < (min(_S3 + int(2), _S2.y)))
+        {
+        }
+        else
+        {
+
+#line 252
+            break;
+        }
+
+#line 253
+        int _S5 = _S1.x;
+
+#line 253
+        int _S6 = max(_S5 - int(1), int(0));
+
+#line 253
+        float2 m_1 = m_0;
+
+#line 253
+        int x_0 = _S6;
+
+#line 253
+        for(;;)
+        {
+
+#line 253
+            if(x_0 < (min(_S5 + int(2), _S2.x)))
+            {
+            }
+            else
+            {
+
+#line 253
+                break;
+            }
+
+#line 253
+            float2 _S7 = motion_tile_0(int2(x_0, y_0), &kernelContext_1);
+
+            if((dot(_S7, _S7)) > (dot(m_1, m_1)))
+            {
+
+#line 255
+                m_1 = _S7;
+
+#line 255
+            }
+
+#line 253
+            x_0 = x_0 + int(1);
+
+#line 253
+        }
+
+#line 252
+        int _S8 = y_0 + int(1);
+
+#line 252
+        m_0 = m_1;
+
+#line 252
+        y_0 = _S8;
+
+#line 252
+    }
+
+#line 252
+    pixelOutput_0 _S9 = { m_0 };
+
+#line 260
+    return _S9;
+}
+

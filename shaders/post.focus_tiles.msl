@@ -3,13 +3,15 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 12 "post.slang"
+#line 17 "post.slang"
 struct Post_FS_0
 {
     float4 tone_0;
     float4 lens_0;
     float4 camera_0;
     float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
 };
 
 
@@ -22,38 +24,38 @@ struct KernelContext_0
 };
 
 
-#line 56 "post.slang"
+#line 68 "post.slang"
 float key_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 57
+#line 69
     float _S1 = ((kernelContext_0->depthMap_texture_0).sample((kernelContext_0->depthMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->frame_0.xy), level((0.0f))).x);
     if(_S1 <= 0.0f)
     {
 
-#line 59
+#line 71
         return 0.0f;
     }
     float near_0 = kernelContext_0->post_0->camera_0.x;
     float far_0 = kernelContext_0->post_0->camera_0.y;
 
-#line 62
+#line 74
     float v_0;
     if((kernelContext_0->post_0->camera_0.z) != 0.0f)
     {
 
-#line 63
+#line 75
         v_0 = far_0 - _S1 * (far_0 - near_0);
 
-#line 63
+#line 75
     }
     else
     {
 
-#line 63
+#line 75
         v_0 = near_0 * far_0 / (near_0 + _S1 * (far_0 - near_0));
 
-#line 63
+#line 75
     }
     return 1.0f / v_0;
 }
@@ -61,112 +63,112 @@ float key_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 float focus_blur_0(float key_0, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 68
+#line 80
     return min(kernelContext_1->post_0->lens_0.y * abs(1.0f - kernelContext_1->post_0->lens_0.x * key_0), kernelContext_1->post_0->lens_0.z);
 }
 
 
-#line 68
+#line 80
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 78
+#line 90
 [[fragment]] pixelOutput_0 fs_focus_tiles(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> depthMap_texture_1 [[texture(1)]], sampler depthMap_sampler_1 [[sampler(1)]])
 {
 
-#line 78
+#line 90
     thread KernelContext_0 kernelContext_2;
 
-#line 78
+#line 90
     (&kernelContext_2)->post_0 = post_1;
 
-#line 78
+#line 90
     (&kernelContext_2)->depthMap_texture_0 = depthMap_texture_1;
 
-#line 78
+#line 90
     (&kernelContext_2)->depthMap_sampler_0 = depthMap_sampler_1;
     int2 _S2 = int2(position_0.xy);
     int2 _S3 = int2(post_1->frame_0.xy);
 
     int _S4 = _S2.y;
 
-#line 82
+#line 94
     int _S5 = _S4 * int(16);
 
-#line 82
+#line 94
     float m_0 = 0.0f;
 
-#line 82
+#line 94
     int y_0 = _S5;
 
-#line 82
+#line 94
     for(;;)
     {
 
-#line 82
+#line 94
         if(y_0 < (min((_S4 + int(1)) * int(16), _S3.y)))
         {
         }
         else
         {
 
-#line 82
+#line 94
             break;
         }
 
-#line 83
+#line 95
         int _S6 = _S2.x;
 
-#line 83
+#line 95
         int x_0 = _S6 * int(16);
 
-#line 83
+#line 95
         for(;;)
         {
 
-#line 83
+#line 95
             if(x_0 < (min((_S6 + int(1)) * int(16), _S3.x)))
             {
             }
             else
             {
 
-#line 83
+#line 95
                 break;
             }
 
-#line 83
+#line 95
             float _S7 = key_at_0(int2(x_0, y_0), &kernelContext_2);
 
-#line 83
+#line 95
             float _S8 = focus_blur_0(_S7, &kernelContext_2);
             float _S9 = max(m_0, _S8);
 
-#line 83
+#line 95
             int _S10 = x_0 + int(1);
 
-#line 83
+#line 95
             m_0 = _S9;
 
-#line 83
+#line 95
             x_0 = _S10;
 
-#line 83
+#line 95
         }
 
-#line 82
+#line 94
         y_0 = y_0 + int(1);
 
-#line 82
+#line 94
     }
 
-#line 82
+#line 94
     pixelOutput_0 _S11 = { m_0 };
 
-#line 87
+#line 99
     return _S11;
 }
 

@@ -113,10 +113,30 @@ Job :: struct {
 	post:                 Post_Uniforms,
 	focus_tables:         [4]^sdl.GPUTexture,
 	focus_size:           [2]u32,
+	// Motion blur (`o3d.motion_of`) when the frame has it: its depth pass
+	// also writes each pixel's velocity and nearness (at `depth_size`), the
+	// camera at the shutter's opening, the frame's uniforms for it, and its
+	// light blurred along them (at the targets' capacity, `blurred_size`)
+	// through the filter's tables.
+	motion:               bool,
+	velocity_map:         ^sdl.GPUTexture,
+	nearness_map:         ^sdl.GPUTexture,
+	velocity_size:        [2]u32,
+	opened_view_proj:     o3d.Mat4,
+	velocity:             Velocity_Uniforms,
+	motion_params:        o3d.Motion_Blur,
+	blurred:              ^sdl.GPUTexture,
+	blurred_size:         [2]u32,
+	motion_tables:        Motion_Tables,
 	materials:            [dynamic]o3d.Shading_Material, // per draw
 	// ShaderMaterials' uniform blocks, through the camera and the mirror.
 	blocks:               o3d.Shader_Blocks,
 	mirror_blocks:        o3d.Shader_Blocks,
+	// And for the frame's depth pass (o3d.depth_blocks), with each posed
+	// ShaderMaterial's vertices as at the shutter's opening in
+	// `custom_skinned` too (from `custom_opened_first`; -1: as now).
+	depth_blocks:         o3d.Shader_Blocks,
+	custom_opened_first:  [dynamic]i32,
 	expanded:             o3d.Expanded_Draws,
 	custom_skinned_verts: [dynamic]o3d.Vertex,
 	custom_skinned_first: [dynamic]i32,
@@ -137,6 +157,7 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	release_snapshot(g, job)
 	release_reflection(g, job)
 	release_focus(g, job)
+	release_motion(g, job)
 	delete(job.depth_draws)
 	delete(job.mirror_order)
 	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned, &job.sprite_rows}) {
@@ -148,6 +169,8 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	delete(job.materials)
 	o3d.shader_blocks_destroy(&job.blocks)
 	o3d.shader_blocks_destroy(&job.mirror_blocks)
+	o3d.shader_blocks_destroy(&job.depth_blocks)
+	delete(job.custom_opened_first)
 	o3d.expanded_draws_destroy(&job.expanded)
 	delete(job.custom_skinned_verts)
 	delete(job.custom_skinned_first)
@@ -189,11 +212,16 @@ upload_dynamic :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPUCopyPass) -> o3d.Error 
 upload_custom_skinned :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, pass: ^sdl.GPUCopyPass) -> o3d.Error {
 	clear(&job.custom_skinned_verts)
 	o3d.table_grow_non_zero(&job.custom_skinned_first, len(scene.draws))
+	o3d.table_grow_non_zero(&job.custom_opened_first, len(scene.draws))
 	for &f in job.custom_skinned_first {
 		f = -1
 	}
-	// The frame's draws and the mirror's (some only it sees).
-	for list in ([2][]int{job.order[:], job.mirror_order[:] if job.reflect else nil}) do for di in list {
+	for &f in job.custom_opened_first {
+		f = -1
+	}
+	// The frame's draws, the mirror's and the depth pass's (some only one
+	// sees).
+	for list in ([3][]int{job.order[:], job.mirror_order[:] if job.reflect else nil, job.depth_draws[:] if job.depth else nil}) do for di in list {
 		if job.materials[di].shader == 0 || job.custom_skinned_first[di] >= 0 {
 			continue
 		}
@@ -211,7 +239,8 @@ upload_custom_skinned :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.
 		skin := o3d.geometry_skin(geos, d.geometry)
 		joints := o3d.scene_draw_joints(scene, di)
 		skinned := len(skin) > 0 && len(joints) > 0
-		if !morphed && !skinned {
+		reposed := job.depth && (o3d.scene_draw_opened_joints(scene, di) != nil && len(skin) > 0 || o3d.scene_draw_opened_morphs(scene, di) != nil && len(geos.morph_deltas) > 0)
+		if !morphed && !skinned && !reposed {
 			continue
 		}
 		verts, _, _ := o3d.geometry_mesh(geos, d.geometry)
@@ -229,6 +258,30 @@ upload_custom_skinned :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.
 			job.custom_skinned_verts[first + i] = v
 		}
 		job.custom_skinned_first[di] = i32(first)
+		// As at the shutter's opening, for the depth pass's twins.
+		opened_joints := o3d.scene_draw_opened_joints(scene, di)
+		opened_weights := o3d.scene_draw_opened_morphs(scene, di)
+		if !reposed {
+			continue
+		}
+		if opened_joints == nil {
+			opened_joints = joints
+		}
+		skinned = len(skin) > 0 && len(opened_joints) > 0
+		on := o3d.active_morphs(geo, opened_weights if opened_weights != nil else o3d.scene_draw_morphs(scene, di), &morphs) if len(geos.morph_deltas) > 0 else 0
+		at := len(job.custom_skinned_verts)
+		o3d.table_grow_non_zero(&job.custom_skinned_verts, at + len(verts))
+		for vtx, i in verts {
+			v := vtx
+			if on > 0 {
+				v.position, v.normal = o3d.morph_vertex(v, u32(i), deltas, morphs[:on])
+			}
+			if skinned {
+				v.position, v.normal = o3d.skin_vertex(v, skin[i], opened_joints)
+			}
+			job.custom_skinned_verts[at + i] = v
+		}
+		job.custom_opened_first[di] = i32(at)
 	}
 	if len(job.custom_skinned_verts) == 0 {
 		return nil
@@ -317,11 +370,11 @@ upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, da
 	return nil
 }
 
-// A depth pass: `draws`' depth through `view_proj` into `map_tex` (cleared
-// to 0, the far plane: depth is reversed). A shadow map's casters are drawn with their other side; the
-// frame's depth (`own_side`) with their own.
+// A shadow map's pass: its casters' depth through `view_proj` into
+// `map_tex` (cleared to 0, the far plane: depth is reversed), drawn with
+// their other side (the frame's depth is draw_velocity's).
 @(private = "file")
-draw_depth :: proc(g: ^GPU, job: ^Job, draws: []int, view_proj: o3d.Mat4, map_tex, depth_tex: ^sdl.GPUTexture, own_side: bool, cmd: ^sdl.GPUCommandBuffer) {
+draw_depth :: proc(g: ^GPU, job: ^Job, draws: []int, view_proj: o3d.Mat4, map_tex, depth_tex: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuffer) {
 	scene, geos := job.scene, job.geos
 	color := sdl.GPUColorTargetInfo{texture = map_tex, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE}
 	depth := sdl.GPUDepthStencilTargetInfo{texture = depth_tex, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
@@ -354,9 +407,8 @@ draw_depth :: proc(g: ^GPU, job: ^Job, draws: []int, view_proj: o3d.Mat4, map_te
 		joints := o3d.scene_draw_joints(scene, di)
 		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
 		curved := .Curves in m.flags
-		// The shadow pipelines cull by the other side: indexed by the other
-		// side, they cull by the material's own.
-		side := o3d.shadow_side(d.material.side) if own_side else d.material.side
+		// The shadow pipelines cull by the other side.
+		side := d.material.side
 		p := g.shadow_skinned_pipelines[side] if skinned else g.shadow_pipelines[side]
 		if curved {
 			p = g.shadow_curve_pipelines[side]
@@ -398,6 +450,152 @@ draw_depth :: proc(g: ^GPU, job: ^Job, draws: []int, view_proj: o3d.Mat4, map_te
 			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
 		}
 	}
+}
+
+// The frame's depth pass with motion blur: its depth map, and each
+// pixel's velocity and nearness, under the draws the far plane moving only
+// as the camera did (o3d.slang's fs_velocity_far), each draw where it is
+// and where it was at the shutter's opening (its model, joints and morph
+// weights then, each as now when it has none).
+@(private = "file")
+draw_velocity :: proc(g: ^GPU, job: ^Job, cmd: ^sdl.GPUCommandBuffer) {
+	scene, geos := job.scene, job.geos
+	colors := [3]sdl.GPUColorTargetInfo {
+		{texture = job.depth_map, load_op = .CLEAR, store_op = .STORE},
+		{texture = job.velocity_map, load_op = .CLEAR, store_op = .STORE},
+		{texture = job.nearness_map, clear_color = {o3d.MOTION_FAR, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE},
+	}
+	depth := sdl.GPUDepthStencilTargetInfo{texture = job.depth_buffer, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+	pass := sdl.BeginGPURenderPass(cmd, &colors[0], len(colors), &depth)
+	defer sdl.EndGPURenderPass(pass)
+	sdl.PushGPUFragmentUniformData(cmd, 1, &job.velocity, size_of(job.velocity))
+	sdl.BindGPUGraphicsPipeline(pass, g.velocity_far_pipeline)
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	if g.vertices.buffer == nil && job.dynamic_vertices.buffer == nil {
+		return
+	}
+	sdl.BindGPUVertexStorageBuffers(pass, 0, &g.morph_deltas.buffer, 1)
+	bound: ^sdl.GPUGraphicsPipeline
+	bound_vb, bound_ib: ^sdl.GPUBuffer
+	for di in job.depth_draws {
+		m := &job.materials[di]
+		if .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} == {} && m.opacity < m.alpha_cutoff {
+			continue
+		}
+		d := &scene.draws[di]
+		geo, _ := o3d.geometry_get_any(geos, &job.expanded, d.geometry)
+		dyn := d.geometry >= o3d.DYNAMIC_GEO_BIT
+		vbuf := job.dynamic_vertices.buffer if dyn else g.vertices.buffer
+		ibuf := job.dynamic_indices.buffer if dyn else g.indices.buffer
+		if vbuf == nil || ibuf == nil {
+			continue
+		}
+		if ibuf != bound_ib {
+			sdl.BindGPUIndexBuffer(pass, {buffer = ibuf}, ._32BIT)
+			bound_ib = ibuf
+		}
+		if m.shader != 0 {
+			// Its own vertex stage, with its twins posed as at the opening.
+			p := custom_depth_pipeline(g, job.shaders, m.shader, d.material.side, make = false)
+			if p == nil {
+				continue
+			}
+			if p != bound {
+				sdl.BindGPUGraphicsPipeline(pass, p)
+				bound = p
+			}
+			sh := o3d.shader_get(job.shaders, m.shader)
+			for stage in o3d.Shader_Stage {
+				at := job.depth_blocks.at[di][stage]
+				if at < 0 {
+					continue
+				}
+				if stage == .Vertex {
+					sdl.PushGPUVertexUniformData(cmd, 0, &job.depth_blocks.bytes[at], u32(sh.depth.vertex.block_size))
+				} else {
+					sdl.PushGPUFragmentUniformData(cmd, 0, &job.depth_blocks.bytes[at], u32(sh.depth.fragment.block_size))
+				}
+			}
+			now := sdl.GPUBufferBinding{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)}
+			if f := job.custom_skinned_first[di]; f >= 0 && job.custom_skinned.buffer != nil {
+				now = {buffer = job.custom_skinned.buffer, offset = u32(f) * size_of(o3d.Vertex)}
+			}
+			then := now
+			if f := job.custom_opened_first[di]; f >= 0 && job.custom_skinned.buffer != nil {
+				then.offset = u32(f) * size_of(o3d.Vertex)
+			}
+			vbs := [2]sdl.GPUBufferBinding{now, then}
+			sdl.BindGPUVertexBuffers(pass, 0, &vbs[0], 2)
+			bound_vb = nil
+			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
+			continue
+		}
+		joints := o3d.scene_draw_joints(scene, di)
+		skinned := !dyn && geo.skinned && len(joints) > 0 && g.skin_vertices.buffer != nil
+		curved := .Curves in m.flags
+		kind := 2 if curved else (1 if skinned else 0)
+		p := g.velocity_pipelines[kind][d.material.side]
+		if p != bound {
+			sdl.BindGPUGraphicsPipeline(pass, p)
+			bound = p
+		}
+		if curved {
+			sdl.BindGPUFragmentStorageBuffers(pass, 0, &g.curve_words.buffer, 1)
+		}
+		mask_samplers := [2]sdl.GPUTextureSamplerBinding{tex_binding(g, m.color_map), tex_binding(g, m.alpha_map)}
+		sdl.BindGPUFragmentSamplers(pass, 0, &mask_samplers[0], len(mask_samplers))
+		weights := o3d.scene_draw_morphs(scene, di)
+		du := make_draw_uniforms(job.view_proj * d.model, d.model, geo, weights)
+		sdl.PushGPUVertexUniformData(cmd, 0, &du, size_of(du))
+		model := o3d.scene_draw_opened(scene, di)
+		opened_weights := o3d.scene_draw_opened_morphs(scene, di)
+		ou := make_opened_uniforms(job.opened_view_proj * (model if model != {} else d.model), geo, opened_weights if opened_weights != nil else weights)
+		sdl.PushGPUVertexUniformData(cmd, 2 if skinned else 1, &ou, size_of(ou))
+		mu := make_material_uniforms(m, geo)
+		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
+		if skinned {
+			vbs := [2]sdl.GPUBufferBinding {
+				{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)},
+				{buffer = g.skin_vertices.buffer, offset = geo.first_skin * size_of(o3d.Skin_Vertex)},
+			}
+			sdl.BindGPUVertexBuffers(pass, 0, &vbs[0], 2)
+			bound_vb = nil
+			ju: [o3d.MAX_JOINTS]o3d.Mat4
+			copy(ju[:], joints)
+			sdl.PushGPUVertexUniformData(cmd, 1, &ju, size_of(ju))
+			if oj := o3d.scene_draw_opened_joints(scene, di); oj != nil {
+				copy(ju[:], oj)
+			}
+			sdl.PushGPUVertexUniformData(cmd, 3, &ju, size_of(ju))
+			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
+		} else if (du.morph_info.x > 0 || ou.morph_info.x > 0 || curved) && geo.first_vertex > 0 {
+			// Vertices counted from 0 (SV_VertexID: morph deltas, curves' quads).
+			sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf, offset = geo.first_vertex * size_of(o3d.Vertex)}, 1)
+			bound_vb = nil
+			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, 0, 0)
+		} else {
+			if bound_vb != vbuf {
+				sdl.BindGPUVertexBuffers(pass, 0, &sdl.GPUBufferBinding{buffer = vbuf}, 1)
+				bound_vb = vbuf
+			}
+			sdl.DrawGPUIndexedPrimitives(pass, geo.index_count, 1, geo.first_index, i32(geo.first_vertex), 0)
+		}
+	}
+}
+
+// A draw at the shutter's opening: `mvp` then and its morph targets'
+// weights then (as make_draw_uniforms takes them).
+@(private = "file")
+make_opened_uniforms :: #force_inline proc "contextless" (mvp: o3d.Mat4, geo: o3d.Geometry, weights: []f32) -> (ou: Opened_Uniforms) {
+	ou.mvp = mvp
+	morphs: [o3d.MAX_MORPH_TARGETS]o3d.Active_Morph
+	nm := o3d.active_morphs(geo, weights, &morphs)
+	for i in 0 ..< nm {
+		ou.morph_bases[i >> 2][i & 3] = morphs[i].base
+		ou.morph_weights[i >> 2][i & 3] = morphs[i].weight
+	}
+	ou.morph_info = {u32(nm), 0, 0, 0}
+	return
 }
 
 @(private = "file")
@@ -536,12 +734,33 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 			}
 		}
 	}
-	job.depth = o3d.needs_depth(active)
+	// The frame's depth (with its velocity and nearness: where each pixel
+	// was at the shutter's opening, none moving without motion blur), each
+	// ShaderMaterial by its own vertex stage.
+	job.motion = o3d.motion_of(active)
+	job.depth = o3d.needs_depth(active) || job.motion
 	if job.depth {
-		if !ensure_depth(g, job, width, height) {
+		if !ensure_depth(g, job, width, height) || !ensure_motion(g, job, width, height, job.motion) {
 			return .Out_Of_Memory
 		}
 		o3d.depth_draws(active, geos, shaders, proj * view, &job.depth_draws, &job.expanded)
+		opened := o3d.opened_camera(active.camera) or_else active.camera
+		ov, op := o3d.camera_matrices(opened, int(width), int(height))
+		job.opened_view_proj = op * ov
+		near := active.camera.near if active.camera.near > 0 else 0.1
+		far := active.camera.far if active.camera.far > near else near * 1e4
+		job.velocity = {
+			frame      = {f32(width), f32(height), near, far},
+			flags      = {u32(active.camera.orthographic), 0, 0, 0},
+			opened_far = job.opened_view_proj * linalg.inverse(proj * view),
+		}
+		job.motion_params = o3d.motion_params(active.camera, int(height))
+		o3d.depth_blocks(active, shaders, view, proj, ov, op, int(width), int(height), job.shadows[:ns], &job.depth_blocks)
+		for di in job.depth_draws {
+			if m := &job.materials[di]; m.shader != 0 {
+				custom_depth_pipeline(g, shaders, m.shader, active.draws[di].material.side)
+			}
+		}
 	}
 	exposure := active.tone_mapping_exposure if active.tone_mapping_exposure > 0 else 1
 	job.bg_params.params = {bg_intensity, bg_lod, 0, 0}
@@ -675,10 +894,10 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	job.prepared = false
 	width, height := job.width, job.height
 	for si in 0 ..< job.shadow_count {
-		draw_depth(g, job, job.casters[si][:], job.shadows[si].view_proj, job.shadow_maps[si], job.shadow_depths[si], false, cmd)
+		draw_depth(g, job, job.casters[si][:], job.shadows[si].view_proj, job.shadow_maps[si], job.shadow_depths[si], cmd)
 	}
 	if job.depth {
-		draw_depth(g, job, job.depth_draws[:], job.view_proj, job.depth_map, job.depth_buffer, true, cmd)
+		draw_velocity(g, job, cmd)
 	}
 	shadow_maps: [o3d.MAX_SHADOWS]^sdl.GPUTexture
 	for &m, si in shadow_maps {
@@ -743,38 +962,24 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		sdl.GenerateMipmapsForGPUTexture(cmd, job.snapshot_tex)
 	}
 	light_pass(g, job, cmd, width, height, job.clear, job.background != 0, job.order[:], &shadow_maps, false)
-	// The frame's light tone mapped and encoded (through its depth of
-	// field: its tables, then the gather as the output), then copied out.
-	job.post.tone.zw = {f32(g.capacity.x), f32(g.capacity.y)}
-	post_pass :: proc(g: ^GPU, job: ^Job, cmd: ^sdl.GPUCommandBuffer, pipeline: ^sdl.GPUGraphicsPipeline, targets: []^sdl.GPUTexture, size: [2]u32, maps: Post_Bindings) {
-		colors: [2]sdl.GPUColorTargetInfo
-		for t, i in targets {
-			colors[i] = {texture = t, load_op = .DONT_CARE, store_op = .STORE}
-		}
-		pass := sdl.BeginGPURenderPass(cmd, &colors[0], u32(len(targets)), nil)
-		defer sdl.EndGPURenderPass(pass)
-		sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(size.x), h = f32(size.y), min_depth = 0, max_depth = 1})
-		sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(size.x), h = i32(size.y)})
-		sdl.BindGPUGraphicsPipeline(pass, pipeline)
-		bindings: [Post_Maps]sdl.GPUTextureSamplerBinding
-		for m, k in maps {
-			// Unread slots (or the pass's own targets): a placeholder.
-			bindings[k] = {texture = m if m != nil else (g.dummy_texture if k == .Light || k == .Half else g.dummy_shadow), sampler = g.shadow_sampler}
-		}
-		sdl.BindGPUFragmentSamplers(pass, 0, &bindings[.Light], 1 if pipeline == g.output_pipeline else len(Post_Maps))
-		sdl.PushGPUFragmentUniformData(cmd, 0, &job.post, size_of(job.post))
-		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	// The frame's light blurred along its motion, then tone mapped and
+	// encoded (through its depth of field: its tables, then the gather as
+	// the output), then copied out.
+	if job.motion {
+		record_motion_blur(g, &job.motion_tables, cmd, light, job.velocity_map, job.nearness_map, job.blurred, width, height, job.motion_params, g.capacity) or_return
+		light = job.blurred
 	}
+	job.post.tone.zw = {f32(g.capacity.x), f32(g.capacity.y)}
 	if job.focus {
 		tiles, near, half, half_keys := job.focus_tables[0], job.focus_tables[1], job.focus_tables[2], job.focus_tables[3]
 		tile_size := [2]u32{u32(job.post.frame.z), u32(job.post.frame.w)}
 		half_size := [2]u32{(width + 1) / 2, (height + 1) / 2}
-		post_pass(g, job, cmd, g.focus_pipelines[.Tiles], {tiles}, tile_size, #partial Post_Bindings{.Depth = job.depth_map})
-		post_pass(g, job, cmd, g.focus_pipelines[.Near], {near}, tile_size, #partial Post_Bindings{.Tiles = tiles})
-		post_pass(g, job, cmd, g.focus_pipelines[.Half], {half, half_keys}, half_size, #partial Post_Bindings{.Light = light, .Depth = job.depth_map})
-		post_pass(g, job, cmd, g.focus_pipelines[.Gather], {g.output}, {width, height}, #partial Post_Bindings{.Light = light, .Depth = job.depth_map, .Tiles = near, .Half = half, .Half_Keys = half_keys})
+		post_draw(g, cmd, g.focus_pipelines[.Tiles], {tiles}, tile_size, #partial Post_Bindings{.Depth = job.depth_map}, &job.post)
+		post_draw(g, cmd, g.focus_pipelines[.Near], {near}, tile_size, #partial Post_Bindings{.Tiles = tiles}, &job.post)
+		post_draw(g, cmd, g.focus_pipelines[.Half], {half, half_keys}, half_size, #partial Post_Bindings{.Light = light, .Depth = job.depth_map}, &job.post)
+		post_draw(g, cmd, g.focus_pipelines[.Gather], {g.output}, {width, height}, #partial Post_Bindings{.Light = light, .Depth = job.depth_map, .Tiles = near, .Half = half, .Half_Keys = half_keys}, &job.post)
 	} else {
-		post_pass(g, job, cmd, g.output_pipeline, {g.output}, {width, height}, #partial Post_Bindings{.Light = light})
+		post_draw(g, cmd, g.output_pipeline, {g.output}, {width, height}, #partial Post_Bindings{.Light = light}, &job.post)
 	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
 	sdl.CopyGPUTextureToTexture(copy_pass, {texture = g.output}, {texture = out}, width, height, 1, false)

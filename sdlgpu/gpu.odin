@@ -10,6 +10,8 @@
 // `Geometries`' shared arrays: what is new uploads at the start of a frame.
 package o3d_sdlgpu
 
+import "core:math"
+import "core:slice"
 import "core:sync"
 import sdl "vendor:sdl3"
 
@@ -83,6 +85,88 @@ Focus_Pass :: enum u8 {
 	Gather,
 }
 
+// Motion blur: the frame's depth pass with velocity and nearness
+// (o3d.slang's vs_velocity*, fs_velocity*; fs_velocity_far under the
+// draws), then the filter (post.slang's fs_motion*: the tiles' longest
+// velocity, about them, the gather).
+Velocity_Shader :: enum u8 {
+	Vert,
+	Skinned_Vert,
+	Curves_Vert,
+	Frag,
+	Curves_Frag,
+	Far_Frag,
+}
+
+Motion_Pass :: enum u8 {
+	Rows,
+	Tiles,
+	Around,
+	Gather,
+}
+
+@(private = "file", rodata)
+VELOCITY_SPV := [Velocity_Shader][]u8 {
+	.Vert         = #load("../shaders/o3d.velocity_vert.spv"),
+	.Skinned_Vert = #load("../shaders/o3d.velocity_skinned_vert.spv"),
+	.Curves_Vert  = #load("../shaders/o3d.velocity_curves_vert.spv"),
+	.Frag         = #load("../shaders/o3d.velocity.spv"),
+	.Curves_Frag  = #load("../shaders/o3d.velocity_curves.spv"),
+	.Far_Frag     = #load("../shaders/o3d.velocity_far.spv"),
+}
+@(private = "file", rodata)
+VELOCITY_MSL := [Velocity_Shader][]u8 {
+	.Vert         = #load("../shaders/o3d.velocity_vert.msl"),
+	.Skinned_Vert = #load("../shaders/o3d.velocity_skinned_vert.msl"),
+	.Curves_Vert  = #load("../shaders/o3d.velocity_curves_vert.msl"),
+	.Frag         = #load("../shaders/o3d.velocity.msl"),
+	.Curves_Frag  = #load("../shaders/o3d.velocity_curves.msl"),
+	.Far_Frag     = #load("../shaders/o3d.velocity_far.msl"),
+}
+@(private = "file", rodata)
+VELOCITY_ENTRIES := [Velocity_Shader]cstring {
+	.Vert         = "vs_velocity",
+	.Skinned_Vert = "vs_velocity_skinned",
+	.Curves_Vert  = "vs_velocity_curves",
+	.Frag         = "fs_velocity",
+	.Curves_Frag  = "fs_velocity_curves",
+	.Far_Frag     = "fs_velocity_far",
+}
+// Each one's stage, samplers, storage buffers and uniform buffers.
+@(private = "file", rodata)
+VELOCITY_LAYOUTS := [Velocity_Shader]struct {
+	stage:                       sdl.GPUShaderStage,
+	samplers, storage, uniforms: u32,
+} {
+	.Vert         = {.VERTEX, 0, 1, 2},
+	.Skinned_Vert = {.VERTEX, 0, 1, 4},
+	.Curves_Vert  = {.VERTEX, 0, 0, 2},
+	.Frag         = {.FRAGMENT, 2, 0, 2},
+	.Curves_Frag  = {.FRAGMENT, 2, 1, 2},
+	.Far_Frag     = {.FRAGMENT, 0, 0, 2},
+}
+@(private = "file", rodata)
+MOTION_FRAGS_SPV := [Motion_Pass][]u8 {
+	.Rows   = #load("../shaders/post.motion_rows.spv"),
+	.Tiles  = #load("../shaders/post.motion_tiles.spv"),
+	.Around = #load("../shaders/post.motion_around.spv"),
+	.Gather = #load("../shaders/post.motion.spv"),
+}
+@(private = "file", rodata)
+MOTION_FRAGS_MSL := [Motion_Pass][]u8 {
+	.Rows   = #load("../shaders/post.motion_rows.msl"),
+	.Tiles  = #load("../shaders/post.motion_tiles.msl"),
+	.Around = #load("../shaders/post.motion_around.msl"),
+	.Gather = #load("../shaders/post.motion.msl"),
+}
+@(private = "file", rodata)
+MOTION_ENTRIES := [Motion_Pass]cstring {
+	.Rows   = "fs_motion_rows",
+	.Tiles  = "fs_motion_tiles",
+	.Around = "fs_motion_around",
+	.Gather = "fs_motion",
+}
+
 // The frame as the caller gets it, and textures: sRGB-encoded bytes,
 // premultiplied.
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
@@ -92,6 +176,10 @@ LIGHT_FORMAT :: sdl.GPUTextureFormat.R16G16B16A16_FLOAT
 // The mirror's pass's second target: each sample's run past the mirror
 // (o3d.mirror_run) premultiplied by its coverage, and the coverage.
 RUNS_FORMAT :: sdl.GPUTextureFormat.R16G16_FLOAT
+// Motion blur's: each pixel's velocity (pixels over the shutter's first
+// half) and nearness (o3d.motion_blur's).
+VELOCITY_FORMAT :: sdl.GPUTextureFormat.R16G16_FLOAT
+NEARNESS_FORMAT :: sdl.GPUTextureFormat.R16_FLOAT
 
 // What a pipeline draws into: the frame's light; or the mirror's light and
 // its runs, written (fs_mirror, fs_curves_mirror) or left as they are
@@ -154,6 +242,14 @@ GPU :: struct {
 	output_pipeline:          ^sdl.GPUGraphicsPipeline,
 	focus_frags:              [Focus_Pass]^sdl.GPUShader,
 	focus_pipelines:          [Focus_Pass]^sdl.GPUGraphicsPipeline,
+	// Motion blur: the depth pass with velocity, by the draw's kind
+	// (standard, skinned, curves) and its material's side, and under its
+	// draws; the filter's passes.
+	velocity_shaders:         [Velocity_Shader]^sdl.GPUShader,
+	velocity_pipelines:       [3][o3d.Side]^sdl.GPUGraphicsPipeline,
+	velocity_far_pipeline:    ^sdl.GPUGraphicsPipeline,
+	motion_frags:             [Motion_Pass]^sdl.GPUShader,
+	motion_pipelines:         [Motion_Pass]^sdl.GPUGraphicsPipeline,
 	// The frame's depth as distance into the host's image.
 	depth_vert, depth_frag:   ^sdl.GPUShader,
 	depth_pipeline:           ^sdl.GPUGraphicsPipeline,
@@ -224,6 +320,12 @@ Custom :: struct {
 	mirror_pipelines:   [o3d.Side][o3d.Blend]^sdl.GPUGraphicsPipeline,
 	made:       bool,
 	failed:     bool,
+	// The frame's depth pass's (o3d.Shader.depth): its shaders and
+	// pipelines by side.
+	depth_vert, depth_frag: ^sdl.GPUShader,
+	depth_pipelines:        [o3d.Side]^sdl.GPUGraphicsPipeline,
+	depth_made:             bool,
+	depth_failed:           bool,
 }
 
 // The uniforms as the shader reads them (std140 / Metal layouts agree here).
@@ -269,6 +371,7 @@ Material_Uniforms :: struct {
 // the frame's size, its tiles across and down.
 Post_Uniforms :: struct {
 	tone, lens, camera, frame: [4]f32,
+	motion, motion_size:       [4]f32,
 }
 
 // The post passes' maps, in their slots (post.slang's).
@@ -278,6 +381,24 @@ Post_Maps :: enum u8 {
 	Tiles,
 	Half,
 	Half_Keys,
+	Velocity,
+	Nearness,
+	Motion,
+}
+
+// The depth pass's draw at the shutter's opening (o3d.slang's Opened_VS),
+// and its frame (Velocity_FS).
+Opened_Uniforms :: struct {
+	mvp:           o3d.Mat4,
+	morph_bases:   [2][4]u32,
+	morph_weights: [2][4]f32,
+	morph_info:    [4]u32,
+}
+
+Velocity_Uniforms :: struct {
+	frame:      [4]f32, // width, height, the camera's near and far
+	flags:      [4]u32, // orthographic
+	opened_far: o3d.Mat4,
 }
 
 Post_Bindings :: [Post_Maps]^sdl.GPUTexture
@@ -389,6 +510,23 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.depth_frag = sdl.CreateGPUShader(g.device, {code_size = len(depth_frag_code), code = raw_data(depth_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
 	g.post_vert = sdl.CreateGPUShader(g.device, {code_size = len(post_vert_code), code = raw_data(post_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX})
 	g.output_frag = sdl.CreateGPUShader(g.device, {code_size = len(output_code), code = raw_data(output_code), entrypoint = output_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
+	for sh in Velocity_Shader {
+		code := VELOCITY_SPV[sh] if format == {.SPIRV} else VELOCITY_MSL[sh]
+		entry := cstring("main") if format == {.SPIRV} else VELOCITY_ENTRIES[sh]
+		l := VELOCITY_LAYOUTS[sh]
+		g.velocity_shaders[sh] = sdl.CreateGPUShader(g.device, {code_size = len(code), code = raw_data(code), entrypoint = entry, format = format, stage = l.stage, num_samplers = l.samplers, num_storage_buffers = l.storage, num_uniform_buffers = l.uniforms})
+		if g.velocity_shaders[sh] == nil {
+			return .Shader
+		}
+	}
+	for pass in Motion_Pass {
+		code := MOTION_FRAGS_SPV[pass] if format == {.SPIRV} else MOTION_FRAGS_MSL[pass]
+		entry := cstring("main") if format == {.SPIRV} else MOTION_ENTRIES[pass]
+		g.motion_frags[pass] = sdl.CreateGPUShader(g.device, {code_size = len(code), code = raw_data(code), entrypoint = entry, format = format, stage = .FRAGMENT, num_samplers = len(Post_Maps), num_uniform_buffers = 1})
+		if g.motion_frags[pass] == nil {
+			return .Shader
+		}
+	}
 	for pass in Focus_Pass {
 		code := FOCUS_FRAGS_SPV[pass] if format == {.SPIRV} else FOCUS_FRAGS_MSL[pass]
 		entry := cstring("main") if format == {.SPIRV} else FOCUS_ENTRIES[pass]
@@ -425,6 +563,15 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 		if g.shadow_pipelines[side] == nil || g.shadow_skinned_pipelines[side] == nil || g.shadow_curve_pipelines[side] == nil {
 			return .Shader
 		}
+		vs := &g.velocity_shaders
+		g.velocity_pipelines[0][side] = make_velocity_pipeline(g, vs[.Vert], vs[.Frag], side, false)
+		g.velocity_pipelines[1][side] = make_velocity_pipeline(g, vs[.Skinned_Vert], vs[.Frag], side, true)
+		g.velocity_pipelines[2][side] = make_velocity_pipeline(g, vs[.Curves_Vert], vs[.Curves_Frag], side, false)
+		for k in 0 ..< 3 {
+			if g.velocity_pipelines[k][side] == nil {
+				return .Shader
+			}
+		}
 	}
 	g.bg_pipeline = make_background_pipeline(g)
 	g.depth_pipeline = make_fullscreen_pipeline(g, g.depth_vert, g.depth_frag, DEPTH_IMAGE_FORMAT)
@@ -433,6 +580,19 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.focus_pipelines[.Near] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Near], SHADOW_FORMAT)
 	g.focus_pipelines[.Half] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Half], LIGHT_FORMAT, SHADOW_FORMAT)
 	g.focus_pipelines[.Gather] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Gather], COLOR_FORMAT)
+	g.motion_pipelines[.Rows] = make_fullscreen_pipeline(g, g.post_vert, g.motion_frags[.Rows], VELOCITY_FORMAT)
+	g.motion_pipelines[.Tiles] = make_fullscreen_pipeline(g, g.post_vert, g.motion_frags[.Tiles], VELOCITY_FORMAT)
+	g.motion_pipelines[.Around] = make_fullscreen_pipeline(g, g.post_vert, g.motion_frags[.Around], VELOCITY_FORMAT)
+	g.motion_pipelines[.Gather] = make_fullscreen_pipeline(g, g.post_vert, g.motion_frags[.Gather], LIGHT_FORMAT)
+	g.velocity_far_pipeline = make_velocity_pipeline(g, g.post_vert, g.velocity_shaders[.Far_Frag], .Double, false, far = true)
+	for p in g.motion_pipelines {
+		if p == nil {
+			return .Shader
+		}
+	}
+	if g.velocity_far_pipeline == nil {
+		return .Shader
+	}
 	if g.bg_pipeline == nil || g.depth_pipeline == nil || g.output_pipeline == nil {
 		return .Shader
 	}
@@ -536,6 +696,31 @@ destroy :: proc(g: ^GPU) {
 		}
 	}
 	for sh in g.focus_frags {
+		if sh != nil {
+			sdl.ReleaseGPUShader(g.device, sh)
+		}
+	}
+	for pipelines in g.velocity_pipelines {
+		for p in pipelines {
+			if p != nil {
+				sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+			}
+		}
+	}
+	for p in g.motion_pipelines {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
+	}
+	if g.velocity_far_pipeline != nil {
+		sdl.ReleaseGPUGraphicsPipeline(g.device, g.velocity_far_pipeline)
+	}
+	for sh in g.velocity_shaders {
+		if sh != nil {
+			sdl.ReleaseGPUShader(g.device, sh)
+		}
+	}
+	for sh in g.motion_frags {
 		if sh != nil {
 			sdl.ReleaseGPUShader(g.device, sh)
 		}
@@ -820,8 +1005,84 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 	return p^
 }
 
+// A ShaderMaterial's pipeline for the frame's depth pass (o3d.Shader.depth:
+// its vertex stage with a tap, DEPTH_FRAGMENT), as make_velocity_pipeline's
+// targets: its vertices from slot 0, their twins (posed as at the shutter's
+// opening) from slot 1. `make` false only looks it up.
+@(private)
+custom_depth_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side: o3d.Side, make := true) -> ^sdl.GPUGraphicsPipeline {
+	sh := o3d.shader_get(shaders, id)
+	if sh == nil || sh.depth == nil || int(id) > len(g.custom) && !make {
+		return nil
+	}
+	if len(g.custom) < int(id) {
+		resize(&g.custom, int(id))
+	}
+	c := &g.custom[id - 1]
+	if !make {
+		return nil if c.depth_failed else c.depth_pipelines[side]
+	}
+	if !c.depth_made {
+		c.depth_made = true
+		formats := sdl.GetGPUShaderFormats(g.device)
+		for m, stage in ([2]^oksl.Module{sh.depth.vertex, sh.depth.fragment}) {
+			info := sdl.GPUShaderCreateInfo {
+				stage               = .VERTEX if stage == 0 else .FRAGMENT,
+				num_uniform_buffers = 1 if m.block_size > 0 else 0,
+			}
+			if .SPIRV in formats {
+				info.code, info.code_size = ([^]u8)(raw_data(m.spirv)), len(m.spirv) * size_of(u32)
+				info.entrypoint, info.format = oksl.SPIRV_ENTRY, {.SPIRV}
+			} else {
+				info.code, info.code_size = raw_data(m.msl), len(m.msl)
+				info.entrypoint, info.format = oksl.MSL_ENTRY, {.MSL}
+			}
+			made := sdl.CreateGPUShader(g.device, info)
+			if stage == 0 {
+				c.depth_vert = made
+			} else {
+				c.depth_frag = made
+			}
+		}
+		c.depth_failed = c.depth_vert == nil || c.depth_frag == nil
+	}
+	if c.depth_failed {
+		return nil
+	}
+	p := &c.depth_pipelines[side]
+	if p^ == nil {
+		attrs: [len(o3d.Vertex_Attribute) + 2]sdl.GPUVertexAttribute
+		n := 0
+		for a in o3d.Vertex_Attribute {
+			if loc := sh.depth_attributes[a]; loc >= 0 {
+				row := o3d.VERTEX_ATTRIBUTES[a]
+				attrs[n] = {location = u32(loc), buffer_slot = 0, format = .FLOAT2 if row.components == 2 else .FLOAT3, offset = u32(row.offset)}
+				n += 1
+			}
+		}
+		for loc, k in sh.depth_twins {
+			if loc >= 0 {
+				attrs[n] = {location = u32(loc), buffer_slot = 1, format = .FLOAT3, offset = u32(o3d.VERTEX_ATTRIBUTES[.Position if k == 0 else .Normal].offset)}
+				n += 1
+			}
+		}
+		p^ = make_velocity_pipeline(g, c.depth_vert, c.depth_frag, side, false, attrs = attrs[:n])
+	}
+	return p^
+}
+
 @(private)
 release_custom :: proc(g: ^GPU, c: ^Custom) {
+	for p in c.depth_pipelines {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
+	}
+	for sh in ([2]^sdl.GPUShader{c.depth_vert, c.depth_frag}) {
+		if sh != nil {
+			sdl.ReleaseGPUShader(g.device, sh)
+		}
+	}
 	for side in o3d.Side {
 		for p in c.pipelines[side] {
 			if p != nil {
@@ -875,6 +1136,123 @@ make_shadow_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, side: o3d.Side
 		target_info = {color_target_descriptions = &color, num_color_targets = 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
+}
+
+// The frame's depth pass with motion blur: its depth map, velocity and
+// nearness, culled by the material's own side; or what is under its draws
+// (`far`: a full-screen triangle, no depth test).
+@(private = "file")
+make_velocity_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, side: o3d.Side, skinned: bool, far := false, attrs: []sdl.GPUVertexAttribute = nil) -> ^sdl.GPUGraphicsPipeline {
+	buffers := [2]sdl.GPUVertexBufferDescription {
+		{slot = 0, pitch = size_of(o3d.Vertex), input_rate = .VERTEX},
+		{slot = 1, pitch = size_of(o3d.Skin_Vertex), input_rate = .VERTEX},
+	}
+	attrs := attrs
+	if attrs == nil {
+		attrs = SKINNED_ATTRIBUTES[:] if skinned else STANDARD_ATTRIBUTES[:]
+	} else {
+		// A ShaderMaterial's: its vertices and their twins, both Vertex rows.
+		buffers[1].pitch = size_of(o3d.Vertex)
+	}
+	two := skinned || len(attrs) > 0 && slice.any_of_proc(attrs, proc(a: sdl.GPUVertexAttribute) -> bool {return a.buffer_slot == 1})
+	colors := [3]sdl.GPUColorTargetDescription{{format = SHADOW_FORMAT}, {format = VELOCITY_FORMAT}, {format = NEARNESS_FORMAT}}
+	cull: sdl.GPUCullMode
+	switch side {
+	case .Front:
+		cull = .BACK
+	case .Back:
+		cull = .FRONT
+	case .Double:
+		cull = .NONE
+	}
+	info := sdl.GPUGraphicsPipelineCreateInfo {
+		vertex_shader = vert,
+		fragment_shader = frag,
+		vertex_input_state = {vertex_buffer_descriptions = &buffers[0], num_vertex_buffers = 2 if two else 1, vertex_attributes = raw_data(attrs), num_vertex_attributes = u32(len(attrs))},
+		primitive_type = .TRIANGLELIST,
+		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .COUNTER_CLOCKWISE},
+		multisample_state = {sample_count = ._1},
+		depth_stencil_state = {compare_op = .GREATER, enable_depth_test = true, enable_depth_write = true},
+		target_info = {color_target_descriptions = &colors[0], num_color_targets = len(colors), depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
+	}
+	if far {
+		info.vertex_input_state = {}
+		info.depth_stencil_state = {}
+	}
+	return sdl.CreateGPUGraphicsPipeline(g.device, info)
+}
+
+// The motion blur filter's tables (o3d.Motion_Tables' on the GPU): its
+// tiles' rows' longest velocity (tiles across by the frame's rows), its
+// tiles' and the longest about them, made for a frame's size and tile, the
+// caller's, kept across frames.
+Motion_Tables :: struct {
+	rows, tiles, around: ^sdl.GPUTexture,
+	size:                [3]u32,
+}
+
+motion_tables_destroy :: proc(g: ^GPU, t: ^Motion_Tables) {
+	for tex in ([]^sdl.GPUTexture{t.rows, t.tiles, t.around}) {
+		if tex != nil {
+			sdl.ReleaseGPUTexture(g.device, tex)
+		}
+	}
+	t^ = {}
+}
+
+// The motion blur filter (o3d.motion_blur's) recorded into `cmd` on `g`'s
+// device: `color` (light, premultiplied, its texture `color_size`; 0: as
+// the frame) blurred along `velocity` (VELOCITY_FORMAT, pixels over the
+// shutter's first half) and ordered by `nearness` (NEARNESS_FORMAT, larger
+// nearer), each `width x height` from the top left, into the same of `out`
+// (LIGHT_FORMAT, not `color`).
+record_motion_blur :: proc(g: ^GPU, t: ^Motion_Tables, cmd: ^sdl.GPUCommandBuffer, color, velocity, nearness, out: ^sdl.GPUTexture, width, height: u32, params: o3d.Motion_Blur, color_size := [2]u32{}) -> o3d.Error {
+	tile := u32(max(math.ceil(params.max_blur), 1))
+	tiles := [2]u32{(width + tile - 1) / tile, (height + tile - 1) / tile}
+	if t.size != {width, height, tile} || t.tiles == nil {
+		motion_tables_destroy(g, t)
+		for &tex, k in ([]^^sdl.GPUTexture{&t.rows, &t.tiles, &t.around}) {
+			tex^ = sdl.CreateGPUTexture(g.device, {type = .D2, format = VELOCITY_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = tiles.x, height = height if k == 0 else tiles.y, layer_count_or_depth = 1, num_levels = 1})
+			if tex^ == nil {
+				return .Device
+			}
+		}
+		t.size = {width, height, tile}
+	}
+	cs := color_size if color_size != {} else [2]u32{width, height}
+	u := Post_Uniforms {
+		tone        = {0, 0, f32(cs.x), f32(cs.y)},
+		frame       = {f32(width), f32(height), 0, 0},
+		motion      = {max(params.max_blur, 0), params.depth_scale if params.depth_scale > 0 else o3d.MOTION_DEPTH_SCALE, f32(tile), 0},
+		motion_size = {f32(width), f32(height), f32(tiles.x), f32(tiles.y)},
+	}
+	post_draw(g, cmd, g.motion_pipelines[.Rows], {t.rows}, {tiles.x, height}, #partial Post_Bindings{.Velocity = velocity}, &u)
+	post_draw(g, cmd, g.motion_pipelines[.Tiles], {t.tiles}, tiles, #partial Post_Bindings{.Motion = t.rows}, &u)
+	post_draw(g, cmd, g.motion_pipelines[.Around], {t.around}, tiles, #partial Post_Bindings{.Motion = t.tiles}, &u)
+	post_draw(g, cmd, g.motion_pipelines[.Gather], {out}, {width, height}, #partial Post_Bindings{.Light = color, .Velocity = velocity, .Nearness = nearness, .Motion = t.around}, &u)
+	return nil
+}
+
+// A full-screen pass of `pipeline` (post.slang's) into `targets` at `size`
+// from the top left, reading `maps` (a placeholder for those unread).
+@(private)
+post_draw :: proc(g: ^GPU, cmd: ^sdl.GPUCommandBuffer, pipeline: ^sdl.GPUGraphicsPipeline, targets: []^sdl.GPUTexture, size: [2]u32, maps: Post_Bindings, uniforms: ^Post_Uniforms) {
+	colors: [2]sdl.GPUColorTargetInfo
+	for t, i in targets {
+		colors[i] = {texture = t, load_op = .DONT_CARE, store_op = .STORE}
+	}
+	pass := sdl.BeginGPURenderPass(cmd, &colors[0], u32(len(targets)), nil)
+	defer sdl.EndGPURenderPass(pass)
+	sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(size.x), h = f32(size.y), min_depth = 0, max_depth = 1})
+	sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(size.x), h = i32(size.y)})
+	sdl.BindGPUGraphicsPipeline(pass, pipeline)
+	bindings: [Post_Maps]sdl.GPUTextureSamplerBinding
+	for m, k in maps {
+		bindings[k] = {texture = m if m != nil else (g.dummy_texture if k == .Light || k == .Half else g.dummy_shadow), sampler = g.shadow_sampler}
+	}
+	sdl.BindGPUFragmentSamplers(pass, 0, &bindings[.Light], 1 if pipeline == g.output_pipeline else len(Post_Maps))
+	sdl.PushGPUFragmentUniformData(cmd, 0, uniforms, size_of(uniforms^))
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 }
 
 // A job's shadow map and its depth buffer at `size` squared.
@@ -990,6 +1368,42 @@ release_focus :: proc(g: ^GPU, job: ^Job) {
 		t = nil
 	}
 	job.focus_size = {}
+}
+
+// A job's depth pass's velocity and nearness at the frame's size, and with
+// motion blur (`blurred`) its blurred light at the targets' capacity (read
+// as the light is).
+@(private)
+ensure_motion :: proc(g: ^GPU, job: ^Job, width, height: u32, blurred: bool) -> bool {
+	if job.velocity_size != {width, height} || job.velocity_map == nil {
+		for t in ([]^sdl.GPUTexture{job.velocity_map, job.nearness_map}) {
+			if t != nil {
+				sdl.ReleaseGPUTexture(g.device, t)
+			}
+		}
+		job.velocity_map = sdl.CreateGPUTexture(g.device, {type = .D2, format = VELOCITY_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1})
+		job.nearness_map = sdl.CreateGPUTexture(g.device, {type = .D2, format = NEARNESS_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1})
+		job.velocity_size = {width, height}
+	}
+	if blurred && (job.blurred_size != g.capacity || job.blurred == nil) {
+		if job.blurred != nil {
+			sdl.ReleaseGPUTexture(g.device, job.blurred)
+		}
+		job.blurred = sdl.CreateGPUTexture(g.device, {type = .D2, format = LIGHT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = g.capacity.x, height = g.capacity.y, layer_count_or_depth = 1, num_levels = 1})
+		job.blurred_size = g.capacity
+	}
+	return job.velocity_map != nil && job.nearness_map != nil && (!blurred || job.blurred != nil)
+}
+
+@(private)
+release_motion :: proc(g: ^GPU, job: ^Job) {
+	for t in ([]^sdl.GPUTexture{job.velocity_map, job.nearness_map, job.blurred}) {
+		if t != nil {
+			sdl.ReleaseGPUTexture(g.device, t)
+		}
+	}
+	job.velocity_map, job.nearness_map, job.blurred, job.velocity_size, job.blurred_size = nil, nil, nil, {}, {}
+	motion_tables_destroy(g, &job.motion_tables)
 }
 
 @(private)

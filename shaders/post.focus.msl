@@ -3,13 +3,15 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 12 "post.slang"
+#line 17 "post.slang"
 struct Post_FS_0
 {
     float4 tone_0;
     float4 lens_0;
     float4 camera_0;
     float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
 };
 
 
@@ -30,11 +32,11 @@ struct KernelContext_0
 };
 
 
-#line 51 "post.slang"
+#line 63 "post.slang"
 float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 52
+#line 64
     return ((kernelContext_0->lightMap_texture_0).sample((kernelContext_0->lightMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->tone_0.zw), level((0.0f))));
 }
 
@@ -42,34 +44,34 @@ float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 float key_at_0(int2 p_1, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 57
+#line 69
     float _S1 = ((kernelContext_1->depthMap_texture_0).sample((kernelContext_1->depthMap_sampler_0), ((float2(p_1) + float2(0.5f) ) / kernelContext_1->post_0->frame_0.xy), level((0.0f))).x);
     if(_S1 <= 0.0f)
     {
 
-#line 59
+#line 71
         return 0.0f;
     }
     float near_0 = kernelContext_1->post_0->camera_0.x;
     float far_0 = kernelContext_1->post_0->camera_0.y;
 
-#line 62
+#line 74
     float v_0;
     if((kernelContext_1->post_0->camera_0.z) != 0.0f)
     {
 
-#line 63
+#line 75
         v_0 = far_0 - _S1 * (far_0 - near_0);
 
-#line 63
+#line 75
     }
     else
     {
 
-#line 63
+#line 75
         v_0 = near_0 * far_0 / (near_0 + _S1 * (far_0 - near_0));
 
-#line 63
+#line 75
     }
     return 1.0f / v_0;
 }
@@ -77,7 +79,7 @@ float key_at_0(int2 p_1, KernelContext_0 thread* kernelContext_1)
 float focus_blur_0(float key_0, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 68
+#line 80
     return min(kernelContext_2->post_0->lens_0.y * abs(1.0f - kernelContext_2->post_0->lens_0.x * key_0), kernelContext_2->post_0->lens_0.z);
 }
 
@@ -300,16 +302,16 @@ float linear_to_srgb_0(float c_1)
 }
 
 
-#line 39 "post.slang"
+#line 51 "post.slang"
 float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 40
+#line 52
     float a_0 = saturate(light_0.w);
     if(a_0 <= 0.0f)
     {
 
-#line 42
+#line 54
         return float4(int4(int(0)) );
     }
     float3 c_2 = tone_map_0(light_0.xyz / float3(a_0) , uint(kernelContext_3->post_0->tone_0.x), kernelContext_3->post_0->tone_0.y);
@@ -320,140 +322,140 @@ float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_3)
 }
 
 
-#line 48
+#line 60
 struct pixelOutput_0
 {
     float4 output_1 [[color(0)]];
 };
 
 
-#line 135
+#line 147
 [[fragment]] pixelOutput_0 fs_focus(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> tileMap_texture_1 [[texture(2)]], sampler tileMap_sampler_1 [[sampler(2)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> depthMap_texture_1 [[texture(1)]], sampler depthMap_sampler_1 [[sampler(1)]], texture2d<float, access::sample> halfMap_texture_1 [[texture(3)]], sampler halfMap_sampler_1 [[sampler(3)]], texture2d<float, access::sample> halfKeyMap_texture_1 [[texture(4)]], sampler halfKeyMap_sampler_1 [[sampler(4)]])
 {
 
-#line 135
+#line 147
     thread KernelContext_0 kernelContext_4;
 
-#line 135
+#line 147
     (&kernelContext_4)->post_0 = post_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->tileMap_texture_0 = tileMap_texture_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->tileMap_sampler_0 = tileMap_sampler_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->lightMap_texture_0 = lightMap_texture_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->lightMap_sampler_0 = lightMap_sampler_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->depthMap_texture_0 = depthMap_texture_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->depthMap_sampler_0 = depthMap_sampler_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->halfMap_texture_0 = halfMap_texture_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->halfMap_sampler_0 = halfMap_sampler_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->halfKeyMap_texture_0 = halfKeyMap_texture_1;
 
-#line 135
+#line 147
     (&kernelContext_4)->halfKeyMap_sampler_0 = halfKeyMap_sampler_1;
     int2 _S29 = int2(position_0.xy);
     int2 _S30 = int2(post_1->frame_0.xy);
 
-#line 137
+#line 149
     int2 _S31 = int2(int(1)) ;
     int2 _S32 = (_S30 + _S31) / int2(int(2)) ;
     int2 _S33 = _S29 / int2(int(16)) ;
 
-#line 139
+#line 151
     float2 _S34 = float2(0.5f) ;
 
-#line 139
+#line 151
     float _S35 = (((&kernelContext_4)->tileMap_texture_0).sample(((&kernelContext_4)->tileMap_sampler_0), ((float2(_S33) + _S34) / post_1->frame_0.zw), level((0.0f))).x);
 
-#line 139
+#line 151
     float4 _S36 = light_at_0(_S29, &kernelContext_4);
 
-#line 139
+#line 151
     float4 sum_0;
 
     if(_S35 >= 0.5f)
     {
 
-#line 141
+#line 153
         float _S37 = key_at_0(_S29, &kernelContext_4);
 
-#line 141
+#line 153
         float _S38 = focus_blur_0(_S37, &kernelContext_4);
 
-#line 141
+#line 153
         float2 dir_0 = float2(1.0f, 0.0f);
 
-#line 141
+#line 153
         float radius_0 = 0.80000001192092896f;
 
-#line 141
+#line 153
         sum_0 = _S36;
 
-#line 141
+#line 153
         float count_0 = 1.0f;
 
-#line 147
+#line 159
         for(;;)
         {
 
-#line 147
+#line 159
             if(radius_0 < _S35)
             {
             }
             else
             {
 
-#line 147
+#line 159
                 break;
             }
 
-#line 148
+#line 160
             float2 o_0 = dir_0 * float2(radius_0) ;
 
 
             bool _S39 = radius_0 < 6.0f;
 
-#line 151
+#line 163
             float key_1;
 
-#line 151
+#line 163
             float4 light_1;
 
-#line 151
+#line 163
             if(_S39)
             {
 
-#line 152
+#line 164
                 int2 s_0 = clamp(int2(floor(float2(_S29) + o_0 + _S34)), int2(int(0)) , _S30 - _S31);
 
-#line 152
+#line 164
                 float4 _S40 = light_at_0(s_0, &kernelContext_4);
 
-#line 152
+#line 164
                 float _S41 = key_at_0(s_0, &kernelContext_4);
 
-#line 152
+#line 164
                 key_1 = _S41;
 
-#line 152
+#line 164
                 light_1 = _S40;
 
-#line 151
+#line 163
             }
             else
             {
@@ -463,37 +465,37 @@ struct pixelOutput_0
                 float2 uv_0 = (float2(clamp(int2(floor((float2(_S29) + _S34 + o_0) * _S34)), int2(int(0)) , _S32 - _S31)) + _S34) / float2(_S32);
                 float4 _S42 = (((&kernelContext_4)->halfMap_texture_0).sample(((&kernelContext_4)->halfMap_sampler_0), (uv_0), level((0.0f))));
 
-#line 158
+#line 170
                 key_1 = (((&kernelContext_4)->halfKeyMap_texture_0).sample(((&kernelContext_4)->halfKeyMap_sampler_0), (uv_0), level((0.0f))).x);
 
-#line 158
+#line 170
                 light_1 = _S42;
 
-#line 151
+#line 163
             }
 
-#line 151
+#line 163
             float _S43 = focus_blur_0(key_1, &kernelContext_4);
 
-#line 151
+#line 163
             float blur_0;
 
-#line 162
+#line 174
             if(key_1 < _S37)
             {
 
-#line 162
+#line 174
                 blur_0 = min(_S43, _S38 * 2.0f);
 
-#line 162
+#line 174
             }
             else
             {
 
-#line 162
+#line 174
                 blur_0 = _S43;
 
-#line 162
+#line 174
             }
 
 
@@ -501,68 +503,68 @@ struct pixelOutput_0
             float4 sum_1 = sum_0 + (sum_0 / float4(count_0)  * float4((1.0f - m_1))  + light_1 * float4(m_1) );
             float count_1 = count_0 + 1.0f;
 
-#line 167
+#line 179
             float _S44;
             if(_S39)
             {
 
-#line 168
+#line 180
                 _S44 = 1.60000002384185791f;
 
-#line 168
+#line 180
             }
             else
             {
 
-#line 168
+#line 180
                 _S44 = 3.20000004768371582f;
 
-#line 168
+#line 180
             }
 
-#line 168
+#line 180
             float radius_1 = radius_0 + _S44 / radius_0;
             float _S45 = dir_0.x;
 
-#line 169
+#line 181
             float _S46 = dir_0.y;
 
-#line 169
+#line 181
             dir_0 = float2(_S45 * -0.7373688817024231f - _S46 * 0.67549031972885132f, _S45 * 0.67549031972885132f + _S46 * -0.7373688817024231f);
 
-#line 169
+#line 181
             radius_0 = radius_1;
 
-#line 169
+#line 181
             sum_0 = sum_1;
 
-#line 169
+#line 181
             count_0 = count_1;
 
-#line 147
+#line 159
         }
 
-#line 147
+#line 159
         sum_0 = sum_0 / float4(count_0) ;
 
-#line 141
+#line 153
     }
     else
     {
 
-#line 141
+#line 153
         sum_0 = _S36;
 
-#line 141
+#line 153
     }
 
-#line 141
+#line 153
     float4 _S47 = output_0(sum_0, &kernelContext_4);
 
-#line 141
+#line 153
     pixelOutput_0 _S48 = { _S47 };
 
-#line 173
+#line 185
     return _S48;
 }
 

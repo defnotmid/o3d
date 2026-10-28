@@ -5,7 +5,8 @@ import "core:thread"
 
 // Depth of field gathered on the software renderer (`focus_of`;
 // shaders/post.slang's fs_focus_* do the same on the GPU): once the frame's
-// pass has resolved its light into `Software.frame`, each pixel's key and
+// pass has resolved its light into `Software.frame` (and blurred it along
+// its motion), each pixel's key and
 // blur from the frame's depth, the largest blur per tile and near it, a
 // half-size copy, then each row gathered and written as the frame's pixels.
 
@@ -49,13 +50,14 @@ Software_View :: struct {
 	t:      ^Focus_Tables,
 }
 
-// The frame's pixels from its light (`s.frame`) and depth (`s.depth_map`),
-// blurred by `f`, tone mapped and encoded.
+// The frame's pixels from its light (`frame`: `s.frame`, or that blurred
+// along its motion) and depth (`s.depth_map`), blurred by `f`, tone mapped
+// and encoded.
 @(private)
-depth_of_field :: proc(s: ^Software, f: Focus, camera: Camera, tone_mapping: Tone_Mapping, tone_exposure: f32, pool: ^thread.Pool) {
+depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, tone_mapping: Tone_Mapping, tone_exposure: f32, pool: ^thread.Pool) {
 	w, h := s.width, s.height
 	job := Focus_Job {
-		s             = {s.frame[:w * h], s.depth_map[:w * h], s.pixels, &s.focus},
+		s             = {frame[:w * h], s.depth_map[:w * h], s.pixels, &s.focus},
 		f             = f,
 		camera        = camera,
 		width         = w,

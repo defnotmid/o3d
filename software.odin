@@ -55,6 +55,9 @@ SHADOW_MASK_FLOATS :: 2
 shadow_floats :: #force_inline proc "contextless" (masked, curved: bool) -> int {
 	return SHADOW_MASK_FLOATS * (int(masked) + int(curved))
 }
+// And with motion blur, the frame's depth pass's after them: the corner's
+// clip x, y and w at the shutter's opening.
+OPENED_FLOATS :: 3
 
 Software :: struct {
 	width, height: int,
@@ -67,9 +70,10 @@ Software :: struct {
 	order:         [dynamic]int,
 	materials:     [dynamic]Shading_Material, // per draw
 	// ShaderMaterials' uniform blocks, through the camera and through the
-	// mirror.
+	// mirror, and for the frame's depth pass (`depth_blocks`).
 	blocks:        Shader_Blocks,
 	mirror_blocks: Shader_Blocks,
+	depth_blocks:  Shader_Blocks,
 	// The frame's chunks are chunks[:chunk_count]; the ones past it keep
 	// their lists' memory for later frames.
 	chunks:        [dynamic]Chunk,
@@ -113,10 +117,17 @@ Software :: struct {
 	reflection_light: [dynamic][4]f32,
 	reflection_runs: [dynamic][4]f32,
 	mirror_runs:   [dynamic][2]f16,
-	// With depth of field: the frame's light per pixel, resolved by the
-	// bands, and the gather's tables (depth_of_field.odin).
+	// With depth of field or motion blur: the frame's light per pixel,
+	// resolved by the bands, and the gather's tables (depth_of_field.odin).
 	frame:         [dynamic][4]f32,
 	focus:         Focus_Tables,
+	// With motion blur: each pixel's velocity and nearness from the depth
+	// pass, the light blurred along them, and the filter's tables
+	// (motion_blur.odin).
+	velocity:      [dynamic][2]f32,
+	nearness:      [dynamic]f32,
+	blurred:       [dynamic][4]f32,
+	motion:        Motion_Tables,
 }
 
 // An external texture's pixels for the software renderer: RGBA8 (sRGB
@@ -138,10 +149,15 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.mirror_runs)
 	delete(s.frame)
 	focus_tables_destroy(&s.focus)
+	delete(s.velocity)
+	delete(s.nearness)
+	delete(s.blurred)
+	motion_tables_destroy(&s.motion)
 	delete(s.order)
 	delete(s.materials)
 	shader_blocks_destroy(&s.blocks)
 	shader_blocks_destroy(&s.mirror_blocks)
+	shader_blocks_destroy(&s.depth_blocks)
 	for &c in s.chunks {
 		delete(c.tris)
 		delete(c.values)
@@ -220,6 +236,7 @@ Worker :: struct {
 	positions: [dynamic][4]f32, // clip space
 	values:    [dynamic]f32,
 	skinned:   [dynamic]Vertex, // posed chunk vertices for a skinned ShaderMaterial
+	opened:    [dynamic]Vertex, // and posed as at the shutter's opening (the depth pass's twins)
 	quads:     struct {
 		origin:  [dynamic][2]i32,
 		helpers: [dynamic]oksl.Quad_Lanes,
@@ -238,6 +255,7 @@ worker_destroy :: proc(w: ^Worker) {
 	delete(w.positions)
 	delete(w.values)
 	delete(w.skinned)
+	delete(w.opened)
 	delete(w.quads.origin)
 	delete(w.quads.helpers)
 	delete(w.quads.facing)
@@ -334,12 +352,27 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.depth_target, job.own_side = s.shadow_maps[si], false
 		run_pass(s, active, geos, &job, pool, draw_depth_band, 0, len(s.order))
 	}
-	if needs_depth(active) {
+	// The frame's depth, each ShaderMaterial by its own vertex stage, with
+	// motion blur its velocity and nearness too (where each pixel was at
+	// the shutter's opening).
+	moving := motion_of(active)
+	if needs_depth(active) || moving {
 		table_grow_non_zero(&s.depth_map, width * height)
 		depth_draws(active, geos, shaders, proj * view, &s.order, &s.expanded)
+		opened := opened_camera(active.camera) or_else active.camera
+		ov, op := camera_matrices(opened, width, height)
+		depth_blocks(active, shaders, view, proj, ov, op, width, height, shadows[:ns], &s.depth_blocks)
 		job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, true
-		job.depth_target, job.own_side = s.depth_map[:width * height], true
+		job.depth_target, job.own_side, job.depth_blocks = s.depth_map[:width * height], true, &s.depth_blocks
+		if moving {
+			table_grow_non_zero(&s.velocity, width * height)
+			table_grow_non_zero(&s.nearness, width * height)
+			job.velocity, job.nearness, job.camera = s.velocity[:width * height], s.nearness[:width * height], active.camera
+			job.opened_view_proj = op * ov
+			job.opened_far = job.opened_view_proj * linalg.inverse(proj * view)
+		}
 		run_pass(s, active, geos, &job, pool, draw_depth_band, 0, len(s.order))
+		job.velocity, job.nearness = nil, nil
 	} else {
 		clear(&s.depth_map)
 	}
@@ -393,16 +426,41 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.keep = true
 	}
 	focus, blurred := focus_of(active.camera, height)
-	if blurred {
+	if blurred || moving {
 		table_grow_non_zero(&s.frame, width * height)
 		job.light_into = s.frame[:width * height]
 	}
 	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))
+	// The frame's light blurred along its motion, then through its depth
+	// of field, tone mapped and encoded.
+	frame := s.frame[:width * height] if blurred || moving else nil
+	if moving {
+		table_grow_non_zero(&s.blurred, width * height)
+		motion_blur(&s.motion, frame, s.velocity[:], s.nearness[:], width, height, motion_params(active.camera, height), s.blurred[:width * height], pool)
+		frame = s.blurred[:width * height]
+	}
 	if blurred {
-		depth_of_field(s, focus, active.camera, active.tone_mapping, active.tone_mapping_exposure, pool)
+		depth_of_field(s, frame, focus, active.camera, active.tone_mapping, active.tone_mapping_exposure, pool)
+	} else if moving {
+		Output_Job :: struct {
+			frame:         [][4]f32,
+			pixels:        []u8,
+			width:         int,
+			tone_mapping:  Tone_Mapping,
+			tone_exposure: f32,
+		}
+		out := Output_Job{frame, s.pixels, width, active.tone_mapping, active.tone_mapping_exposure}
+		parallel(pool, height, &out, proc(data: rawptr, y, _: int) {
+			o := (^Output_Job)(data)
+			for i in y * o.width ..< (y + 1) * o.width {
+				px := output(o.frame[i], o.tone_mapping, o.tone_exposure)
+				copy(o.pixels[i * 4:][:4], px[:])
+			}
+		})
 	}
 	return s.pixels
 }
+
 
 // A mipmapped texture's levels (from its first texel, as `tex` lays them
 // out) as floats, into `out`: a bicubic or trilinear read takes 16 or 8
@@ -461,6 +519,7 @@ make_chunks :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, from, to: in
 Frame_Job :: struct {
 	s:             ^Software,
 	blocks:        ^Shader_Blocks, // ShaderMaterials' uniforms for the pass's camera
+	depth_blocks:  ^Shader_Blocks, // and for the frame's depth pass
 	scene:         ^Scene,
 	geos:          ^Geometries,
 	shaders:       ^Shaders,
@@ -488,6 +547,16 @@ Frame_Job :: struct {
 	depth_only:    bool,
 	depth_target:  []f32,
 	own_side:      bool,
+	// The frame's depth pass with motion blur: each pixel's velocity (its
+	// place now less where it was at the shutter's opening, in pixels) and
+	// nearness (motion_blur's), the camera then, and where the far plane's
+	// points were through it from each pixel's now (`opened_far`, nearness
+	// `MOTION_FAR`).
+	velocity:      [][2]f32,
+	nearness:      []f32,
+	camera:        Camera,
+	opened_view_proj: Mat4,
+	opened_far:    Mat4,
 	bands:         int,
 	// Over what the pass before drew (no clear, no background).
 	keep:          bool,
@@ -568,6 +637,15 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	coloured := .Vertex_Colors in m.flags
 	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS + (COLOR_FLOATS if coloured else 0) if textured else UNTEX_FLOATS)
 	masked, curved: bool
+	ns := 0 // the shadow floats
+	// The frame's depth pass with motion blur: where the corners were at
+	// the shutter's opening, through the camera then, as the draw was then
+	// (its model, joints and weights, each as now when it has none).
+	moving := job.depth_only && job.velocity != nil
+	opened_mvp: Mat4
+	opened_joints := joints
+	opened_buf: [MAX_MORPH_TARGETS]Active_Morph = ---
+	opened_active := active
 	if job.depth_only {
 		if .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} == {} && m.opacity < m.alpha_cutoff {
 			slice.zero(s.chunk_bands[ci * job.bands:][:job.bands])
@@ -575,12 +653,30 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		}
 		masked, _ = shadow_mask(m)
 		curved = .Curves in m.flags
-		nf = shadow_floats(masked, curved)
+		ns = shadow_floats(masked, curved)
+		nf = ns + (OPENED_FLOATS if moving else 0)
+	}
+	// A ShaderMaterial in the frame's depth pass: its own vertex stage.
+	custom := shader_get(job.shaders, m.shader) if job.depth_only && job.own_side && m.shader != 0 else nil
+	if custom != nil {
+		masked, curved, ns, nf = false, false, 0, OPENED_FLOATS if moving else 0
+	}
+	if moving {
+		model := scene_draw_opened(job.scene, di)
+		opened_mvp = job.opened_view_proj * (model if model != {} else d.model)
+		if j := scene_draw_opened_joints(job.scene, di); j != nil {
+			opened_joints = j
+		}
+		if w := scene_draw_opened_morphs(job.scene, di); w != nil {
+			opened_active = opened_buf[:active_morphs(geo, w, &opened_buf)]
+		}
 	}
 	flat := shader_flat(sh) if sh != nil else nil
 	table_grow_non_zero(&w.positions, count)
 	table_grow_non_zero(&w.values, count * nf)
-	if job.depth_only {
+	if custom != nil {
+		depth_vertices(job, w, custom, di, vertices[lo:][:count], lo, skin, joints, opened_joints, active, opened_active, deltas, count, moving)
+	} else if job.depth_only {
 		mvp := job.view_proj * d.model
 		_, use_uv1 := shadow_mask(m)
 		for vtx, i in vertices[lo:][:count] {
@@ -597,7 +693,18 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 				(^Vec2)(&w.values[i * nf])^ = v.uv1 if use_uv1 else v.uv
 			}
 			if curved {
-				(^Vec2)(&w.values[i * nf + nf - SHADOW_MASK_FLOATS])^ = v.uv1
+				(^Vec2)(&w.values[i * nf + ns - SHADOW_MASK_FLOATS])^ = v.uv1
+			}
+			if moving {
+				o := vtx
+				if len(opened_active) > 0 {
+					o.position, o.normal = morph_vertex(o, vi, deltas, opened_active)
+				}
+				if skinned {
+					o.position, o.normal = skin_vertex(o, skin[vi], opened_joints)
+				}
+				oc := opened_mvp * Vec4{o.position.x, o.position.y, o.position.z, 1}
+				(^Vec3)(&w.values[i * nf + ns])^ = {oc.x, oc.y, oc.w}
 			}
 		}
 	} else if sh == nil {
@@ -681,6 +788,61 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		for b in first ..= last {
 			counts[b] += 1
 		}
+	}
+}
+
+// A ShaderMaterial's chunk vertices through its depth pass's vertex stage
+// (Shader.depth): positions now, and where the tap put each at the
+// shutter's opening repacked as the depth band reads it (OPENED_FLOATS),
+// its twins the vertices posed as then.
+@(private = "file")
+depth_vertices :: proc(job: ^Frame_Job, w: ^Worker, sh: ^Shader, di: int, src: []Vertex, lo: u32, skin: []Skin_Vertex, joints, opened_joints: []Mat4, active, opened_active: []Active_Morph, deltas: []Morph_Delta, count: int, moving: bool) {
+	pose :: proc(out: ^[dynamic]Vertex, src: []Vertex, lo: u32, skin: []Skin_Vertex, joints: []Mat4, active: []Active_Morph, deltas: []Morph_Delta) -> []Vertex {
+		if len(active) == 0 && len(joints) == 0 {
+			return src
+		}
+		table_grow_non_zero(out, len(src))
+		for vtx, i in src {
+			vi := lo + u32(i)
+			v := vtx
+			if len(active) > 0 {
+				v.position, v.normal = morph_vertex(v, vi, deltas, active)
+			}
+			if len(joints) > 0 && len(skin) > 0 {
+				v.position, v.normal = skin_vertex(v, skin[vi], joints)
+			}
+			out[i] = v
+		}
+		return out[:len(src)]
+	}
+	now := pose(&w.skinned, src, lo, skin, joints, active, deltas)
+	then := pose(&w.opened, src, lo, skin, opened_joints, opened_active, deltas)
+	attrs: [16]oksl.Attribute
+	for a in Vertex_Attribute {
+		if loc := sh.depth_attributes[a]; loc >= 0 {
+			row := VERTEX_ATTRIBUTES[a]
+			attrs[loc] = {rawptr(uintptr(&now[0]) + row.offset), size_of(Vertex), .Float2 if row.components == 2 else .Float3}
+		}
+	}
+	for loc, k in sh.depth_twins {
+		if loc >= 0 {
+			row := VERTEX_ATTRIBUTES[.Position if k == 0 else .Normal]
+			attrs[loc] = {rawptr(uintptr(&then[0]) + row.offset), size_of(Vertex), .Float3}
+		}
+	}
+	nv := sh.depth.vertex.varying_floats
+	table_grow_non_zero(&w.values, count * max(nv, OPENED_FLOATS))
+	oksl.run_vertex(&sh.depth.vertex.program, block(job.depth_blocks, di, .Vertex), attrs[:], count, w.positions[:], w.values[:], &w.vm)
+	if !moving {
+		return
+	}
+	// x, y and w of each vertex's vec4, packed in place (never ahead of
+	// what is read).
+	at := int(sh.depth_opened)
+	for i in 0 ..< count {
+		v := w.values[i * nv + at:][:4]
+		x, y, ww := v[0], v[1], v[3]
+		w.values[i * OPENED_FLOATS], w.values[i * OPENED_FLOATS + 1], w.values[i * OPENED_FLOATS + 2] = x, y, ww
 	}
 }
 

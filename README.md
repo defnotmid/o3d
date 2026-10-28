@@ -35,7 +35,21 @@ What is known about three.js carries over:
   view sharp through that point instead (the focus plane kept), so a host
   averaging views over the aperture gets the exact depth of field. Its
   `shutter` (seconds, centred on the frame's moment) smears particles along
-  their `velocity`.
+  their `velocity`, and blurs the frame along its motion: given where
+  things were at the shutter's opening (the camera's pose,
+  `camera.opened`; a draw's model, instances, joints, morph weights and
+  ShaderMaterial uniforms, `scene_set_draw_opened`, `_opened_instances`,
+  `_opened_joints`, `_opened_morphs`, `_opened_uniforms`; none: where it is
+  now), each pixel streaks from
+  there through now and on as far again, up to `max_blur` of the frame's
+  height (`MOTION_MAX_BLUR`, 0.04). The frame's depth pass writes each
+  pixel's velocity and nearness (a ShaderMaterial's by its own vertex
+  stage, run once more at the opening by oksl's taps), and a
+  reconstruction filter (`motion_blur.odin`) gathers the light along it
+  before the depth of field. The filter is public for any frame of light:
+  `motion_blur` on spans (software) and `o3d_sdlgpu.record_motion_blur` on
+  textures, with `Motion_Blur{max_blur, depth_scale}` and the caller's
+  `Motion_Tables`.
 - Colours are sRGB; lighting is linear. The frame is drawn in light, as
   three.js's EffectComposer draws into a HalfFloat target: each fragment's
   light, blended toward `scene.fog` (`.Linear` between `near` and `far`, or
@@ -631,6 +645,33 @@ garbage.
   a mesh and bakes it with PMREMGenerator).
   Changing one means changing the other; the tests compare the two
   renderers.
+- **Motion blur (`motion_blur.odin`, post.slang's `fs_motion*`):** the
+  frame's depth pass writes, beside its depth, each pixel's velocity (its
+  place now less where its surface was at the shutter's opening, in
+  pixels: both clip positions interpolated and divided per pixel, the
+  opened one through the camera then and the draw then; nothing where it
+  was behind the camera) and nearness (-ln of its distance); where nothing
+  is drawn, the far plane moving with the camera. A ShaderMaterial's depth
+  is its own vertex stage's, and its position at the opening the same
+  stage run again by oksl's tap with its uniforms then (`Shader.depth`).
+  The filter follows McGuire et al. 2012's tiles (each tile of `max_blur`
+  pixels its longest velocity, then the longest about it; on the GPU the
+  tile found in two passes, rows then columns) and gathers 15 taps across
+  the tiles' longest motion with interleaved-gradient jitter, but weighs
+  them its own way: a pixel shows what passes in front of it (each tap its
+  share of the shutter there, the neighbourhood's length over its own)
+  and otherwise its own surface and what its or their motion carries
+  across. Against 32 subframes at 320x200 that is 38.5 / 35.6 / 29.2 dB on
+  a moving box, a pan and both (McGuire's weights: 30.7 / 33.8 / 27.8; the
+  sharp frame 26.3 / 18.1 / 18.2). At 1080p it costs about 7 G
+  instructions a frame on one core and 0.8 ms on the GPU (Radeon), velocity
+  writes included; with motion blur on, the software renderer keeps
+  98 MB more (velocity, nearness, the frame's light and its blurred copy).
+  Limits: motion is straight per vertex over the shutter; shading that
+  changes over it does not blur; blended draws blur by the surface behind
+  them (particles smear on their own); reflections and transmission
+  snapshots stay sharp; what a fast object uncovers is made from its
+  neighbours.
 - **Particles:** `scene_particles` keeps a frame's particles as rows
   (position, size as width and height (three.js's Sprite.scale) in world
   units or pixels, rotation in the view plane,

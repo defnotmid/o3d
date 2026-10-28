@@ -192,6 +192,20 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, job.height)
 	slice.fill(smap[y0 * size:y1 * size], 0)
+	moving := job.velocity != nil
+	if moving {
+		// Where nothing is drawn: the far plane, moving only as the camera
+		// did.
+		for y in y0 ..< y1 {
+			for x in 0 ..< size {
+				c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
+				ndc := Vec2{c.x / f32(size) * 2 - 1, 1 - c.y / f32(job.height) * 2}
+				o := job.opened_far * Vec4{ndc.x, ndc.y, 0, 1}
+				job.velocity[y * size + x] = pixel_motion(c, o.xyw, size, job.height)
+				job.nearness[y * size + x] = MOTION_FAR
+			}
+		}
+	}
 	for ref in s.band_tris[s.band_start[band]:s.band_start[band + 1]] {
 		t := s.chunks[ref.chunk].tris[ref.tri]
 		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
@@ -201,15 +215,23 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 		m := &s.materials[t.draw]
 		masked, _ := shadow_mask(m)
 		curved := .Curves in m.flags
-		nf := shadow_floats(masked, curved)
+		if job.own_side && m.shader != 0 {
+			masked, curved = false, false // its own vertex stage's: opened floats only
+		}
+		ns := shadow_floats(masked, curved)
+		nf := ns + (OPENED_FLOATS if moving else 0)
 		uv, rc: [3]Vec2 = ---, ---
+		oc: [3]Vec3 = ---
 		vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
 		for k in 0 ..< 3 {
 			if masked {
 				uv[k] = (^Vec2)(&vs[k * nf])^
 			}
 			if curved {
-				rc[k] = (^Vec2)(&vs[k * nf + nf - SHADOW_MASK_FLOATS])^
+				rc[k] = (^Vec2)(&vs[k * nf + ns - SHADOW_MASK_FLOATS])^
+			}
+			if moving {
+				oc[k] = (^Vec3)(&vs[k * nf + ns])^
 			}
 		}
 		words: []u32
@@ -252,10 +274,28 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 						}
 					}
 					smap[i] = z
+					if moving {
+						o := (oc[0] * b0 + oc[1] * b1 + oc[2] * b2) / iw
+						job.velocity[i] = pixel_motion(c, o, size, job.height)
+						job.nearness[i] = -math.ln(view_depth(job.camera, z))
+					}
 				}
 			}
 		}
 	}
+}
+
+// Pixel `c`'s motion over the first half of the shutter: `c` less where
+// clip position `o` (x, y, w at the opening) falls on a `width x height`
+// frame, as `emit` maps the corners. A point behind the camera then
+// (w <= 0) does not move: no motion is better than a wrapped one.
+@(private = "file")
+pixel_motion :: #force_inline proc "contextless" (c: Vec2, o: Vec3, width, height: int) -> Vec2 {
+	if !(o.z > 1e-6) {
+		return {}
+	}
+	iw := 1 / o.z
+	return c - {(o.x * iw * 0.5 + 0.5) * f32(width), (0.5 - o.y * iw * 0.5) * f32(height)}
 }
 
 // Transformed UV and screen derivatives for `slot` (selecting `uv0` or `uv1`).

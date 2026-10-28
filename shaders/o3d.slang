@@ -1192,12 +1192,14 @@ Curves_Out curves_out(VS_Curves_Out i, bool front) {
 }
 
 // The shadow pass: the depth of the nearest caster per texel.
-float shadow_depth(VS_Out i) {
+// An alpha-masked material's depth: none where its maps leave less than
+// its cutoff.
+void depth_mask(float2 uv, float2 uv1) {
     if ((material.flags & FLAG_ALPHA_MASK) != 0) {
         // Both maps from one uv set: the colour slot's, or the alpha slot's
         // without a colour map (as the software renderer's shadow pass).
         uint mask_slot = (material.flags & FLAG_COLOR_MAP) != 0 ? SLOT_COLOR : SLOT_ALPHA;
-        float2 raw = ((material.uv_sets >> mask_slot) & 1) != 0 ? i.uv1 : i.uv;
+        float2 raw = ((material.uv_sets >> mask_slot) & 1) != 0 ? uv1 : uv;
         float a = material.color.a;
         if ((material.flags & FLAG_COLOR_MAP) != 0) {
             float3 r0 = material.uv_transforms[SLOT_COLOR * 2 + 0].xyz;
@@ -1215,6 +1217,10 @@ float shadow_depth(VS_Out i) {
             discard;
         }
     }
+}
+
+float shadow_depth(VS_Out i) {
+    depth_mask(i.uv, i.uv1);
     return i.position.z;
 }
 
@@ -1231,4 +1237,148 @@ float fs_shadow_curves(VS_Curves_Out i) : SV_Target {
         discard;
     }
     return shadow_depth(curves_surface_in(i));
+}
+
+// Motion blur (o3d.motion_of): the frame's depth pass also writes each
+// pixel's velocity (its place now less where it was at the shutter's
+// opening, in pixels) and nearness (-ln of its distance), as the software
+// renderer's depth band does. The draw at the opening: its
+// model-view-projection then (through the camera then) and its morph
+// targets then; a skinned draw's joints then.
+struct Opened_VS {
+    float4x4 mvp;
+    uint4 morph_bases[2];
+    float4 morph_weights[2];
+    uint4 morph_info;
+};
+
+// vs_velocity's and vs_velocity_curves' after the draw's; vs_velocity_skinned's after its joints.
+[[vk::binding(1, 1)]] ConstantBuffer<Opened_VS> opened : register(b1, space1);
+[[vk::binding(2, 1)]] ConstantBuffer<Opened_VS> openedSkinned : register(b2, space1);
+[[vk::binding(3, 1)]] ConstantBuffer<Joints_VS> openedJoints : register(b3, space1);
+[[vk::binding(0, 0)]] StructuredBuffer<Morph_Delta> velocitySkinnedMorphDeltas : register(t4, space1);
+
+struct VS_Velocity_Out {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float2 uv1 : TEXCOORD1;
+    float3 opened : TEXCOORD2; // clip x, y and w at the opening
+    nointerpolation uint quad : TEXCOORD3;
+};
+
+float3 morphed(StructuredBuffer<Morph_Delta> deltas, float3 p, uint vid, uint4 bases[2], float4 weights[2], uint count) {
+    for (uint k = 0; k < count; k++) {
+        p += deltas[bases[k >> 2][k & 3] + vid].position.xyz * weights[k >> 2][k & 3];
+    }
+    return p;
+}
+
+float4x4 skin_of(Joints_VS j, uint4 joint, float4 weight) {
+    return j.mats[joint.x] * weight.x + j.mats[joint.y] * weight.y + j.mats[joint.z] * weight.z + j.mats[joint.w] * weight.w;
+}
+
+[shader("vertex")]
+VS_Velocity_Out vs_velocity(VS_In i, uint vid : SV_VertexID) {
+    VS_Velocity_Out o;
+    float3 now = morphed(skinnedMorphDeltas, i.position, vid, draw.morph_bases, draw.morph_weights, draw.morph_info.x);
+    float3 then = morphed(skinnedMorphDeltas, i.position, vid, opened.morph_bases, opened.morph_weights, opened.morph_info.x);
+    o.position = mul(draw.mvp, float4(now, 1));
+    o.opened = mul(opened.mvp, float4(then, 1)).xyw;
+    o.uv = i.uv;
+    o.uv1 = i.uv1;
+    o.quad = 0;
+    return o;
+}
+
+[shader("vertex")]
+VS_Velocity_Out vs_velocity_skinned(VS_Skinned_In i, uint vid : SV_VertexID) {
+    VS_Velocity_Out o;
+    float3 now = morphed(velocitySkinnedMorphDeltas, i.position, vid, draw.morph_bases, draw.morph_weights, draw.morph_info.x);
+    float3 then = morphed(velocitySkinnedMorphDeltas, i.position, vid, openedSkinned.morph_bases, openedSkinned.morph_weights, openedSkinned.morph_info.x);
+    now = mul(skin_of(joints, i.joints, i.weights), float4(now, 1)).xyz;
+    then = mul(skin_of(openedJoints, i.joints, i.weights), float4(then, 1)).xyz;
+    o.position = mul(draw.mvp, float4(now, 1));
+    o.opened = mul(openedSkinned.mvp, float4(then, 1)).xyw;
+    o.uv = i.uv;
+    o.uv1 = i.uv1;
+    o.quad = 0;
+    return o;
+}
+
+[shader("vertex")]
+VS_Velocity_Out vs_velocity_curves(VS_In i, uint vid : SV_VertexID) {
+    VS_Velocity_Out o;
+    o.position = mul(draw.mvp, float4(i.position, 1));
+    o.opened = mul(opened.mvp, float4(i.position, 1)).xyw;
+    o.uv = i.uv;
+    o.uv1 = i.uv1;
+    o.quad = vid / 4;
+    return o;
+}
+
+// The frame's size, the camera's near and far; whether it is orthographic;
+// from a pixel's clip position on the far plane now to where it was then.
+struct Velocity_FS {
+    float4 frame;
+    uint4 flags;
+    float4x4 openedFar;
+};
+
+[[vk::binding(1, 3)]] ConstantBuffer<Velocity_FS> velocityFrame : register(b1, space3);
+[[vk::binding(2, 2)]] StructuredBuffer<uint> velocityCurveWords : register(t2, space2);
+
+static const float MOTION_FAR = -1e4;
+
+struct Velocity_Out {
+    float depth : SV_Target0;
+    float2 velocity : SV_Target1;
+    float nearness : SV_Target2;
+};
+
+// Pixel `c`'s motion over the shutter's first half from clip position `o`
+// at its opening (none behind the camera then).
+float2 pixel_motion(float2 c, float3 o) {
+    if (!(o.z > 1e-6)) {
+        return float2(0);
+    }
+    float2 ndc = o.xy / o.z;
+    return c - float2((ndc.x * 0.5 + 0.5) * velocityFrame.frame.x, (0.5 - ndc.y * 0.5) * velocityFrame.frame.y);
+}
+
+Velocity_Out velocity_out(float4 position, float3 o) {
+    Velocity_Out r;
+    r.depth = position.z;
+    r.velocity = pixel_motion(position.xy, o);
+    float near = velocityFrame.frame.z;
+    float far = velocityFrame.frame.w;
+    float d = velocityFrame.flags.x != 0 ? far - position.z * (far - near) : near * far / (near + position.z * (far - near));
+    r.nearness = -log(d);
+    return r;
+}
+
+[shader("fragment")]
+Velocity_Out fs_velocity(VS_Velocity_Out i) {
+    depth_mask(i.uv, i.uv1);
+    return velocity_out(i.position, i.opened);
+}
+
+[shader("fragment")]
+Velocity_Out fs_velocity_curves(VS_Velocity_Out i) {
+    uint entry = velocityCurveWords[material.curve_table + i.quad];
+    if (!curves_fill_inside(curves_winding(velocityCurveWords, entry & ~CURVE_EVEN_ODD, i.uv1), curve_entry_rule(entry))) {
+        discard;
+    }
+    return velocity_out(i.position, i.opened);
+}
+
+// Where nothing is drawn (first, under the draws): the far plane, moving
+// only as the camera did.
+[shader("fragment")]
+Velocity_Out fs_velocity_far(float4 position : SV_Position) {
+    float2 ndc = float2(position.x / velocityFrame.frame.x * 2 - 1, 1 - position.y / velocityFrame.frame.y * 2);
+    Velocity_Out r;
+    r.depth = 0;
+    r.velocity = pixel_motion(position.xy, mul(velocityFrame.openedFar, float4(ndc, 0, 1)).xyw);
+    r.nearness = MOTION_FAR;
+    return r;
 }

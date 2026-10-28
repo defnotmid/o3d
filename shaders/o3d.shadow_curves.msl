@@ -514,120 +514,131 @@ struct KernelContext_0
 };
 
 
-#line 1195
-float shadow_depth_0(const VS_Out_0 thread* i_3, KernelContext_0 thread* kernelContext_0)
+#line 1197
+void depth_mask_0(float2 uv_2, float2 uv1_2, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1196
+#line 1198
     if(((kernelContext_0->material_0->flags_0) & 2048U) != 0U)
     {
 
-#line 1196
+#line 1198
         uint mask_slot_0;
 
 
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
-#line 1199
+#line 1201
             mask_slot_0 = 0U;
 
-#line 1199
+#line 1201
         }
         else
         {
 
-#line 1199
+#line 1201
             mask_slot_0 = 6U;
 
-#line 1199
+#line 1201
         }
 
-#line 1199
+#line 1201
         float2 raw_0;
         if((((kernelContext_0->material_0->uv_sets_0) >> mask_slot_0) & 1U) != 0U)
         {
 
-#line 1200
-            raw_0 = i_3->uv1_0;
+#line 1202
+            raw_0 = uv1_2;
 
-#line 1200
+#line 1202
         }
         else
         {
 
-#line 1200
-            raw_0 = i_3->uv_0;
+#line 1202
+            raw_0 = uv_2;
 
-#line 1200
+#line 1202
         }
         float a_1 = kernelContext_0->material_0->color_2.w;
 
-#line 1201
+#line 1203
         float a_2;
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
             float3 _S26 = float3(raw_0, 1.0f);
 
-#line 1205
+#line 1207
             a_2 = a_1 * ((kernelContext_0->colorMap_texture_0).sample((kernelContext_0->colorMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[0U].xyz, _S26), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[1U].xyz, _S26))), level((0.0f)))).w;
 
-#line 1202
+#line 1204
         }
         else
         {
 
-#line 1202
+#line 1204
             a_2 = a_1;
 
-#line 1202
+#line 1204
         }
 
-#line 1208
+#line 1210
         if(((kernelContext_0->material_0->flags_0) & 16384U) != 0U)
         {
 
             float3 _S27 = float3(raw_0, 1.0f);
 
-#line 1211
+#line 1213
             a_2 = a_2 * ((kernelContext_0->shadowAlphaMap_texture_0).sample((kernelContext_0->shadowAlphaMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[12U].xyz, _S27), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[13U].xyz, _S27))), level((0.0f)))).y;
 
-#line 1208
+#line 1210
         }
 
-#line 1214
+#line 1216
         if(a_2 < (kernelContext_0->material_0->alpha_cutoff_0))
         {
 
-#line 1215
+#line 1217
             discard_fragment();
 
-#line 1214
+#line 1216
         }
 
-#line 1196
+#line 1198
     }
 
-#line 1218
+#line 1220
+    return;
+}
+
+
+#line 1222
+float shadow_depth_0(const VS_Out_0 thread* i_3, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 1222
+    depth_mask_0(i_3->uv_0, i_3->uv1_0, kernelContext_1);
+
     return i_3->position_0.z;
 }
 
 
-#line 1218
+#line 1224
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 1218
+#line 1224
 struct pixelInput_0
 {
     float3 world_2 [[user(TEXCOORD)]];
     float3 normal_2 [[user(TEXCOORD_1)]];
-    float2 uv_2 [[user(TEXCOORD_2)]];
-    float2 uv1_2 [[user(TEXCOORD_3)]];
+    float2 uv_3 [[user(TEXCOORD_2)]];
+    float2 uv1_3 [[user(TEXCOORD_3)]];
     [[flat]] uint quad_1 [[user(TEXCOORD_4)]];
     float4 color_3 [[user(TEXCOORD_5)]];
 };
@@ -635,70 +646,70 @@ struct pixelInput_0
 [[fragment]] pixelOutput_0 fs_shadow_curves(pixelInput_0 _S28 [[stage_in]], float4 position_2 [[position]], Material_0 constant* material_1 [[buffer(0)]], uint device* shadowCurveWords_1 [[buffer(1)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> shadowAlphaMap_texture_1 [[texture(1)]], sampler shadowAlphaMap_sampler_1 [[sampler(1)]])
 {
 
-#line 1228
-    thread KernelContext_0 kernelContext_1;
+#line 1234
+    thread KernelContext_0 kernelContext_2;
 
-#line 1228
-    (&kernelContext_1)->material_0 = material_1;
+#line 1234
+    (&kernelContext_2)->material_0 = material_1;
 
-#line 1228
-    (&kernelContext_1)->shadowCurveWords_0 = shadowCurveWords_1;
+#line 1234
+    (&kernelContext_2)->shadowCurveWords_0 = shadowCurveWords_1;
 
-#line 1228
-    (&kernelContext_1)->colorMap_texture_0 = colorMap_texture_1;
+#line 1234
+    (&kernelContext_2)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 1228
-    (&kernelContext_1)->colorMap_sampler_0 = colorMap_sampler_1;
+#line 1234
+    (&kernelContext_2)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 1228
-    (&kernelContext_1)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
+#line 1234
+    (&kernelContext_2)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
 
-#line 1228
-    (&kernelContext_1)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
+#line 1234
+    (&kernelContext_2)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
     uint entry_1 = shadowCurveWords_1[material_1->curve_table_0 + _S28.quad_1];
-    if(!curves_fill_inside_0(curves_winding_0(shadowCurveWords_1, entry_1 & 2147483647U, _S28.uv1_2), curve_entry_rule_0(entry_1)))
+    if(!curves_fill_inside_0(curves_winding_0(shadowCurveWords_1, entry_1 & 2147483647U, _S28.uv1_3), curve_entry_rule_0(entry_1)))
     {
 
-#line 1231
+#line 1237
         discard_fragment();
 
-#line 1230
+#line 1236
     }
 
-#line 1230
+#line 1236
     thread VS_Curves_Out_0 _S29;
 
-#line 1230
+#line 1236
     (&_S29)->position_1 = position_2;
 
-#line 1230
+#line 1236
     (&_S29)->world_1 = _S28.world_2;
 
-#line 1230
+#line 1236
     (&_S29)->normal_1 = _S28.normal_2;
 
-#line 1230
-    (&_S29)->uv_1 = _S28.uv_2;
+#line 1236
+    (&_S29)->uv_1 = _S28.uv_3;
 
-#line 1230
-    (&_S29)->uv1_1 = _S28.uv1_2;
+#line 1236
+    (&_S29)->uv1_1 = _S28.uv1_3;
 
-#line 1230
+#line 1236
     (&_S29)->quad_0 = _S28.quad_1;
 
-#line 1230
+#line 1236
     (&_S29)->color_1 = _S28.color_3;
 
-#line 1230
+#line 1236
     VS_Out_0 _S30 = curves_surface_in_0(&_S29);
 
-#line 1230
+#line 1236
     thread VS_Out_0 _S31 = _S30;
 
-#line 1230
-    float _S32 = shadow_depth_0(&_S31, &kernelContext_1);
+#line 1236
+    float _S32 = shadow_depth_0(&_S31, &kernelContext_2);
 
-#line 1230
+#line 1236
     pixelOutput_0 _S33 = { _S32 };
 
 

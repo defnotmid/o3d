@@ -2535,6 +2535,172 @@ test_reflector :: proc(t: ^testing.T) {
 	testing.expect(t, !ok, "behind it")
 }
 
+// Motion blur against the shutter rendered exactly (32 frames along it,
+// averaged in light): a box moving across a striped wall, the camera panning
+// over it, and both, each far closer to the exact frame than the sharp
+// middle is; an instance at the opening blurs as a draw does; with
+// nothing's state at the opening, or the shutter shut, the frame is drawn
+// as without.
+@(test)
+test_motion_blur :: proc(t: ^testing.T) {
+	W :: 160
+	H :: 100
+	SUB :: 32
+	g: Geometries
+	defer geometries_destroy(&g)
+	sw: Software
+	defer software_destroy(&sw)
+	scene: Scene
+	defer scene_destroy(&scene)
+	cube := box(&g, 1, 1, 1)
+	wall := plane(&g, 12, 8)
+	build :: proc(scene: ^Scene, cube, wall: Geometry_Id, at, eye: Vec3) {
+		scene_clear(scene)
+		scene.camera = {position = eye, target = eye + {0, -0.5, -5}, fov = 45, near = 0.1, far = 100, max_blur = 0.3}
+		append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 2.5, position = {2, 3, 4}}, Light{kind = .Ambient, color = {1, 1, 1}, intensity = 0.4})
+		red, blue, dark := MATERIAL_DEFAULT, MATERIAL_DEFAULT, MATERIAL_DEFAULT
+		red.color, blue.color, dark.color = {0.9, 0.25, 0.2}, {0.6, 0.7, 0.9}, {0.1, 0.15, 0.3}
+		append(&scene.draws, Draw{wall, compose({0, 0, -2}), blue}, Draw{cube, compose(at, {0.3, 0.5, 0}), red})
+		for i in 0 ..< 9 {
+			append(&scene.draws, Draw{cube, compose({f32(i) - 4, 0, -1.9}, {}, {0.12, 6, 0.05}), dark})
+		}
+	}
+	light :: proc(px: []u8, out: [][4]f32) {
+		for i in 0 ..< len(out) {
+			out[i] = {srgb_to_linear(f32(px[i * 4]) / 255), srgb_to_linear(f32(px[i * 4 + 1]) / 255), srgb_to_linear(f32(px[i * 4 + 2]) / 255), 1}
+		}
+	}
+	psnr :: proc(a, b: [][4]f32) -> f64 {
+		se: f64
+		for i in 0 ..< len(a) {
+			d := a[i].rgb - b[i].rgb
+			se += f64(d.r * d.r + d.g * d.g + d.b * d.b)
+		}
+		return 10 * math.log10(f64(len(a) * 3) / max(se, 1e-12))
+	}
+	exact, frame, sharp := make([][4]f32, W * H), make([][4]f32, W * H), make([][4]f32, W * H)
+	defer delete(exact)
+	defer delete(frame)
+	defer delete(sharp)
+	Case :: struct {
+		name:     string,
+		at, eye:  [2]Vec3, // at the opening, at the middle
+		min_gain: f64,
+	}
+	for c in ([]Case{{"box", {{-0.8, 0, 0}, {}}, {{0, 0.5, 5}, {0, 0.5, 5}}, 9}, {"pan", {{}, {}}, {{-0.6, 0.5, 5}, {0, 0.5, 5}}, 14}, {"both", {{0.5, -0.3, 0}, {}}, {{-0.4, 0.5, 5}, {0, 0.5, 5}}, 9}}) {
+		slice.zero(exact)
+		for k in 0 ..< SUB {
+			s := 2 * (f32(k) + 0.5) / SUB - 1
+			build(&scene, cube, wall, c.at[1] + s * (c.at[1] - c.at[0]), c.eye[1] + s * (c.eye[1] - c.eye[0]))
+			light(software_render(&sw, &scene, &g, nil, W, H), frame)
+			for i in 0 ..< W * H {
+				exact[i] += frame[i] / SUB
+			}
+		}
+		build(&scene, cube, wall, c.at[1], c.eye[1])
+		light(software_render(&sw, &scene, &g, nil, W, H), sharp)
+		scene.camera.shutter = 1.0 / 60
+		if c.eye[0] != c.eye[1] {
+			scene.camera.opened = Camera_Pose{position = c.eye[0], target = c.eye[0] + {0, -0.5, -5}, fov = 45}
+		}
+		if c.at[0] != c.at[1] {
+			scene_set_draw_opened(&scene, 1, compose(c.at[0], {0.3, 0.5, 0}))
+		}
+		light(software_render(&sw, &scene, &g, nil, W, H), frame)
+		blurred, still := psnr(frame, exact), psnr(sharp, exact)
+		testing.expectf(t, blurred > still + c.min_gain, "%s: blurred %.1f dB from the exact frame, the sharp middle %.1f", c.name, blurred, still)
+	}
+
+	// An instance at the opening moves its instance: the box as one,
+	// blurred as the box drawn on its own.
+	build(&scene, cube, wall, {}, {0, 0.5, 5})
+	scene.camera.shutter = 1.0 / 60
+	scene_set_draw_opened(&scene, 1, compose({-0.8, 0, 0}, {0.3, 0.5, 0}))
+	light(software_render(&sw, &scene, &g, nil, W, H), sharp)
+	build(&scene, cube, wall, {}, {0, 0.5, 5})
+	scene.camera.shutter = 1.0 / 60
+	scene.draws[1].model = 1
+	scene_set_draw_instances(&scene, 1, scene_instances(&scene, {{transform = compose({}, {0.3, 0.5, 0})}}))
+	scene_set_draw_opened_instances(&scene, 1, scene_instances(&scene, {{transform = compose({-0.8, 0, 0}, {0.3, 0.5, 0})}}))
+	light(software_render(&sw, &scene, &g, nil, W, H), frame)
+	testing.expectf(t, psnr(frame, sharp) > 60, "instanced %.1f dB from drawn on its own", psnr(frame, sharp))
+
+	// No state at the opening, or the shutter shut: the frame as drawn.
+	build(&scene, cube, wall, {}, {0, 0.5, 5})
+	light(software_render(&sw, &scene, &g, nil, W, H), sharp)
+	scene.camera.shutter = 1.0 / 60
+	light(software_render(&sw, &scene, &g, nil, W, H), frame)
+	testing.expect(t, slice.equal(frame, sharp))
+	scene.camera.shutter = 0
+	scene_set_draw_opened(&scene, 1, compose({-0.8, 0, 0}))
+	light(software_render(&sw, &scene, &g, nil, W, H), frame)
+	testing.expect(t, slice.equal(frame, sharp))
+}
+
+// A ShaderMaterial moving itself (its vertex stage shifts it by a uniform)
+// blurs along that motion given only the uniform's value at the shutter's
+// opening (its own vertex stage run then, by oksl's tap), close to the
+// shutter rendered exactly.
+@(test)
+test_motion_blur_shader :: proc(t: ^testing.T) {
+	W :: 160
+	H :: 100
+	SUB :: 32
+	g: Geometries
+	defer geometries_destroy(&g)
+	sw: Software
+	defer software_destroy(&sw)
+	scene: Scene
+	defer scene_destroy(&scene)
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	id, errors := shader(&shaders, "uniform float uShift;\nvoid main() {\n\tgl_Position = projectionMatrix * modelViewMatrix * vec4(position + vec3(uShift, 0.0, 0.0), 1.0);\n}\n", "void main() {\n\tgl_FragColor = vec4(0.9, 0.3, 0.2, 1.0);\n}\n")
+	testing.expectf(t, len(errors) == 0, "%v", errors)
+	cube, wall := box(&g, 1, 1, 1), plane(&g, 12, 8)
+	build :: proc(scene: ^Scene, cube, wall: Geometry_Id, id: Shader_Id, shift: f32) {
+		scene_clear(scene)
+		scene.camera = {position = {0, 0.5, 5}, target = {0, 0, 0}, fov = 45, near = 0.1, far = 100, max_blur = 0.3}
+		append(&scene.lights, Light{kind = .Ambient, color = {1, 1, 1}, intensity = 1})
+		blue, own := MATERIAL_DEFAULT, MATERIAL_DEFAULT
+		blue.color = {0.6, 0.7, 0.9}
+		own.shader = id
+		own.uniforms = scene_uniforms(scene, {"uShift", {shift}})
+		append(&scene.draws, Draw{wall, compose({0, 0, -2}), blue}, Draw{cube, compose({}, {0.3, 0.5, 0}), own})
+	}
+	light :: proc(px: []u8, out: [][4]f32) {
+		for i in 0 ..< len(out) {
+			out[i] = {srgb_to_linear(f32(px[i * 4]) / 255), srgb_to_linear(f32(px[i * 4 + 1]) / 255), srgb_to_linear(f32(px[i * 4 + 2]) / 255), 1}
+		}
+	}
+	psnr :: proc(a, b: [][4]f32) -> f64 {
+		se: f64
+		for i in 0 ..< len(a) {
+			d := a[i].rgb - b[i].rgb
+			se += f64(d.r * d.r + d.g * d.g + d.b * d.b)
+		}
+		return 10 * math.log10(f64(len(a) * 3) / max(se, 1e-12))
+	}
+	exact, frame, sharp := make([][4]f32, W * H), make([][4]f32, W * H), make([][4]f32, W * H)
+	defer delete(exact)
+	defer delete(frame)
+	defer delete(sharp)
+	for k in 0 ..< SUB {
+		s := 2 * (f32(k) + 0.5) / SUB - 1
+		build(&scene, cube, wall, id, -s * 0.8)
+		light(software_render(&sw, &scene, &g, &shaders, W, H), frame)
+		for i in 0 ..< W * H {
+			exact[i] += frame[i] / SUB
+		}
+	}
+	build(&scene, cube, wall, id, 0)
+	light(software_render(&sw, &scene, &g, &shaders, W, H), sharp)
+	scene.camera.shutter = 1.0 / 60
+	scene_set_draw_opened_uniforms(&scene, 1, scene_uniforms(&scene, {"uShift", {0.8}}))
+	light(software_render(&sw, &scene, &g, &shaders, W, H), frame)
+	blurred, still := psnr(frame, exact), psnr(sharp, exact)
+	testing.expectf(t, blurred > still + 9, "blurred %.1f dB from the exact frame, the sharp middle %.1f", blurred, still)
+}
+
 // Depth of field gathered: none without an f-stop (the frame as drawn);
 // with one, a quad at the focus as sharp as without, far stripes behind it
 // blurred (their neighbouring pixels nearly alike).

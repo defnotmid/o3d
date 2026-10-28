@@ -27,6 +27,12 @@ UNITS=(
 	o3d:curves_frag_mirror:fs_curves_mirror
 	o3d:sprite_frag:fs_sprite
 	o3d:shadow_curves:fs_shadow_curves
+	o3d:velocity_vert:vs_velocity
+	o3d:velocity_skinned_vert:vs_velocity_skinned
+	o3d:velocity_curves_vert:vs_velocity_curves
+	o3d:velocity:fs_velocity
+	o3d:velocity_curves:fs_velocity_curves
+	o3d:velocity_far:fs_velocity_far
 	background:vert:vs_main
 	background:frag:fs_main
 	depth:vert:vs_main
@@ -37,6 +43,10 @@ UNITS=(
 	post:focus_near:fs_focus_near
 	post:focus_half:fs_focus_half
 	post:focus:fs_focus
+	post:motion_rows:fs_motion_rows
+	post:motion_tiles:fs_motion_tiles
+	post:motion_around:fs_motion_around
+	post:motion:fs_motion
 )
 for unit in "${UNITS[@]}"; do
 	IFS=: read -r mod suffix entry <<<"$unit"

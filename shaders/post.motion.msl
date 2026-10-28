@@ -1,0 +1,294 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 17 "post.slang"
+struct Post_FS_0
+{
+    float4 tone_0;
+    float4 lens_0;
+    float4 camera_0;
+    float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
+};
+
+
+#line 1095 "core"
+struct KernelContext_0
+{
+    Post_FS_0 constant* post_0;
+    texture2d<float, access::sample> lightMap_texture_0;
+    sampler lightMap_sampler_0;
+    texture2d<float, access::sample> motionMap_texture_0;
+    sampler motionMap_sampler_0;
+    texture2d<float, access::sample> velocityMap_texture_0;
+    sampler velocityMap_sampler_0;
+    texture2d<float, access::sample> nearnessMap_texture_0;
+    sampler nearnessMap_sampler_0;
+};
+
+
+#line 63 "post.slang"
+float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 64
+    return ((kernelContext_0->lightMap_texture_0).sample((kernelContext_0->lightMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->tone_0.zw), level((0.0f))));
+}
+
+
+#line 204
+float2 motion_tile_0(int2 t_0, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 205
+    return ((kernelContext_1->motionMap_texture_0).sample((kernelContext_1->motionMap_sampler_0), ((float2(t_0) + float2(0.5f) ) / kernelContext_1->post_0->motion_size_0.zw), level((0.0f))).xy);
+}
+
+
+#line 196
+float2 velocity_at_0(int2 p_1, KernelContext_0 thread* kernelContext_2)
+{
+
+#line 197
+    return ((kernelContext_2->velocityMap_texture_0).sample((kernelContext_2->velocityMap_sampler_0), ((float2(p_1) + float2(0.5f) ) / kernelContext_2->post_0->motion_size_0.xy), level((0.0f))).xy);
+}
+
+
+#line 191
+float2 motion_cut_0(float2 v_0, KernelContext_0 thread* kernelContext_3)
+{
+
+#line 192
+    float l_0 = length(v_0);
+
+#line 192
+    float2 _S1;
+    if(l_0 > (kernelContext_3->post_0->motion_0.x))
+    {
+
+#line 193
+        _S1 = v_0 * float2((kernelContext_3->post_0->motion_0.x / l_0)) ;
+
+#line 193
+    }
+    else
+    {
+
+#line 193
+        _S1 = v_0;
+
+#line 193
+    }
+
+#line 193
+    return _S1;
+}
+
+
+#line 200
+float nearness_at_0(int2 p_2, KernelContext_0 thread* kernelContext_4)
+{
+
+#line 201
+    return ((kernelContext_4->nearnessMap_texture_0).sample((kernelContext_4->nearnessMap_sampler_0), ((float2(p_2) + float2(0.5f) ) / kernelContext_4->post_0->motion_size_0.xy), level((0.0f))).x);
+}
+
+
+#line 212
+float motion_jitter_0(int2 p_3)
+{
+
+#line 213
+    return fract(52.98291778564453125f * fract(0.06711056083440781f * float(p_3.x) + 0.00583714991807938f * float(p_3.y)));
+}
+
+
+#line 208
+float motion_reach_0(float d_0, float l_1)
+{
+
+#line 209
+    return saturate(l_1 - d_0 + 0.5f);
+}
+
+
+#line 209
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 265
+[[fragment]] pixelOutput_0 fs_motion(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> motionMap_texture_1 [[texture(7)]], sampler motionMap_sampler_1 [[sampler(7)]], texture2d<float, access::sample> velocityMap_texture_1 [[texture(5)]], sampler velocityMap_sampler_1 [[sampler(5)]], texture2d<float, access::sample> nearnessMap_texture_1 [[texture(6)]], sampler nearnessMap_sampler_1 [[sampler(6)]])
+{
+
+#line 265
+    thread KernelContext_0 kernelContext_5;
+
+#line 265
+    (&kernelContext_5)->post_0 = post_1;
+
+#line 265
+    (&kernelContext_5)->lightMap_texture_0 = lightMap_texture_1;
+
+#line 265
+    (&kernelContext_5)->lightMap_sampler_0 = lightMap_sampler_1;
+
+#line 265
+    (&kernelContext_5)->motionMap_texture_0 = motionMap_texture_1;
+
+#line 265
+    (&kernelContext_5)->motionMap_sampler_0 = motionMap_sampler_1;
+
+#line 265
+    (&kernelContext_5)->velocityMap_texture_0 = velocityMap_texture_1;
+
+#line 265
+    (&kernelContext_5)->velocityMap_sampler_0 = velocityMap_sampler_1;
+
+#line 265
+    (&kernelContext_5)->nearnessMap_texture_0 = nearnessMap_texture_1;
+
+#line 265
+    (&kernelContext_5)->nearnessMap_sampler_0 = nearnessMap_sampler_1;
+    int2 _S2 = int2(position_0.xy);
+    int2 _S3 = int2(post_1->frame_0.xy);
+
+#line 267
+    float4 _S4 = light_at_0(_S2, &kernelContext_5);
+
+    int2 _S5 = _S2 / int2(int((&kernelContext_5)->post_0->motion_0.z)) ;
+
+#line 269
+    float2 _S6 = motion_tile_0(_S5, &kernelContext_5);
+    if((dot(_S6, _S6)) < 0.25f)
+    {
+
+#line 270
+        pixelOutput_0 _S7 = { _S4 };
+        return _S7;
+    }
+
+#line 271
+    float2 _S8 = velocity_at_0(_S2, &kernelContext_5);
+
+#line 271
+    float2 _S9 = motion_cut_0(_S8, &kernelContext_5);
+
+    float _S10 = max(length(_S9), 0.5f);
+    float _S11 = length(_S6);
+
+#line 274
+    float _S12 = nearness_at_0(_S2, &kernelContext_5);
+
+    float4 _S13 = float4(int4(int(0)) );
+
+
+
+    float _S14 = motion_jitter_0(_S2) - 0.5f;
+
+#line 280
+    int k_0 = int(0);
+
+#line 280
+    float4 cover_0 = _S13;
+
+#line 280
+    float covered_0 = 0.0f;
+
+#line 280
+    float4 own_0 = _S4;
+
+#line 280
+    float owned_0 = 1.0f;
+    for(;;)
+    {
+
+#line 281
+        if(k_0 < int(15))
+        {
+        }
+        else
+        {
+
+#line 281
+            break;
+        }
+        int2 s_0 = clamp(int2(floor(float2(_S2) + float2(0.5f)  + _S6 * float2((-1.0f + 2.0f * (float(k_0) + _S14 + 1.0f) / 16.0f)) )), int2(int(0)) , _S3 - int2(int(1)) );
+        float d_1 = length(float2(s_0 - _S2));
+
+#line 284
+        float2 _S15 = velocity_at_0(s_0, &kernelContext_5);
+
+#line 284
+        float2 _S16 = motion_cut_0(_S15, &kernelContext_5);
+        float _S17 = max(length(_S16), 0.5f);
+
+#line 285
+        float _S18 = nearness_at_0(s_0, &kernelContext_5);
+
+        float front_0 = saturate(1.0f - (_S12 - _S18) / (&kernelContext_5)->post_0->motion_0.y);
+        float level_0 = saturate(1.0f - (_S18 - _S12) / (&kernelContext_5)->post_0->motion_0.y);
+
+#line 288
+        float4 _S19 = light_at_0(s_0, &kernelContext_5);
+
+        float _S20 = motion_reach_0(d_1, _S17);
+
+#line 290
+        float c_0 = front_0 * (1.0f - level_0) * _S20 * _S11 / (_S17 * 15.0f);
+        float4 cover_1 = cover_0 + _S19 * float4(c_0) ;
+        float covered_1 = covered_0 + c_0;
+        float o_0 = level_0 * max(motion_reach_0(d_1, _S10), _S20);
+        float4 own_1 = own_0 + _S19 * float4(o_0) ;
+        float owned_1 = owned_0 + o_0;
+
+#line 281
+        k_0 = k_0 + int(1);
+
+#line 281
+        cover_0 = cover_1;
+
+#line 281
+        covered_0 = covered_1;
+
+#line 281
+        own_0 = own_1;
+
+#line 281
+        owned_0 = owned_1;
+
+#line 281
+    }
+
+#line 297
+    float _S21 = min(covered_0, 1.0f);
+
+#line 297
+    float4 front_light_0;
+    if(covered_0 > 0.0f)
+    {
+
+#line 298
+        front_light_0 = cover_0 / float4(covered_0) ;
+
+#line 298
+    }
+    else
+    {
+
+#line 298
+        front_light_0 = _S13;
+
+#line 298
+    }
+
+#line 298
+    pixelOutput_0 _S22 = { front_light_0 * float4(_S21)  + own_0 / float4(owned_0)  * float4((1.0f - _S21))  };
+    return _S22;
+}
+

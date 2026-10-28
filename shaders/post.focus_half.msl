@@ -3,13 +3,15 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 12 "post.slang"
+#line 17 "post.slang"
 struct Post_FS_0
 {
     float4 tone_0;
     float4 lens_0;
     float4 camera_0;
     float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
 };
 
 
@@ -24,11 +26,11 @@ struct KernelContext_0
 };
 
 
-#line 51 "post.slang"
+#line 63 "post.slang"
 float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 52
+#line 64
     return ((kernelContext_0->lightMap_texture_0).sample((kernelContext_0->lightMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->tone_0.zw), level((0.0f))));
 }
 
@@ -36,40 +38,40 @@ float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 float key_at_0(int2 p_1, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 57
+#line 69
     float _S1 = ((kernelContext_1->depthMap_texture_0).sample((kernelContext_1->depthMap_sampler_0), ((float2(p_1) + float2(0.5f) ) / kernelContext_1->post_0->frame_0.xy), level((0.0f))).x);
     if(_S1 <= 0.0f)
     {
 
-#line 59
+#line 71
         return 0.0f;
     }
     float near_0 = kernelContext_1->post_0->camera_0.x;
     float far_0 = kernelContext_1->post_0->camera_0.y;
 
-#line 62
+#line 74
     float v_0;
     if((kernelContext_1->post_0->camera_0.z) != 0.0f)
     {
 
-#line 63
+#line 75
         v_0 = far_0 - _S1 * (far_0 - near_0);
 
-#line 63
+#line 75
     }
     else
     {
 
-#line 63
+#line 75
         v_0 = near_0 * far_0 / (near_0 + _S1 * (far_0 - near_0));
 
-#line 63
+#line 75
     }
     return 1.0f / v_0;
 }
 
 
-#line 107
+#line 119
 struct Half_Out_0
 {
     float4 light_0 [[color(0)]];
@@ -79,22 +81,22 @@ struct Half_Out_0
 [[fragment]] Half_Out_0 fs_focus_half(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> depthMap_texture_1 [[texture(1)]], sampler depthMap_sampler_1 [[sampler(1)]])
 {
 
-#line 113
+#line 125
     thread KernelContext_0 kernelContext_2;
 
-#line 113
+#line 125
     (&kernelContext_2)->post_0 = post_1;
 
-#line 113
+#line 125
     (&kernelContext_2)->lightMap_texture_0 = lightMap_texture_1;
 
-#line 113
+#line 125
     (&kernelContext_2)->lightMap_sampler_0 = lightMap_sampler_1;
 
-#line 113
+#line 125
     (&kernelContext_2)->depthMap_texture_0 = depthMap_texture_1;
 
-#line 113
+#line 125
     (&kernelContext_2)->depthMap_sampler_0 = depthMap_sampler_1;
     int2 _S2 = int2(position_0.xy);
     int2 _S3 = int2(post_1->frame_0.xy);
@@ -102,62 +104,62 @@ struct Half_Out_0
     (&o_0)->light_0 = float4(int4(int(0)) );
     (&o_0)->key_0 = 0.0f;
 
-#line 118
+#line 130
     int dy_0 = int(0);
     for(;;)
     {
 
-#line 119
+#line 131
         if(dy_0 < int(2))
         {
         }
         else
         {
 
-#line 119
+#line 131
             break;
         }
 
-#line 119
+#line 131
         int dx_0 = int(0);
         for(;;)
         {
 
-#line 120
+#line 132
             if(dx_0 < int(2))
             {
             }
             else
             {
 
-#line 120
+#line 132
                 break;
             }
 
-#line 121
+#line 133
             int2 p_2 = min(_S2 * int2(int(2))  + int2(dx_0, dy_0), _S3 - int2(int(1)) );
 
-#line 121
+#line 133
             float4 _S4 = light_at_0(p_2, &kernelContext_2);
             (&o_0)->light_0 = (&o_0)->light_0 + _S4;
 
-#line 122
+#line 134
             float _S5 = key_at_0(p_2, &kernelContext_2);
             (&o_0)->key_0 = (&o_0)->key_0 + _S5;
 
-#line 120
+#line 132
             dx_0 = dx_0 + int(1);
 
-#line 120
+#line 132
         }
 
-#line 119
+#line 131
         dy_0 = dy_0 + int(1);
 
-#line 119
+#line 131
     }
 
-#line 126
+#line 138
     (&o_0)->light_0 = (&o_0)->light_0 * float4(0.25f) ;
     (&o_0)->key_0 = (&o_0)->key_0 * 0.25f;
     return o_0;
