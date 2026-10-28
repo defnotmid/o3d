@@ -148,7 +148,6 @@ behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n_in: Vec
 // coat's, each blurred as far as its mirrored ray runs (`reflected_run`).
 @(private = "file")
 mirror_at :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, x, y: int, p: Vec3, roughness, coat_roughness: f32) -> (mirror: Mirror_Light) {
-	mirror.amount = m.reflection
 	if job.reflection == nil {
 		return
 	}

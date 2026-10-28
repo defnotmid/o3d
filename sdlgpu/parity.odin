@@ -2359,7 +2359,7 @@ build_reflector :: proc(a: ^Parity_Assets) -> string {
 	floor := o3d.MATERIAL_DEFAULT
 	floor.color, floor.roughness = {0.22, 0.24, 0.28}, 0.6
 	floor.roughness_map = rough
-	floor.reflection = 0.9
+	floor.flags += {.Reflector}
 	floor.clearcoat, floor.clearcoat_roughness = 0.4, 0.05
 	floor.flags = {.Receive_Shadow}
 	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 7, 5), o3d.compose({}, {-math.PI / 2, 0, 0}), floor})

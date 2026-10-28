@@ -2450,7 +2450,8 @@ test_contact_hardening :: proc(t: ^testing.T) {
 	scene.camera = {position = {0, 1, 4}, target = {0, 0.1, 0}, fov = 40, near = 0.1, far = 50}
 	scene.reflector = {normal = {0, 1, 0}, scale = 1}
 	floor := MATERIAL_DEFAULT
-	floor.color, floor.metalness, floor.roughness, floor.reflection = {1, 1, 1}, 1, 0.35, 1
+	floor.color, floor.metalness, floor.roughness = {1, 1, 1}, 1, 0.35
+	floor.flags += {.Reflector}
 	append(&scene.draws, Draw{plane(&g, 30, 30), compose({}, {-math.PI / 2, 0, 0}), floor})
 	pole := MATERIAL_DEFAULT
 	pole.color, pole.flags = {1, 1, 1}, {.Basic}
@@ -2498,7 +2499,8 @@ test_reflector :: proc(t: ^testing.T) {
 		scene.camera = {position = {0, 1.5, 4}, target = {0, 0, 0}, fov = 50, near = 0.1, far = 50}
 		scene.reflector = reflector
 		mirror := MATERIAL_DEFAULT
-		mirror.color, mirror.metalness, mirror.roughness, mirror.reflection = {1, 1, 1}, 1, 0, 1
+		mirror.color, mirror.metalness, mirror.roughness = {1, 1, 1}, 1, 0
+		mirror.flags += {.Reflector}
 		append(&scene.draws, Draw{plane(g, 30, 30), compose({}, {-math.PI / 2, 0, 0}), mirror})
 		red := MATERIAL_DEFAULT
 		red.color, red.flags = {1, 0, 0}, {.Basic}

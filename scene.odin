@@ -176,7 +176,7 @@ focus_blur :: #force_inline proc "contextless" (f: Focus, key: f32) -> f32 {
 // scene is drawn mirrored in it, at `scale` of the frame's size, leaving
 // out what is behind it, the particles, the shadow catchers and the
 // surfaces that show it, with how far each sample's mirrored ray ran past
-// the plane (`mirror_run`); those (`Material.reflection`) read it where
+// the plane (`mirror_run`); those (`.Reflector` materials) read it where
 // they are on the screen, blurred for their roughness as far as their ray
 // runs (`reflection_lod`, `reflected_run`): sharp where things touch it.
 // Not drawn when the camera is behind it or no surface that shows it is in
@@ -234,6 +234,17 @@ Material_Flag :: enum u8 {
 	// their alpha times its opacity (three.js's vertexColors; glTF's
 	// COLOR_0): interpolated in linear light, lines and points too.
 	Vertex_Colors,
+	// The surface is the reflector's (three.js's Reflector: a floor, a
+	// table top, a wet street, a mirror on `Scene.reflector`'s plane): it
+	// shows the scene mirrored there in place of the environment map's
+	// reflection. How much and how sharp is the material's own, as for the
+	// environment: its Fresnel (metalness, ior, a clear coat's layer), its
+	// roughness blurring it more the farther its ray runs (sharp where
+	// things touch the plane). Where the mirror shows nothing (past what it
+	// drew) the environment does. The standard lit material's (not basic,
+	// toon, a ShaderMaterial, a particle or a shadow catcher); transmission
+	// takes its place where both are set.
+	Reflector,
 }
 
 Material_Flags :: bit_set[Material_Flag; u16]
@@ -368,16 +379,6 @@ Material :: struct {
 	thickness:           f32,
 	attenuation_color:   Vec3,
 	attenuation_distance: f32,
-	// How much of the scene mirrored in `Scene.reflector` the surface shows
-	// in place of the environment's reflection (0 to 1; fframes-three-d's
-	// `reflection`), blurred by its roughness (the clear coat's by the
-	// coat's), through the same Fresnel as the environment's, which shows
-	// where the mirror shows nothing. For surfaces on the reflector's plane
-	// (a floor, a table top, a mirror): one off it reads the mirror at its
-	// own place on the screen. The standard lit material's (not basic, toon,
-	// a ShaderMaterial, a particle or a shadow catcher); transmission takes
-	// its place where both are set.
-	reflection:          f32,
 	// The environment's light on this material, diffuse and reflected, as
 	// a share of the scene's (three.js's envMapIntensity; 0 means 1).
 	env_intensity:       f32,
@@ -2259,7 +2260,6 @@ Shading_Material :: struct {
 	// Triplanar (`.Triplanar`): repeats per unit and the weights' power.
 	projection_scale, projection_sharpness: f32,
 	layers:        Shading_Layers,
-	reflection:    f32, // 0 to 1 (`.Reflection`)
 	env_intensity: f32, // times the scene's
 }
 
@@ -2328,7 +2328,7 @@ Shading_Flag :: enum u8 {
 	// read: those of the layers on (white without a map).
 	Layer_Maps,
 	Clearcoat_Normal_Map,
-	// Shows the scene mirrored in the reflector (`Material.reflection`).
+	// Shows the scene mirrored in the reflector (`.Reflector`).
 	Reflection,
 }
 
@@ -2495,7 +2495,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			}
 			if transmissive(m) {
 				f += {.Transmission}
-			} else if m.reflection > 0 {
+			} else if .Reflector in m.flags {
 				f += {.Reflection}
 			}
 		}
@@ -2575,7 +2575,6 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			projection_scale     = m.projection_scale if m.projection_scale > 0 else 1,
 			projection_sharpness = m.projection_sharpness if m.projection_sharpness > 0 else 4,
 			layers               = layers,
-			reflection           = clamp(m.reflection, 0, 1) if .Reflection in f else 0,
 			env_intensity        = m.env_intensity if m.env_intensity > 0 else 1,
 		}
 	}
@@ -2620,10 +2619,9 @@ surface :: #force_inline proc "contextless" (m: ^Shading_Material) -> Surface {
 // everything (emissive too), lit about its own normal `coat_n` (the
 // surface's before its normal map, or the coat's normal map's).
 //
-// `mirror` (nil: none): the reflector's light at the point
-// (`Material.reflection`), which takes `amount` of the environment's
-// reflection's place, over it where it covers less than all, in the
-// surface's and the coat's.
+// `mirror` (nil: none): the reflector's light at the point (a `.Reflector`
+// material's), which takes the environment's reflection's place, over it
+// where it covers less than all, in the surface's and the coat's.
 shade :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights: []Shading_Light, shadow: f32 = 1, env: Shading_Environment = {}, ao: f32 = 1, shadows: [MAX_SHADOWS]f32 = {1, 1, 1, 1}, emissive: Vec3 = {}, f0: f32 = 0.04, mirror: ^Mirror_Light = nil) -> Vec3 {
 	_, out := shade_point(m, world, n_in, eye, lights, shadow, env, ao, shadows, emissive, nil, {}, {}, f0, mirror, false)
 	return out
@@ -2636,17 +2634,16 @@ shade_layered :: proc "contextless" (m: Surface, world, n_in, eye: Vec3, lights:
 }
 
 // What a reflective point reads of the reflection (`reflection_at`, at its
-// roughness and at its clear coat's), and how much of it it shows.
+// roughness and at its clear coat's).
 Mirror_Light :: struct {
 	spec, coat: Vec4, // linear light, premultiplied by the mirror's coverage (alpha)
-	amount:     f32,
 }
 
-// The environment's reflected light `env` with a mirror's `p` taking
-// `amount` of its place (fframes-three-d's).
+// The environment's reflected light `env` with a mirror's `p` in its place,
+// the environment's where the mirror covers less than all.
 @(private = "file")
-mirrored :: #force_inline proc "contextless" (env: Vec3, p: Vec4, amount: f32) -> Vec3 {
-	return linalg.lerp(env, p.rgb + env * (1 - p.a), amount)
+mirrored :: #force_inline proc "contextless" (env: Vec3, p: Vec4) -> Vec3 {
+	return p.rgb + env * (1 - p.a)
 }
 
 LAYER_FLAGS :: Shading_Flags{.Clearcoat, .Sheen, .Transmission}
@@ -2782,7 +2779,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 		if mirror == nil {
 			out_s^ += k * rad * spec
 		} else {
-			out_s^ += ao * mirrored(env_k * rad, mirror.spec, mirror.amount) * spec
+			out_s^ += ao * mirrored(env_k * rad, mirror.spec) * spec
 		}
 		when LAYERED do if coat {
 			coat_rad: Vec3
@@ -2793,7 +2790,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 			if mirror == nil {
 				coat_l += k * coat_rad * env_brdf(0.04, cr, cnv)
 			} else {
-				coat_l += ao * mirrored(env_k * coat_rad, mirror.coat, mirror.amount) * env_brdf(0.04, cr, cnv)
+				coat_l += ao * mirrored(env_k * coat_rad, mirror.coat) * env_brdf(0.04, cr, cnv)
 			}
 		}
 	}

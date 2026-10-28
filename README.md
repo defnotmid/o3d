@@ -101,12 +101,16 @@ What is known about three.js carries over:
   included). Planar reflections (three.js's Reflector, physically):
   `Scene.reflector` is a plane
   (`point`, `normal` toward the side it mirrors, `scale` the reflection's
-  share of the frame's size, 0.5 by default), and a material's
-  `reflection` (0 to 1) is how much of the scene mirrored in it takes the
-  place of the environment's reflection, through the same Fresnel (where
-  the mirror shows nothing the environment shows; no environment is
-  needed), blurred by roughness as far as the mirrored ray runs to what it
-  meets: GGX's lobe (alpha = roughness^2) spreads over about 1.29 alpha
+  share of the frame's size, 0.5 by default), and a material flagged
+  `.Reflector` is a surface of it (as three.js's Reflector is the mesh
+  that shows it): the scene mirrored there takes the place of the
+  environment map's reflection, all of it, where the mirror shows
+  something (where it shows nothing the environment does; no environment
+  is needed). How strong and how sharp the reflection is belongs to the
+  material, as the environment's does: its Fresnel (metalness, ior, the
+  clear coat's layer) and its roughness, not a separate amount; a dimmer
+  reflection is a rougher or less metallic surface. The roughness blurs it
+  as far as the mirrored ray runs to what it meets: GGX's lobe (alpha = roughness^2) spreads over about 1.29 alpha
   times that run, seen from the eye that run further away, and the mip
   level (a full chain) is the one whose texels are that blur across. What
   touches the plane reflects sharp and what is far from it blurs most
@@ -122,8 +126,8 @@ What is known about three.js carries over:
   does. They belong on the
   plane (a floor, a table top, a mirror). One reflector a scene; it is
   not drawn when the camera is behind it or nothing that shows it is in
-  view; transmission takes a material's place of reflection, and glass in
-  the mirror shows the environment behind it. ShadowMaterial (`.Shadow_Only`:
+  view; transmission takes a `.Reflector` material's place of reflection,
+  and glass in the mirror shows the environment behind it. ShadowMaterial (`.Shadow_Only`:
   only the shadows it receives, `color` at `opacity` times the light they
   take, blended over what is behind: shadows on a backdrop or a video
   without a visible ground), MeshBasicMaterial (`.Basic`),

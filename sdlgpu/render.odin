@@ -309,7 +309,7 @@ make_draw_uniforms :: #force_inline proc "contextless" (mvp, model: o3d.Mat4, ge
 make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Material, geo: o3d.Geometry) -> (mu: Material_Uniforms) {
 	mu = {
 		color        = {m.base.r, m.base.g, m.base.b, m.opacity},
-		emissive     = {m.emissive.r, m.emissive.g, m.emissive.b, m.reflection},
+		emissive     = {m.emissive.r, m.emissive.g, m.emissive.b, 0},
 		metalness    = m.metalness,
 		roughness    = m.roughness,
 		ao_intensity = m.ao_intensity,
