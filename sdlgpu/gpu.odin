@@ -268,6 +268,12 @@ GPU :: struct {
 	morph_deltas:             Pool_Buffer,
 	indices:                  Pool_Buffer,
 	curve_words:              Pool_Buffer,
+	// Every prepare's uploads to the pools (the geometry's, a job's
+	// dynamic ones) through one transfer buffer, kept and grown
+	// geometrically, mapped once a prepare and cycled: SDL hands a fresh
+	// backing while an earlier frame's copy is in flight (ovg's streams).
+	stream:                   ^sdl.GPUTransferBuffer,
+	stream_capacity:          u32,
 	// The generations of the tables mirrored (geometry, textures, shaders'
 	// pipelines): a different one (new contents, ids reused) starts over.
 	mirrored:                 Mirrored,
@@ -647,6 +653,9 @@ destroy :: proc(g: ^GPU) {
 		if b.buffer != nil {
 			sdl.ReleaseGPUBuffer(g.device, b.buffer)
 		}
+	}
+	if g.stream != nil {
+		sdl.ReleaseGPUTransferBuffer(g.device, g.stream)
 	}
 	for tex in g.textures {
 		if tex != nil {

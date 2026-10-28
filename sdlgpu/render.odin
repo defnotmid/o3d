@@ -177,39 +177,46 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	job^ = {}
 }
 
-// Uploads what `geos` added since the last frame.
+// A pool's upload this prepare: its data, of which the GPU lacks what is
+// past `pool.uploaded`.
 @(private = "file")
-upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, pass: ^sdl.GPUCopyPass) -> o3d.Error {
-	upload_pool(g, &g.vertices, {.VERTEX}, mem.slice_to_bytes(geos.vertices[:]), pass) or_return
-	upload_pool(g, &g.skin_vertices, {.VERTEX}, mem.slice_to_bytes(geos.skin_vertices[:]), pass) or_return
-	upload_pool(g, &g.morph_deltas, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(geos.morph_deltas[:]), pass) or_return
-	upload_pool(g, &g.indices, {.INDEX}, mem.slice_to_bytes(geos.indices[:]), pass) or_return
-	upload_pool(g, &g.curve_words, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(geos.curve_words[:]), pass) or_return
-	return nil
+Upload :: struct {
+	pool:  ^Pool_Buffer,
+	usage: sdl.GPUBufferUsageFlags,
+	data:  []u8,
 }
 
-// Uploads the job's expanded line/point geometry when present.
+// What `geos` added since the last frame.
 @(private = "file")
-upload_dynamic :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPUCopyPass) -> o3d.Error {
+upload_geometry :: proc(g: ^GPU, geos: ^o3d.Geometries, out: ^[dynamic; 9]Upload) {
+	append(out, Upload{&g.vertices, {.VERTEX}, mem.slice_to_bytes(geos.vertices[:])})
+	append(out, Upload{&g.skin_vertices, {.VERTEX}, mem.slice_to_bytes(geos.skin_vertices[:])})
+	append(out, Upload{&g.morph_deltas, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(geos.morph_deltas[:])})
+	append(out, Upload{&g.indices, {.INDEX}, mem.slice_to_bytes(geos.indices[:])})
+	append(out, Upload{&g.curve_words, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(geos.curve_words[:])})
+}
+
+// The job's expanded line/point geometry when present, whole.
+@(private = "file")
+upload_dynamic :: proc(job: ^Job, out: ^[dynamic; 9]Upload) {
 	if len(job.expanded.vertices) == 0 || len(job.expanded.indices) == 0 {
-		return nil
+		return
 	}
 	job.dynamic_vertices.uploaded = 0
 	job.dynamic_indices.uploaded = 0
-	upload_pool(g, &job.dynamic_vertices, {.VERTEX}, mem.slice_to_bytes(job.expanded.vertices[:]), pass) or_return
-	upload_pool(g, &job.dynamic_indices, {.INDEX}, mem.slice_to_bytes(job.expanded.indices[:]), pass) or_return
+	append(out, Upload{&job.dynamic_vertices, {.VERTEX}, mem.slice_to_bytes(job.expanded.vertices[:])})
+	append(out, Upload{&job.dynamic_indices, {.INDEX}, mem.slice_to_bytes(job.expanded.indices[:])})
 	if len(job.expanded.sprite_rows) > 0 {
 		job.sprite_rows.uploaded = 0
-		upload_pool(g, &job.sprite_rows, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(job.expanded.sprite_rows[:]), pass) or_return
+		append(out, Upload{&job.sprite_rows, {.GRAPHICS_STORAGE_READ}, mem.slice_to_bytes(job.expanded.sprite_rows[:])})
 	}
-	return nil
 }
 
 // When a morphed or skinned draw uses a ShaderMaterial, morphs and skins its
 // vertices into `job.custom_skinned` before the render pass so the user's
 // vertex shader receives posed positions and normals.
 @(private = "file")
-upload_custom_skinned :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, pass: ^sdl.GPUCopyPass) -> o3d.Error {
+upload_custom_skinned :: proc(job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, out: ^[dynamic; 9]Upload) {
 	clear(&job.custom_skinned_verts)
 	o3d.table_grow_non_zero(&job.custom_skinned_first, len(scene.draws))
 	o3d.table_grow_non_zero(&job.custom_opened_first, len(scene.draws))
@@ -284,10 +291,10 @@ upload_custom_skinned :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.
 		job.custom_opened_first[di] = i32(at)
 	}
 	if len(job.custom_skinned_verts) == 0 {
-		return nil
+		return
 	}
 	job.custom_skinned.uploaded = 0
-	return upload_pool(g, &job.custom_skinned, {.VERTEX}, mem.slice_to_bytes(job.custom_skinned_verts[:]), pass)
+	append(out, Upload{&job.custom_skinned, {.VERTEX}, mem.slice_to_bytes(job.custom_skinned_verts[:])})
 }
 
 @(private = "file")
@@ -334,39 +341,64 @@ make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Mate
 	return
 }
 
-// Uploads `data` past what `b` holds, into a buffer twice as large when it
-// no longer fits (the old one is released once the GPU is done with it).
+// The pools' uploads, sized then filled: each pool's GPU buffer grown to
+// hold its data (a buffer always exists once uploaded to: some are bound
+// with nothing in them), what each lacks laid end to end in `g.stream`
+// (grown geometrically), mapped once, then copied from there.
 @(private = "file")
-upload_pool :: proc(g: ^GPU, b: ^Pool_Buffer, usage: sdl.GPUBufferUsageFlags, data: []u8, pass: ^sdl.GPUCopyPass) -> o3d.Error {
-	size := u32(len(data))
-	// A buffer always exists once uploaded to (a failed one is made again:
-	// some are bound with nothing in them).
-	if size > b.capacity || b.buffer == nil {
-		if b.buffer != nil {
-			sdl.ReleaseGPUBuffer(g.device, b.buffer)
+upload_pools :: proc(g: ^GPU, uploads: []Upload, pass: ^sdl.GPUCopyPass) -> o3d.Error {
+	total: u32
+	for u in uploads {
+		size, b := u32(len(u.data)), u.pool
+		if size > b.capacity || b.buffer == nil {
+			if b.buffer != nil {
+				sdl.ReleaseGPUBuffer(g.device, b.buffer)
+			}
+			b.capacity = max(size, b.capacity * 2, 64 << 10)
+			b.uploaded = 0
+			b.buffer = sdl.CreateGPUBuffer(g.device, {usage = u.usage, size = b.capacity})
+			if b.buffer == nil {
+				b^ = {}
+				return .Out_Of_Memory
+			}
 		}
-		b.capacity = max(size, b.capacity * 2, 64 << 10)
-		b.uploaded = 0
-		b.buffer = sdl.CreateGPUBuffer(g.device, {usage = usage, size = b.capacity})
-		if b.buffer == nil {
-			b^ = {}
+		total += size - b.uploaded
+	}
+	if total == 0 {
+		return nil
+	}
+	if total > g.stream_capacity || g.stream == nil {
+		if g.stream != nil {
+			sdl.ReleaseGPUTransferBuffer(g.device, g.stream)
+		}
+		g.stream_capacity = max(total, g.stream_capacity * 2, 1 << 20)
+		g.stream = sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = g.stream_capacity})
+		if g.stream == nil {
+			g.stream_capacity = 0
 			return .Out_Of_Memory
 		}
 	}
-	if size == b.uploaded {
-		return nil
+	mapped := ([^]u8)(sdl.MapGPUTransferBuffer(g.device, g.stream, true))
+	if mapped == nil {
+		return .Device
 	}
-	new := data[b.uploaded:]
-	transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = u32(len(new))})
-	if transfer == nil {
-		return .Out_Of_Memory
+	at: u32
+	for u in uploads {
+		new := u.data[u.pool.uploaded:]
+		mem.copy(&mapped[at], raw_data(new), len(new))
+		at += u32(len(new))
 	}
-	defer sdl.ReleaseGPUTransferBuffer(g.device, transfer)
-	mapped := sdl.MapGPUTransferBuffer(g.device, transfer, false)
-	mem.copy(mapped, raw_data(new), len(new))
-	sdl.UnmapGPUTransferBuffer(g.device, transfer)
-	sdl.UploadToGPUBuffer(pass, {transfer_buffer = transfer}, {buffer = b.buffer, offset = b.uploaded, size = u32(len(new))}, b.uploaded == 0)
-	b.uploaded = size
+	sdl.UnmapGPUTransferBuffer(g.device, g.stream)
+	at = 0
+	for u in uploads {
+		b := u.pool
+		n := u32(len(u.data)) - b.uploaded
+		if n > 0 {
+			sdl.UploadToGPUBuffer(pass, {transfer_buffer = g.stream, offset = at}, {buffer = b.buffer, offset = b.uploaded, size = n}, b.uploaded == 0)
+			at += n
+		}
+		b.uploaded = u32(len(u.data))
+	}
 	return nil
 }
 
@@ -850,15 +882,13 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 		return .Device
 	}
 	pass := sdl.BeginGPUCopyPass(cmd)
-	err := upload_geometry(g, geos, pass)
+	uploads: [dynamic; 9]Upload
+	upload_geometry(g, geos, &uploads)
+	upload_dynamic(job, &uploads)
+	upload_custom_skinned(job, active, geos, &uploads)
+	err := upload_pools(g, uploads[:], pass)
 	if err == nil {
 		err = upload_textures(g, textures, pass)
-	}
-	if err == nil {
-		err = upload_dynamic(g, job, pass)
-	}
-	if err == nil {
-		err = upload_custom_skinned(g, job, active, geos, pass)
 	}
 	sdl.EndGPUCopyPass(pass)
 	if err != nil {
