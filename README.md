@@ -39,8 +39,8 @@ What is known about three.js carries over:
   things were at the shutter's opening (the camera's pose,
   `camera.opened`; a draw's model, instances, joints, morph weights and
   ShaderMaterial uniforms, `scene_set_draw_opened`, `_opened_instances`,
-  `_opened_joints`, `_opened_morphs`, `_opened_uniforms`; none: where it is
-  now), each pixel streaks from
+  `_opened_joints`, `_opened_morphs`, `_opened_uniforms`; a glTF model's,
+  `gltf_draw`'s `opened`; none: where it is now), each pixel streaks from
   there through now and on as far again, up to `max_blur` of the frame's
   height (`MOTION_MAX_BLUR`, 0.04). The frame's depth pass writes each
   pixel's velocity and nearness (a ShaderMaterial's by its own vertex
@@ -293,6 +293,8 @@ o3d.gltf_draw(&scene, &part, o3d.compose({1.5, 0, 0}))
 // o3d.gltf_draw(&scene, &face, anim = 0, time = t, morphs = {{name = "Smile", weight = 0.8}, {index = 1, weight = 0.5}})
 // From several threads, each with its own pose (the model is then only read):
 // o3d.gltf_draw(&scene, &duck, anim = 0, time = t, pose = &thread_pose)
+// With motion blur: also as it was at the shutter's opening (each draw's model, joints and weights then)
+// o3d.gltf_draw(&scene, &duck, anim = 0, time = t, opened = o3d.Gltf_Opening{transform = then_xf, time = t - shutter / 2})
 
 // Parts of one model by durable id (names looked up once): rows by node and
 // by material, a node's row holding for the nodes under it

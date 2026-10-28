@@ -181,6 +181,8 @@ Model :: struct {
 	warnings:              [dynamic]string,
 	// The pose `gltf_draw` uses when the caller gives none.
 	scratch:               Model_Pose,
+	// And at the shutter's opening (`Gltf_Opening.pose` nil).
+	opened_scratch:        Model_Pose,
 }
 
 // Where `gltf_draw` poses a model: per node, the animated transform and the
@@ -342,7 +344,8 @@ model_node_bounds :: proc(m: ^Model, geos: ^Geometries, boxes: [][2]Vec3) {
 }
 
 // Where `node` was in the world at the last `gltf_draw` with `pose` (nil:
-// the model's own), to attach other draws to it.
+// the model's own), to attach other draws to it; with the pose its
+// `Gltf_Opening` was given, where it was at the shutter's opening.
 model_node_world :: proc "contextless" (m: ^Model, node: Model_Node_Id, pose: ^Model_Pose = nil) -> Mat4 {
 	p := pose if pose != nil else &m.scratch
 	if node == 0 || int(node) > len(p.world) {
@@ -399,6 +402,7 @@ model_destroy :: proc(m: ^Model) {
 	}
 	delete(m.warnings)
 	model_pose_destroy(&m.scratch)
+	model_pose_destroy(&m.opened_scratch)
 	m^ = {}
 }
 
@@ -486,13 +490,121 @@ gltf_morph_count :: proc "contextless" (m: ^Model) -> int {
 // model's own, so one thread at a time); with the caller's, the model is only
 // read. `parts` (`model_parts_init`) changes nodes and materials by id:
 // hidden, flags, transforms, replaced materials (a replacement wins over
-// `override_material`). Zero allocations on warm frames.
-gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil, override_material: ^Material = nil, morphs: []Morph_Weight = nil, outline_width: f32 = 0, outline_color: Vec3 = {}, parts: ^Model_Parts = nil) {
+// `override_material`). `opened` poses it again as it was at the shutter's
+// opening (motion blur) and gives each draw its model, joints and morph
+// weights then. Zero allocations on warm frames.
+gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_IDENTITY, anim: int = -1, time: f32 = 0, loop := true, flags: Material_Flags = {}, pose: ^Model_Pose = nil, override_material: ^Material = nil, morphs: []Morph_Weight = nil, outline_width: f32 = 0, outline_color: Vec3 = {}, parts: ^Model_Parts = nil, opened: Maybe(Gltf_Opening) = nil) {
 	n := len(m.nodes)
 	if n == 0 {
 		return
 	}
 	p := pose if pose != nil else &m.scratch
+	pose_nodes(m, p, transform, anim, time, loop, parts)
+	then, has_then := opened.?
+	q := then.pose if then.pose != nil else &m.opened_scratch
+	if has_then {
+		pose_nodes(m, q, then.transform, anim, then.time, loop, then.parts)
+	}
+	node_parts := parts != nil && len(parts.nodes) >= n
+	material_parts := parts != nil && len(parts.materials) >= len(m.material_names) && len(parts.replacements) >= len(m.material_names)
+	if node_parts {
+		if len(p.parts) < n {
+			resize(&p.parts, n)
+		}
+		for i in 0 ..< n {
+			row := parts.nodes[i]
+			if parent := m.nodes.parent[i]; parent >= 0 {
+				up := p.parts[parent]
+				row.hidden ||= up.hidden
+				row.add, row.remove = (up.add - row.remove) + row.add, (up.remove - row.add) + row.remove
+			}
+			p.parts[i] = row
+		}
+	}
+	meshes := m.nodes.mesh[:n]
+	skins := m.nodes.skin[:n]
+	lights := m.nodes.light[:n]
+	world := p.world[:n]
+	for i in 0 ..< n {
+		if node_parts && p.parts[i].hidden {
+			continue
+		}
+		if li := lights[i]; li >= 0 && int(li) < len(m.lights) {
+			l := m.lights[li]
+			w := world[i]
+			pos := Vec3{w[0, 3], w[1, 3], w[2, 3]}
+			// KHR_lights_punctual directional and spot lights shine along local -Z.
+			fwd := Vec3{-w[0, 2], -w[1, 2], -w[2, 2]}
+			dir := linalg.normalize(fwd) if linalg.length(fwd) > 1e-9 else Vec3{0, 0, -1}
+			l.position = pos
+			l.target = pos + dir
+			append(&scene.lights, l)
+		}
+		mi := meshes[i]
+		if mi < 0 || int(mi) >= len(m.meshes) {
+			continue
+		}
+		mesh := m.meshes[mi]
+		joints, opened_joints := node_joints(scene, m, p, i, skins[i]), Joint_Range{}
+		weights, opened_weights := node_weights(scene, m, p, mesh, i, morphs), Morph_Range{}
+		if has_then {
+			opened_joints = node_joints(scene, m, q, i, skins[i])
+			opened_weights = node_weights(scene, m, q, mesh, i, then.morphs)
+		}
+		for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
+			mat := override_material^ if override_material != nil else prim.material
+			row: Part_State
+			if material_parts && prim.material_id != 0 {
+				row = parts.materials[prim.material_id - 1]
+				if row.hidden {
+					continue
+				}
+				if row.replace {
+					mat = parts.replacements[prim.material_id - 1]
+				}
+			}
+			mat.flags += flags
+			if node_parts {
+				mat.flags = (mat.flags - p.parts[i].remove) + p.parts[i].add
+			}
+			mat.flags = (mat.flags - row.remove) + row.add
+			if outline_width > 0 {
+				mat.outline_width = outline_width
+				mat.outline_color = outline_color
+			}
+			di := len(scene.draws)
+			append(&scene.draws, Draw{prim.geometry, world[i], mat})
+			if prim.skinned {
+				scene_set_draw_joints(scene, di, joints)
+				scene_set_draw_opened_joints(scene, di, opened_joints)
+			}
+			scene_set_draw_morphs(scene, di, weights)
+			if has_then {
+				scene_set_draw_opened(scene, di, q.world[i])
+				scene_set_draw_opened_morphs(scene, di, opened_weights)
+			}
+		}
+	}
+}
+
+// A model's drawing at the shutter's opening (`gltf_draw`'s `opened`): its
+// transform and animation time then, its morph overrides and parts'
+// transforms then (nil: none), and where it is posed (nil: the model's own
+// second pose, so one thread at a time).
+Gltf_Opening :: struct {
+	transform: Mat4,
+	time:      f32,
+	morphs:    []Morph_Weight,
+	parts:     ^Model_Parts,
+	pose:      ^Model_Pose,
+}
+
+// Poses `m`'s nodes into `p`: animation `anim` at `time`, `parts`'
+// transforms, each node's world matrix under `transform`, and the morph
+// weights (the model's, then the animation's).
+@(private = "file")
+pose_nodes :: proc(m: ^Model, p: ^Model_Pose, transform: Mat4, anim: int, time: f32, loop: bool, parts: ^Model_Parts) {
+	n := len(m.nodes)
 	if len(p.world) < n {
 		resize(&p.translation, n)
 		resize(&p.rotation, n)
@@ -506,12 +618,7 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 	if len(p.morph_weights) < len(m.node_weights) {
 		resize(&p.morph_weights, len(m.node_weights))
 	}
-	node_parts := parts != nil && len(parts.nodes) >= n
-	material_parts := parts != nil && len(parts.materials) >= len(m.material_names) && len(parts.replacements) >= len(m.material_names)
 	moved := parts != nil && len(parts.transforms) >= n
-	if node_parts && len(p.parts) < n {
-		resize(&p.parts, n)
-	}
 	if len(m.node_weights) > 0 {
 		copy(p.morph_weights[:len(m.node_weights)], m.node_weights[:])
 	}
@@ -581,11 +688,7 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 			p.dirty[i] = true
 		}
 	}
-
 	parents := m.nodes.parent[:n]
-	meshes := m.nodes.mesh[:n]
-	skins := m.nodes.skin[:n]
-	lights := m.nodes.light[:n]
 	locals := m.nodes.local[:n]
 	world := p.world[:n]
 	for i in 0 ..< n {
@@ -595,103 +698,58 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		}
 		parent := parents[i]
 		world[i] = (world[parent] * local) if parent >= 0 else (transform * local)
-		if node_parts {
-			row := parts.nodes[i]
-			if parent >= 0 {
-				up := p.parts[parent]
-				row.hidden ||= up.hidden
-				row.add, row.remove = (up.add - row.remove) + row.add, (up.remove - row.add) + row.remove
-			}
-			p.parts[i] = row
-		}
 	}
-	for i in 0 ..< n {
-		if node_parts && p.parts[i].hidden {
-			continue
-		}
-		if li := lights[i]; li >= 0 && int(li) < len(m.lights) {
-			l := m.lights[li]
-			w := world[i]
-			pos := Vec3{w[0, 3], w[1, 3], w[2, 3]}
-			// KHR_lights_punctual directional and spot lights shine along local -Z.
-			fwd := Vec3{-w[0, 2], -w[1, 2], -w[2, 2]}
-			dir := linalg.normalize(fwd) if linalg.length(fwd) > 1e-9 else Vec3{0, 0, -1}
-			l.position = pos
-			l.target = pos + dir
-			append(&scene.lights, l)
-		}
-		mi := meshes[i]
-		if mi < 0 || int(mi) >= len(m.meshes) {
-			continue
-		}
-		var_joints: Joint_Range
-		if si := skins[i]; si >= 0 && int(si) < len(m.skins) {
-			skin := m.skins[si]
-			jcount := int(skin.joint_count)
-			if jcount > 0 {
-				inv_mesh := linalg.inverse(world[i])
-				out_joints := p.joints[skin.first_joint:][:jcount]
-				skin_nodes := m.skin_joints[skin.first_joint:][:jcount]
-				ibms := m.inverse_bind[skin.first_joint:][:jcount]
-				for j in 0 ..< jcount {
-					jn := skin_nodes[j]
-					jw := world[jn] if int(jn) < n else linalg.MATRIX4F32_IDENTITY
-					out_joints[j] = inv_mesh * jw * ibms[j]
-				}
-				var_joints = scene_joints(scene, out_joints)
-			}
-		}
-		mesh := m.meshes[mi]
-		var_morphs: Morph_Range
-		if wcount := int(m.nodes.weight_count[i]); wcount > 0 {
-			node_w := p.morph_weights[m.nodes.first_weight[i]:][:wcount]
-			if len(morphs) > 0 {
-				names := m.mesh_target_names[mesh.first_name:][:mesh.name_count]
-				for ov in morphs {
-					if len(ov.name) > 0 {
-						for tname, ti in names {
-							if tname == ov.name && ti < wcount {
-								node_w[ti] = ov.weight
-							}
-						}
-					} else if ov.index >= 0 && ov.index < wcount {
-						node_w[ov.index] = ov.weight
+}
+
+// Node `i`'s skin's joint matrices as posed in `p`, relative to the node,
+// kept in `scene` (none: no skin).
+@(private = "file")
+node_joints :: proc(scene: ^Scene, m: ^Model, p: ^Model_Pose, i: int, si: i32) -> Joint_Range {
+	if si < 0 || int(si) >= len(m.skins) {
+		return {}
+	}
+	skin := m.skins[si]
+	jcount := int(skin.joint_count)
+	if jcount == 0 {
+		return {}
+	}
+	n := len(m.nodes)
+	inv_mesh := linalg.inverse(p.world[i])
+	out_joints := p.joints[skin.first_joint:][:jcount]
+	skin_nodes := m.skin_joints[skin.first_joint:][:jcount]
+	ibms := m.inverse_bind[skin.first_joint:][:jcount]
+	for j in 0 ..< jcount {
+		jn := skin_nodes[j]
+		jw := p.world[jn] if int(jn) < n else linalg.MATRIX4F32_IDENTITY
+		out_joints[j] = inv_mesh * jw * ibms[j]
+	}
+	return scene_joints(scene, out_joints)
+}
+
+// Node `i`'s morph weights as posed in `p`, `morphs` over them (by target
+// name or index), kept in `scene` (none: no targets, or all zero).
+@(private = "file")
+node_weights :: proc(scene: ^Scene, m: ^Model, p: ^Model_Pose, mesh: Model_Mesh, i: int, morphs: []Morph_Weight) -> Morph_Range {
+	wcount := int(m.nodes.weight_count[i])
+	if wcount == 0 {
+		return {}
+	}
+	node_w := p.morph_weights[m.nodes.first_weight[i]:][:wcount]
+	if len(morphs) > 0 {
+		names := m.mesh_target_names[mesh.first_name:][:mesh.name_count]
+		for ov in morphs {
+			if len(ov.name) > 0 {
+				for tname, ti in names {
+					if tname == ov.name && ti < wcount {
+						node_w[ti] = ov.weight
 					}
 				}
-			}
-			var_morphs = scene_morphs(scene, node_w)
-		}
-		for prim in m.primitives[mesh.first_primitive:][:mesh.primitive_count] {
-			mat := override_material^ if override_material != nil else prim.material
-			row: Part_State
-			if material_parts && prim.material_id != 0 {
-				row = parts.materials[prim.material_id - 1]
-				if row.hidden {
-					continue
-				}
-				if row.replace {
-					mat = parts.replacements[prim.material_id - 1]
-				}
-			}
-			mat.flags += flags
-			if node_parts {
-				mat.flags = (mat.flags - p.parts[i].remove) + p.parts[i].add
-			}
-			mat.flags = (mat.flags - row.remove) + row.add
-			if outline_width > 0 {
-				mat.outline_width = outline_width
-				mat.outline_color = outline_color
-			}
-			di := len(scene.draws)
-			append(&scene.draws, Draw{prim.geometry, world[i], mat})
-			if prim.skinned && var_joints.count > 0 {
-				scene_set_draw_joints(scene, di, var_joints)
-			}
-			if var_morphs.count > 0 {
-				scene_set_draw_morphs(scene, di, var_morphs)
+			} else if ov.index >= 0 && ov.index < wcount {
+				node_w[ov.index] = ov.weight
 			}
 		}
 	}
+	return scene_morphs(scene, node_w)
 }
 
 

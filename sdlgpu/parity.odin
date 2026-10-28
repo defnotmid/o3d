@@ -2454,27 +2454,18 @@ build_motion_focus :: proc(a: ^Parity_Assets) -> string {
 	return ""
 }
 
-// The skinned bar blurred along its swing: its joints at the shutter's
-// opening those of a moment before (the glTF's animation at 0.5 against
-// 0.65), the whole of it moved too.
+// The skinned bar blurred along its swing: the glTF drawn with its
+// opening (gltf_draw's `opened`: its animation at 0.5 against 0.65, the
+// whole of it moved too), each draw its model, joints and weights then.
 build_motion_skinned :: proc(a: ^Parity_Assets) -> string {
 	if e := build_skinned(a); e != "" {
 		return e
 	}
 	s := &a.scene
-	n := len(s.draws)
-	o3d.gltf_draw(s, &a.model, anim = 0, time = 0.5, flags = {.Cast_Shadow, .Receive_Shadow})
-	// The second drawing's joints become the first's at the opening.
-	for di in 1 ..< n {
-		if r := s.draw_joints[di + n - 1] if di + n - 1 < len(s.draw_joints) else {}; r.count > 0 {
-			o3d.scene_set_draw_opened_joints(s, di, r)
-		}
-		o3d.scene_set_draw_opened(s, di, o3d.compose({-0.15, 0.05, 0}) * s.draws[di].model)
-	}
-	resize(&s.draws, n)
-	if len(s.draw_joints) > n {
-		resize(&s.draw_joints, n)
-	}
+	resize(&s.draws, 1) // the floor; the model again with its opening
+	clear(&s.draw_joints)
+	clear(&s.joints)
+	o3d.gltf_draw(s, &a.model, anim = 0, time = 0.65, flags = {.Cast_Shadow, .Receive_Shadow}, opened = o3d.Gltf_Opening{transform = o3d.compose({-0.15, 0.05, 0}), time = 0.5})
 	s.camera.shutter, s.camera.max_blur = 1.0 / 30, 0.1
 	return ""
 }
