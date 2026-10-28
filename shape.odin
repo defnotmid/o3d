@@ -58,19 +58,19 @@ shapes_from_contours :: proc(s: ^Shapes, c: ^curves.Contours, fill_rule := curve
 	out := &s.scratch.out
 	for f in s.scratch.faces {
 		first := u32(len(s.rings))
-		for ct, k in out.contours[f[0]:][:f[1]] {
+		for k in 0 ..< int(f[1]) {
 			start := len(s.points)
-			pts := out.pts[ct.start:][:3 * ct.segs + 1]
-			shapes_push(s, pts[0])
-			for kind, i in out.kinds[ct.seg:][:ct.segs] {
-				q := pts[3 * i:][:4]
-				if kind == .Line {
-					shapes_push(s, q[3])
+			ci := int(f[0]) + k
+			shapes_push(s, out.pts[out.contours[ci].start])
+			it := curves.contour_segments(out, ci)
+			for q in curves.segments_next(&it) {
+				if q.kind == .Line {
+					shapes_push(s, q.p[3])
 					continue
 				}
-				t := s.scratch.out_t[int(ct.seg) + i]
+				t := s.scratch.out_t[q.index]
 				m := max(int(math.ceil(f64(n) * abs(f64(t[1]) - f64(t[0])))), 1)
-				p0, c1, c2, p3 := wide(q[0]), wide(q[1]), wide(q[2]), wide(q[3])
+				p0, c1, c2, p3 := wide(q.p[0]), wide(q.p[1]), wide(q.p[2]), wide(q.p[3])
 				for j in 1 ..= m {
 					u := f64(j) / f64(m)
 					w := 1 - u
