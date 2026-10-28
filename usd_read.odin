@@ -572,6 +572,10 @@ usd_floats :: proc(l: ^Usd_Layer, value: u64, out: ^[dynamic]f32) -> (components
 	return components, !c.failed
 }
 
+// USD's crate files are little-endian, as every target o3d builds for is:
+// usd_floats copies 4-byte floats as they are.
+#assert(ODIN_ENDIAN == .Little, "the USD reader copies little-endian floats as native ones")
+
 // A token array, token vector or token list op's items, as token indices.
 usd_tokens :: proc(l: ^Usd_Layer, value: u64, out: ^[dynamic]u32) -> (ok: bool) {
 	clear(out)

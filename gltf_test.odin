@@ -70,7 +70,7 @@ make_test_gltf :: proc(allocator := context.temp_allocator) -> string {
 			{0, 0, 0}, {2, 2, 1}, {0, 0, 0},
 		},
 	}
-	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = allocator)
+	b64, _ := base64.encode(mem.ptr_to_bytes(&b), allocator = allocator)
 
 	// Minimal valid 1x1 white RGBA PNG in base64.
 	PNG_1X1 :: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg=="
@@ -368,7 +368,7 @@ make_skinned_test_gltf :: proc(allocator := context.temp_allocator) -> string {
 		times = {0, 1},
 		rot   = {{0, 0, 0, 1}, {0, 0, s45, s45}},
 	}
-	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = allocator)
+	b64, _ := base64.encode(mem.ptr_to_bytes(&b), allocator = allocator)
 	return fmt.aprintf(
 		`{{
   "asset": {{"version": "2.0"}},
@@ -549,7 +549,7 @@ make_morph_cube_gltf :: proc(allocator := context.temp_allocator) -> string {
 		times   = {0, 1},
 		weights = {0, 0, 1, 0},
 	}
-	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = allocator)
+	b64, _ := base64.encode(mem.ptr_to_bytes(&b), allocator = allocator)
 	return fmt.aprintf(
 		`{{
   "asset": {{"version": "2.0"}},
@@ -713,7 +713,7 @@ test_gltf_extensions_and_materials :: proc(t: ^testing.T) {
 		uv1_f32 = {{0, 0}, {1, 0}, {1, 1}, {0, 1}},
 		idx     = {0, 1, 2, 0, 2, 3},
 	}
-	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	b64, _ := base64.encode(mem.ptr_to_bytes(&b), allocator = context.temp_allocator)
 	PNG_1X1 :: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg=="
 	src := fmt.tprintf(
 		`{{
@@ -807,7 +807,7 @@ test_gltf_vertex_colors :: proc(t: ^testing.T) {
 		col8 = {{255, 0, 0, 128}, {0, 255, 0, 255}, {0, 0, 255, 0}},
 		colf = {{0.2158605, 0.2158605, 0.2158605}, {1, 1, 1}, {0, 0, 0}}, // sRGB 128 / 255
 	}
-	b64, _ := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	b64, _ := base64.encode(mem.ptr_to_bytes(&b), allocator = context.temp_allocator)
 	src := fmt.tprintf(
 		`{{
   "asset": {{"version": "2.0"}},
@@ -883,7 +883,7 @@ test_gltf_unlit_and_lights_punctual :: proc(t: ^testing.T) {
 		pos: [3][3]f32,
 	}
 	b := Bin{pos = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}}
-	encoded := base64.encode(([^]u8)(&b)[:size_of(Bin)], allocator = context.temp_allocator)
+	encoded := base64.encode(mem.ptr_to_bytes(&b), allocator = context.temp_allocator)
 	src := fmt.tprintf(
 		`{{"asset":{{"version":"2.0"}},"extensionsUsed":["KHR_materials_unlit","KHR_lights_punctual"],"extensionsRequired":["KHR_materials_unlit","KHR_lights_punctual"],"extensions":{{"KHR_lights_punctual":{{"lights":[{{"type":"directional","color":[1,0.5,0.25],"intensity":2.5}},{{"type":"point","color":[0.2,0.8,1],"intensity":10,"range":6}},{{"type":"spot","color":[1,1,1],"intensity":20,"range":12,"spot":{{"innerConeAngle":0.2,"outerConeAngle":0.5}}}}]}}}},"buffers":[{{"uri":"data:application/octet-stream;base64,%s","byteLength":%d}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],"materials":[{{"pbrMetallicRoughness":{{"baseColorFactor":[0.8,0.2,0.4,1]}},"extensions":{{"KHR_materials_unlit":{{}}}}}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"material":0}}]}}],"nodes":[{{"mesh":0}},{{"translation":[1,2,3],"extensions":{{"KHR_lights_punctual":{{"light":0}}}}}},{{"translation":[-2,1,0],"extensions":{{"KHR_lights_punctual":{{"light":1}}}}}},{{"translation":[0,4,2],"extensions":{{"KHR_lights_punctual":{{"light":2}}}}}}],"scenes":[{{"nodes":[0,1,2,3]}}],"scene":0}}`,
 		encoded,

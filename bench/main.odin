@@ -1,5 +1,6 @@
 package o3d_bench
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:math"
@@ -299,17 +300,17 @@ main :: proc() {
 		total := 12 + 8 + jlen + 8 + blen
 		glb := make([]u8, total)
 		defer delete(glb)
-		(^u32)(&glb[0])^ = 0x46546C67 // "glTF"
-		(^u32)(&glb[4])^ = 2
-		(^u32)(&glb[8])^ = u32(total)
-		(^u32)(&glb[12])^ = u32(jlen)
-		(^u32)(&glb[16])^ = 0x4E4F534A // "JSON"
+		intrinsics.unaligned_store((^u32le)(&glb[0]), u32le(0x46546C67)) // "glTF"
+		intrinsics.unaligned_store((^u32le)(&glb[4]), u32le(2))
+		intrinsics.unaligned_store((^u32le)(&glb[8]), u32le(u32(total)))
+		intrinsics.unaligned_store((^u32le)(&glb[12]), u32le(u32(jlen)))
+		intrinsics.unaligned_store((^u32le)(&glb[16]), u32le(0x4E4F534A)) // "JSON"
 		for i in 0 ..< jlen {
 			glb[20 + i] = json_str[i] if i < len(json_str) else ' '
 		}
 		boff := 20 + jlen
-		(^u32)(&glb[boff])^ = u32(blen)
-		(^u32)(&glb[boff + 4])^ = 0x004E4942 // "BIN\0"
+		intrinsics.unaligned_store((^u32le)(&glb[boff]), u32le(u32(blen)))
+		intrinsics.unaligned_store((^u32le)(&glb[boff + 4]), u32le(0x004E4942)) // "BIN\0"
 		mem.copy(&glb[boff + 8], &b, blen)
 
 		geos: o3d.Geometries

@@ -124,8 +124,10 @@ output :: #force_inline proc "contextless" (light: [4]f32, mode: Tone_Mapping, e
 	}
 	c := tone_map(light.rgb / a, mode, exposure)
 	k := clamp(max(c.r, c.g, c.b), 1, 1 / a)
-	rgb := pack(c / k, a * k)
-	return {u8(rgb), u8(rgb >> 8), u8(rgb >> 16), u8(math.round(a * 255))}
+	c /= k
+	// Clamped as the GPU's 8-bit target clamps.
+	m := clamp(a * k, 0, 1)
+	return {u8(math.round(linear_to_srgb(c.r) * m * 255)), u8(math.round(linear_to_srgb(c.g) * m * 255)), u8(math.round(linear_to_srgb(c.b) * m * 255)), u8(math.round(a * 255))}
 }
 
 // What a transmissive point sees behind it (`shade`'s `behind`), its
@@ -1142,19 +1144,6 @@ inside :: #force_inline proc "contextless" (t: Tri, p: Vec2, area: f32) -> bool 
 		}
 	}
 	return true
-}
-
-// Linear colour to sRGB premultiplied RGBA8.
-@(private = "file")
-pack :: #force_inline proc "contextless" (c: Vec3, alpha: f32) -> u32 {
-	// Clamped as the GPU's 8-bit target clamps: out of range, a channel
-	// would spill into the next.
-	k := clamp(alpha, 0, 1)
-	r := u32(math.round(linear_to_srgb(c.r) * k * 255))
-	g := u32(math.round(linear_to_srgb(c.g) * k * 255))
-	b := u32(math.round(linear_to_srgb(c.b) * k * 255))
-	a := u32(math.round(k * 255))
-	return r | g << 8 | b << 16 | a << 24
 }
 
 // The pixels the host bound to external texture `id` for the software

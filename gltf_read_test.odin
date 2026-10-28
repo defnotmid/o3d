@@ -4,6 +4,7 @@ import "core:encoding/base64"
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 
@@ -69,7 +70,7 @@ test_gltf_read_glb_and_sparse :: proc(t: ^testing.T) {
     {"bufferView": 6, "componentType": 5120, "normalized": true, "count": 3, "type": "VEC2"}],
   "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 2}, "indices": 1}]}],
   "nodes": [{"mesh": 0}]}`
-	glb := make_glb(src, ([^]u8)(&b)[:size_of(Bin)])
+	glb := make_glb(src, mem.ptr_to_bytes(&b))
 
 	doc, err := gltf_read(glb)
 	defer gltf_document_destroy(&doc)

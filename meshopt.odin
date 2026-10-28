@@ -1,5 +1,6 @@
 package o3d
 
+import "base:intrinsics"
 import "core:math"
 import "core:mem"
 
@@ -284,9 +285,9 @@ meshopt_index :: #force_inline proc "contextless" (src: []u8, at: ^int, last: u3
 @(private = "file")
 meshopt_write :: #force_inline proc "contextless" (dst: []u8, i, stride: int, v: u32) {
 	if stride == 2 {
-		(^u16le)(&dst[i * 2])^ = u16le(v)
+		intrinsics.unaligned_store((^u16le)(&dst[i * 2]), u16le(v))
 	} else {
-		(^u32le)(&dst[i * 4])^ = u32le(v)
+		intrinsics.unaligned_store((^u32le)(&dst[i * 4]), u32le(v))
 	}
 }
 

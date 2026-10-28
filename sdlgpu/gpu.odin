@@ -971,7 +971,8 @@ custom_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id, side:
 				num_samplers        = u32(m.num_samplers),
 			}
 			if .SPIRV in formats {
-				info.code, info.code_size = ([^]u8)(raw_data(m.spirv)), len(m.spirv) * size_of(u32)
+				code := slice.to_bytes(m.spirv)
+				info.code, info.code_size = raw_data(code), len(code)
 				info.entrypoint, info.format = oksl.SPIRV_ENTRY, {.SPIRV}
 			} else {
 				info.code, info.code_size = raw_data(m.msl), len(m.msl)
@@ -1031,7 +1032,8 @@ custom_depth_pipeline :: proc(g: ^GPU, shaders: ^o3d.Shaders, id: o3d.Shader_Id,
 				num_uniform_buffers = 1 if m.block_size > 0 else 0,
 			}
 			if .SPIRV in formats {
-				info.code, info.code_size = ([^]u8)(raw_data(m.spirv)), len(m.spirv) * size_of(u32)
+				code := slice.to_bytes(m.spirv)
+				info.code, info.code_size = raw_data(code), len(code)
 				info.entrypoint, info.format = oksl.SPIRV_ENTRY, {.SPIRV}
 			} else {
 				info.code, info.code_size = raw_data(m.msl), len(m.msl)

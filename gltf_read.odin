@@ -1,5 +1,6 @@
 package o3d
 
+import "base:intrinsics"
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:math"
@@ -1537,11 +1538,11 @@ max_index :: proc "contextless" (data: []u8, c: Gltf_Component, count: int) -> i
 		}
 	case .U16:
 		for i in 0 ..< count {
-			bound = max(bound, int((^u16le)(&data[i * 2])^))
+			bound = max(bound, int(intrinsics.unaligned_load((^u16le)(&data[i * 2]))))
 		}
 	case .U32:
 		for i in 0 ..< count {
-			bound = max(bound, int((^u32le)(&data[i * 4])^))
+			bound = max(bound, int(intrinsics.unaligned_load((^u32le)(&data[i * 4]))))
 		}
 	case .I8, .I16, .F32, .Invalid:
 	}
@@ -1773,12 +1774,16 @@ sparse_index :: #force_inline proc "contextless" (data: []u8, c: Gltf_Component,
 	case .U8:
 		return int(data[k])
 	case .U16:
-		return int((^u16le)(&data[k * 2])^)
+		return int(intrinsics.unaligned_load((^u16le)(&data[k * 2])))
 	case .U32:
-		return int((^u32le)(&data[k * 4])^)
+		return int(intrinsics.unaligned_load((^u32le)(&data[k * 4])))
 	}
 	return 0
 }
+
+// glTF's buffers are little-endian, as every target o3d builds for is:
+// tightly packed floats are copied as they are.
+#assert(ODIN_ENDIAN == .Little, "the glTF reader copies little-endian floats as native ones")
 
 // One sweep per component type over `n` elements `stride` apart.
 @(private = "file")
@@ -1807,7 +1812,7 @@ unpack_floats :: proc(src: []u8, stride, n: int, a: Gltf_Accessor, dst: []f32) {
 			base := e * stride
 			for c in 0 ..< comps {
 				at := base + (c / rows) * column + (c % rows) * size if column > 0 else base + c * size
-				v := f32((^T)(&src[at])^)
+				v := f32(intrinsics.unaligned_load((^T)(&src[at])))
 				if divisor != 1 {
 					v = max(v / divisor, -1)
 				}
@@ -1838,7 +1843,7 @@ unpack_uints :: proc(src: []u8, stride, n, comps: int, c: Gltf_Component, dst: [
 	sweep :: proc(src: []u8, stride, n, comps: int, dst: []u32, $T: typeid) {
 		for e in 0 ..< n {
 			for k in 0 ..< comps {
-				dst[e * comps + k] = u32((^T)(&src[e * stride + k * size_of(T)])^)
+				dst[e * comps + k] = u32(intrinsics.unaligned_load((^T)(&src[e * stride + k * size_of(T)])))
 			}
 		}
 	}
