@@ -1075,6 +1075,29 @@ test_instancing_lines_and_points :: proc(t: ^testing.T) {
 	testing.expectf(t, left_px[0] > 220 && left_px[1] < 20, "left instance is red: %v", left_px)
 	testing.expectf(t, right_px[1] > 220 && right_px[0] < 20, "right instance is green: %v", right_px)
 
+	// Per-instance emissive in place of the material's, times its intensity
+	// (past 1: 4 / (1 + 4) through Reinhard); `has_emissive` with none turns
+	// the material's off.
+	scene_clear(&scene)
+	scene.camera = {position = {0, 0, 4}, fov = 45, near = 0.1, far = 50}
+	scene.tone_mapping = .Reinhard
+	lit := MATERIAL_DEFAULT
+	lit.color = {}
+	lit.emissive = {1, 1, 1}
+	lit.emissive_intensity = 4
+	lit.flags = {.Basic}
+	append(&scene.draws, Draw{box(&g, 0.8, 0.8, 0.2), compose(), lit})
+	glows := [2]Instance {
+		{transform = compose({-0.8, 0, 0}), emissive = {1, 0, 0}},
+		{transform = compose({ 0.8, 0, 0}), has_emissive = true},
+	}
+	scene_set_draw_instances(&scene, 0, scene_instances(&scene, glows[:]))
+	px = software_render(&s, &scene, &g, nil, W, W)
+	left_px = px[(32 * W + 18) * 4:][:4]
+	right_px = px[(32 * W + 46) * 4:][:4]
+	testing.expectf(t, abs(int(left_px[0]) - int(srgb8(0.8))) <= 2 && left_px[1] < 5 && left_px[3] == 255, "left instance glows red at 4: %v", left_px)
+	testing.expectf(t, right_px[0] < 5 && right_px[1] < 5 && right_px[3] == 255, "right instance's emissive is off: %v", right_px)
+
 	// 2. LineSegments and Points: horizontal line across y = 0.5 and point at (0, -0.5, 0) in pixel space.
 	scene_clear(&scene)
 	scene.camera = {position = {0, 0, 4}, fov = 45, near = 0.1, far = 50}

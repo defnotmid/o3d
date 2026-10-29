@@ -247,7 +247,9 @@ What is known about three.js carries over:
   foreshortened) or in screen pixels when `.No_Size_Attenuation` is in
   `material.flags`. Any draw can be instanced (`InstancedMesh`) via
   `scene_instances` and `scene_set_draw_instances` with per-instance
-  `transform` and optional `color`. The same primitive parameters give the same
+  `transform`, optional `color` (multiplying the material's) and optional
+  `emissive` (in place of the material's, times its intensity: the lit dots
+  of an LED matrix glow past 1 for bloom). The same primitive parameters give the same
   id, so a frame may ask for `box(1, 1, 1)` every time; `primitive(key)` makes
   one from its `Geometry_Key` alone. Geometry is kept (never freed), so a
   shape changes over time through the draw's transform, as three.js
@@ -260,7 +262,9 @@ composite over anything, unless `scene.background_color` (sRGB and alpha,
 three.js's `scene.background` as a Color) gives the frame a clear colour:
 with alpha 1 it is opaque everywhere, so what is added (a glow, a plume)
 lands on that colour rather than on nothing; it is light like the rest,
-tone-mapped with it. A `scene.background` texture covers it. Light added
+tone-mapped with it as a material's colour is, so a tone mapping with a toe
+darkens a dark one (#2a2a2a shows as #0b0b0b through Neutral) and a fog of
+the same colour fades into it. A `scene.background` texture covers it. Light added
 past a pixel's coverage (glows over nothing) stays as colour past its
 alpha, which a premultiplied over adds.
 

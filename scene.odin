@@ -440,12 +440,17 @@ Morph_Range :: struct {
 }
 
 // One instance of an instanced draw (three.js's InstancedMesh): its local
-// transform (multiplied on the right of `Draw.model`) and optional sRGB tint
-// (`color != {}` or `has_color` multiplies `Material.color` in linear space).
+// transform (multiplied on the right of `Draw.model`), optional sRGB tint
+// (`color != {}` or `has_color` multiplies `Material.color` in linear space)
+// and optional sRGB emissive (`emissive != {}` or `has_emissive` takes the
+// place of `Material.emissive`, times its `emissive_intensity` and map as
+// the material's is): the lit dots of an LED matrix, one material.
 Instance :: struct {
-	transform: Mat4,
-	color:     Vec3,
-	has_color: bool,
+	transform:    Mat4,
+	color:        Vec3,
+	emissive:     Vec3,
+	has_color:    bool,
+	has_emissive: bool,
 }
 
 Instance_Range :: struct {
@@ -480,9 +485,14 @@ Scene :: struct {
 	background_blurriness: f32, // 0..1
 	// What the frame is cleared to under everything (three.js's
 	// scene.background as a Color, or the renderer's clear colour): sRGB
-	// and alpha, its light tone-mapped with the frame's (not fogged). The
-	// default, alpha 0, leaves the frame transparent where nothing is
-	// drawn, to composite over; alpha 1 makes it opaque. A `background`
+	// and alpha, its light tone-mapped with the frame's as a material's
+	// colour is (as three.js's composer with an OutputPass does), not
+	// fogged; a fog of the same colour fades into it. A tone mapping with
+	// a toe darkens a dark one: #2a2a2a shows as #0b0b0b through .Neutral
+	// (#464646 shows as #2a2a2a), #181818 through .ACES_Filmic, and stays
+	// through .None, .Linear, .Reinhard and .AgX. The default, alpha 0,
+	// leaves the frame transparent where nothing is drawn, to composite
+	// over (the colour exactly); alpha 1 makes it opaque. A `background`
 	// texture covers it.
 	background_color:      Vec4,
 	// Tone mapping (default .None) and exposure (0 means 1), plus scene fog.
@@ -1119,6 +1129,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 	shutter := max(scene.camera.shutter, 0)
 	default_inst := [1]Instance{{transform = linalg.MATRIX4F32_IDENTITY}}
 	run_insts := insts if len(insts) > 0 else default_inst[:]
+	base_lin := linear(d.material.color)
 	for inst in run_insts {
 		M := d.model * inst.transform if len(insts) > 0 else d.model
 		m_scale := mat_scale(M)
@@ -1211,13 +1222,10 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 		}
 		append(&exp.geos, Geometry{first_vertex = first_v, vertex_count = u32(len(exp.vertices)) - first_v, first_index = first_i, index_count = u32(len(exp.indices)) - first_i, mode = .Sprites, sprite_table = first_row, radius = r_max})
 		// Unlit, always blended (each particle's own opacity) or added.
-		mat := d.material
+		mat := instance_material(d.material, base_lin, inst)
 		mat.mode = .Sprites
 		mat.flags += {.Basic, .Transparent}
 		mat.flags -= {.Vertex_Colors}
-		if len(insts) > 0 && (inst.has_color || inst.color != {}) {
-			mat.color = linear_to_srgb_vec3(linear(mat.color) * linear(inst.color))
-		}
 		append(draws, Draw{geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos) - 1), model = linalg.MATRIX4F32_IDENTITY, material = mat})
 	}
 }
@@ -1324,11 +1332,8 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 				dyn.first_vertex, dyn.first_index = first_v, first_i
 				dyn.skinned, dyn.morph_targets, dyn.radius = false, 0, r_max
 				append(&exp.geos, dyn)
-				mat := d.material
+				mat := instance_material(d.material, base_lin, inst)
 				mat.mode = .Curves
-				if len(insts) > 0 && (inst.has_color || inst.color != {}) {
-					mat.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
-				}
 				opened_set(out, len(out.draws), instance_opened(d.model, d_opened, opened_insts, k, inst.transform if len(insts) > 0 else 1))
 				append(&out.draws, Draw{geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos) - 1), model = M, material = mat})
 			}
@@ -1419,9 +1424,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 				for inst, k in insts {
 					idraw := d
 					idraw.model = d.model * inst.transform
-					if inst.has_color || inst.color != {} {
-						idraw.material.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
-					}
+					idraw.material = instance_material(d.material, base_lin, inst)
 					ei := len(out.draws)
 					append(&out.draws, idraw)
 					table_grow(&out.draw_instance_ids, ei + 1)
@@ -1588,12 +1591,9 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 				index_count  = i_count,
 				radius       = r_max,
 			})
-			mat := d.material
+			mat := instance_material(d.material, base_lin, inst)
 			mat.mode = .Triangles
 			mat.side = .Double
-			if len(insts) > 0 && (inst.has_color || inst.color != {}) {
-				mat.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
-			}
 			// Made in world space: its opened model takes the world to where
 			// it was.
 			if opened := instance_opened(d.model, d_opened, opened_insts, k, inst.transform if len(insts) > 0 else 1); opened != {} {
@@ -1611,6 +1611,20 @@ opened_set :: proc(out: ^Scene, ei: int, opened: Mat4) {
 	if opened != {} {
 		scene_set_draw_opened(out, ei, opened)
 	}
+}
+
+// `m` as instance `inst` has it (`Instance`'s colour and emissive);
+// `base_lin` is `m.color` in linear light.
+@(private = "file")
+instance_material :: #force_inline proc "contextless" (m: Material, base_lin: Vec3, inst: Instance) -> Material {
+	out := m
+	if inst.has_color || inst.color != {} {
+		out.color = linear_to_srgb_vec3(base_lin * linear(inst.color))
+	}
+	if inst.has_emissive || inst.emissive != {} {
+		out.emissive = inst.emissive
+	}
+	return out
 }
 
 // Instance `k`'s model at the shutter's opening (zero: none): the draw's
