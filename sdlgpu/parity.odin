@@ -1924,13 +1924,47 @@ external_check :: proc(g: ^GPU) -> (err: string) {
 	texture_set_external(g, &externals, external_id, tex)
 	bound := frame(g, &a, &externals, external_id)
 	defer delete(bound)
+	// The same values as half floats.
+	halves := make([][4]f16, TW * TH)
+	defer delete(halves)
+	for &h, i in halves {
+		h = {f16(f32(px[i * 4]) / 255), f16(f32(px[i * 4 + 1]) / 255), f16(f32(px[i * 4 + 2]) / 255), f16(f32(px[i * 4 + 3]) / 255)}
+	}
+	half_tex := sdl.CreateGPUTexture(g.device, {type = .D2, format = .R16G16B16A16_FLOAT, usage = {.SAMPLER}, width = TW, height = TH, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
+	if half_tex == nil {
+		return "external: no RGBA16F GPU texture"
+	}
+	defer sdl.ReleaseGPUTexture(g.device, half_tex)
+	half_bytes := slice.to_bytes(halves)
+	transfer = sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = u32(len(half_bytes))})
+	mapped = sdl.MapGPUTransferBuffer(g.device, transfer, false)
+	copy(([^]u8)(mapped)[:len(half_bytes)], half_bytes)
+	sdl.UnmapGPUTransferBuffer(g.device, transfer)
+	cmd = sdl.AcquireGPUCommandBuffer(g.device)
+	pass = sdl.BeginGPUCopyPass(cmd)
+	sdl.UploadToGPUTexture(pass, {transfer_buffer = transfer, pixels_per_row = TW, rows_per_layer = TH}, {texture = half_tex, w = TW, h = TH, d = 1}, false)
+	sdl.EndGPUCopyPass(pass)
+	_ = sdl.SubmitGPUCommandBuffer(cmd)
+	sdl.ReleaseGPUTransferBuffer(g.device, transfer)
+	texture_set_external(g, &externals, external_id, half_tex)
+	bound_halves := frame(g, &a, &externals, external_id)
+	defer delete(bound_halves)
 	texture_set_external(g, &externals, external_id, nil)
+	worst := 0
+	for b, i in bound_halves {
+		worst = max(worst, abs(int(b) - int(image[i])))
+	}
+	if len(bound_halves) != len(image) {
+		worst = 256
+	}
 
 	switch {
 	case bytes_differ(image, plain) == 0:
 		return "external: the image draws as no map"
 	case bytes_differ(bound, image) != 0:
 		return fmt.tprintf("external: %d bytes differ from the uploaded image's frame", bytes_differ(bound, image))
+	case worst > 1:
+		return fmt.tprintf("external: bound as RGBA16F, a byte %d off the uploaded image's frame", worst)
 	case bytes_differ(unbound, plain) != 0:
 		return fmt.tprintf("external: unbound, %d bytes differ from no map", bytes_differ(unbound, plain))
 	case bytes_differ(stale, plain) != 0:

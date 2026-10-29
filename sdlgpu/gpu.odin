@@ -786,8 +786,9 @@ destroy :: proc(g: ^GPU) {
 // Binds the host's GPU texture to an external texture of `textures`
 // (`o3d.texture_add_external`) for the renders that follow, until bound
 // again: a video's frame, set before each render that draws it. It is
-// sampled as an image is (RGBA, sRGB-encoded bytes in a UNORM format, not an
-// _SRGB one), from the same device with `.SAMPLER` usage, at its own mip
+// sampled as an image is (RGBA, sRGB-encoded values in a UNORM format, not
+// an _SRGB one, or the same values in a float one such as RGBA16F, past 1
+// as they are), from the same device with `.SAMPLER` usage, at its own mip
 // levels; the host keeps it alive while bound and unbinds it (nil, then
 // sampled white) before releasing it. A binding for another table (its ids
 // reused) is not used.

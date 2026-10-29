@@ -130,10 +130,12 @@ Software :: struct {
 	motion:        Motion_Tables,
 }
 
-// An external texture's pixels for the software renderer: RGBA8 (sRGB
-// bytes, as an image's), rows from the top, the host's.
+// An external texture's pixels for the software renderer, rows from the
+// top, the host's: RGBA8 (sRGB bytes, as an image's), or the same values as
+// half floats (`halves`, unclamped).
 Software_External :: struct {
 	pixels:        [][4]u8,
+	halves:        [][4]f16,
 	width, height: int,
 }
 
@@ -181,20 +183,30 @@ software_destroy :: proc(s: ^Software) {
 }
 
 // Binds the host's pixels (`width x height` RGBA8, rows from the top, as
-// `texture_add` takes them) to an external texture (`texture_add_external`)
-// for the software renders that follow, until bound again: what
+// `texture_add` takes them; with `halves`, RGBA16F: four little-endian
+// half floats a pixel holding the same values, unclamped, as an RGBA16F GPU
+// texture does) to an external texture (`texture_add_external`) for the
+// software renders that follow, until bound again: what
 // `o3d_sdlgpu.texture_set_external` binds on the GPU, read as it reads an
 // unmipped one (bilinear at its level 0). The host keeps them alive while
 // bound; nil (or too few bytes) unbinds it, then sampled white.
-software_set_external :: proc(s: ^Software, id: Texture_Id, pixels: []u8, width, height: int) {
+software_set_external :: proc(s: ^Software, id: Texture_Id, pixels: []u8, width, height: int, halves := false) {
 	if id == 0 {
 		return
 	}
 	if int(id) > len(s.externals) {
 		resize(&s.externals, int(id))
 	}
-	ok := width > 0 && height > 0 && len(pixels) >= width * height * 4
-	s.externals[id - 1] = {slice.reinterpret([][4]u8, pixels[:width * height * 4]), width, height} if ok else {}
+	size := width * height * (8 if halves else 4)
+	ok := width > 0 && height > 0 && len(pixels) >= size
+	switch {
+	case !ok:
+		s.externals[id - 1] = {}
+	case halves:
+		s.externals[id - 1] = {halves = slice.reinterpret([][4]f16, pixels[:size]), width = width, height = height}
+	case:
+		s.externals[id - 1] = {pixels = slice.reinterpret([][4]u8, pixels[:size]), width = width, height = height}
+	}
 }
 
 // A triangle ready to draw: screen positions (x, y, depth) with 1/w,

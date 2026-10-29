@@ -2239,7 +2239,8 @@ test_premultiplied_color_map :: proc(t: ^testing.T) {
 }
 
 // The host's pixels bound to an external texture (software_set_external)
-// draw as the same image uploaded; unbound, as no map.
+// draw as the same image uploaded, as bytes or as the same values in half
+// floats; unbound, as no map.
 @(test)
 test_software_external :: proc(t: ^testing.T) {
 	g: Geometries
@@ -2278,10 +2279,21 @@ test_software_external :: proc(t: ^testing.T) {
 	unbound := frame(&s, &g, &externals, external_id)
 	software_set_external(&s, external_id, px[:], TW, TW)
 	bound := frame(&s, &g, &externals, external_id)
+	halves: [TW * TW][4]f16
+	for &h, i in halves {
+		h = {f16(f32(px[i * 4]) / 255), f16(f32(px[i * 4 + 1]) / 255), f16(f32(px[i * 4 + 2]) / 255), f16(f32(px[i * 4 + 3]) / 255)}
+	}
+	software_set_external(&s, external_id, slice.to_bytes(halves[:]), TW, TW, halves = true)
+	bound_halves := frame(&s, &g, &externals, external_id)
 	software_set_external(&s, external_id, nil, 0, 0)
 	unbound_again := frame(&s, &g, &externals, external_id)
 	testing.expect(t, !slice.equal(image, plain), "the image draws")
 	testing.expect(t, slice.equal(bound, image), "bound: as the image")
+	worst := 0
+	for b, i in bound_halves {
+		worst = max(worst, abs(int(b) - int(image[i])))
+	}
+	testing.expectf(t, worst <= 1, "bound as halves: as the image (worst byte %d off)", worst)
 	testing.expect(t, slice.equal(unbound, plain) && slice.equal(unbound_again, plain), "unbound: as no map")
 }
 

@@ -1047,7 +1047,7 @@ sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32) -> [
 		return 1
 	}
 	if ext, ok := bound_external(maps.s, maps.textures, maps.ids[channel]); ok {
-		return sample_mip(ext.pixels, ext.width, ext.height, {uv.x, 1 - uv.y})
+		return sample_external(ext, {uv.x, 1 - uv.y})
 	}
 	return sample_lod(maps.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = false)
 }
@@ -1150,11 +1150,20 @@ inside :: #force_inline proc "contextless" (t: Tri, p: Vec2, area: f32) -> bool 
 // renders (`software_set_external`).
 @(private = "file")
 bound_external :: #force_inline proc "contextless" (s: ^Software, textures: ^Textures, id: Texture_Id) -> (Software_External, bool) {
-	if id == 0 || int(id) > len(s.externals) || s.externals[id - 1].pixels == nil {
+	if id == 0 || int(id) > len(s.externals) || (s.externals[id - 1].pixels == nil && s.externals[id - 1].halves == nil) {
 		return {}, false
 	}
 	tex, ok := texture_get(textures, id)
 	return s.externals[id - 1], ok && tex.external
+}
+
+// An external texture's pixels at `uv`, bilinear at their level 0.
+@(private = "file")
+sample_external :: #force_inline proc "contextless" (ext: Software_External, uv: Vec2) -> Vec4 {
+	if ext.halves != nil {
+		return sample_mip_hdr(ext.halves, ext.width, ext.height, uv)
+	}
+	return sample_mip(ext.pixels, ext.width, ext.height, uv)
 }
 
 // A map at `uv` as `sample` reads it; an external texture from the pixels
@@ -1163,7 +1172,7 @@ bound_external :: #force_inline proc "contextless" (s: ^Software, textures: ^Tex
 @(private = "file")
 sample_map :: #force_inline proc "contextless" (job: ^Frame_Job, id: Texture_Id, uv, duv_dx, duv_dy: Vec2) -> Vec4 {
 	if ext, ok := bound_external(job.s, job.textures, id); ok {
-		return sample_mip(ext.pixels, ext.width, ext.height, uv)
+		return sample_external(ext, uv)
 	}
 	return sample(job.textures, id, uv, duv_dx, duv_dy)
 }
@@ -1172,7 +1181,7 @@ sample_map :: #force_inline proc "contextless" (job: ^Frame_Job, id: Texture_Id,
 @(private = "file")
 sample_map_top :: #force_inline proc "contextless" (job: ^Frame_Job, id: Texture_Id, uv: Vec2) -> Vec4 {
 	if ext, ok := bound_external(job.s, job.textures, id); ok {
-		return sample_mip(ext.pixels, ext.width, ext.height, uv)
+		return sample_external(ext, uv)
 	}
 	return sample_top(job.textures, id, uv)
 }
