@@ -14,7 +14,7 @@ colour one traced path, plus a hidden `silhouette` (all of Oxa as one
 outline with its hole) to extrude, morph or collide.
 
 MIT licensed ([LICENSE](LICENSE)); what it carries (oksl, ocurves,
-odecs' image package, SDL 3, three.js's models, Odin's
+oicut's image package, SDL 3, three.js's models, Odin's
 packages) is in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -406,10 +406,10 @@ pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &t
 ```
 
 o3d imports oksl as `deps:oksl`, ocurves' core-only curves package as
-`deps:ocurves` and odecs' image package (texture decoding, PNG writing)
-as `deps:odecs/image`: clone [oksl](https://github.com/defnotmid/oksl),
+`deps:ocurves` and oicut's image package (texture decoding, PNG writing)
+as `deps:oicut/image`: clone [oksl](https://github.com/defnotmid/oksl),
 [ocurves](https://github.com/defnotmid/ocurves) and
-[odecs](https://github.com/defnotmid/odecs) next to o3d, and builds pass
+[oicut](https://github.com/defnotmid/oicut) next to o3d, and builds pass
 `-collection:deps=..` (the directory holding them). `shaders/build.sh`
 includes ocurves' `curves.slang` from there too, and records the curves
 format it reads (`curves.FORMAT`) in `sdlgpu/curves_format.odin`:
@@ -642,7 +642,7 @@ garbage.
   heavy, so a host calls it at load (a render that meets a texture without
   them makes them then, in frame time); `texture_environment` looks them up.
   An HDR environment or background (a Radiance `.hdr` through
-  `texture_decode` / `texture_load`, by odecs, or `texture_add_hdr` from
+  `texture_decode` / `texture_load`, by oicut, or `texture_add_hdr` from
   linear floats) keeps its range: its texels are linear half floats
   (`Textures.hdr_texels`, `Texture.hdr`), its mipmaps and derived maps are
   made in float, both renderers read it linear (RGBA16F on the GPU), so a

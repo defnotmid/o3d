@@ -13,7 +13,7 @@ package o3d_gpu_check
 
 import "core:fmt"
 import "core:os"
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
 import gpu "../../sdlgpu"
 

@@ -1345,7 +1345,7 @@ test_alpha_map_blends :: proc(t: ^testing.T) {
 	testing.expectf(t, c[0] > 240 && c[1] < 16 && c[2] < 16, "the red plane behind shows through: %v", c)
 }
 
-// HDR textures: a Radiance file decodes (by odecs) to linear half floats
+// HDR textures: a Radiance file decodes (by oicut) to linear half floats
 // past 1, their mipmaps average in float, an environment's radiance and
 // irradiance keep values past 1, and sampling reads them linear.
 @(test)

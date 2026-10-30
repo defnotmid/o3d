@@ -4,7 +4,7 @@ import "core:math"
 import "core:math/linalg"
 import "core:mem"
 import "core:os"
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
 // Textures: RGBA8 images (sRGB-encoded colour) or HDR ones (linear,
 // half floats) with their mipmap chains, made once and referred to by id.
@@ -193,7 +193,7 @@ texture_add_external :: proc(t: ^Textures, width, height: int) -> Texture_Id {
 }
 
 // Decodes an image in memory (PNG, JPEG, GIF, BMP, TGA, QOI or WebP, by
-// odecs' image package; an animation's first frame; Radiance HDR as an HDR
+// oicut's image package; an animation's first frame; Radiance HDR as an HDR
 // texture) into `t`.
 texture_decode :: proc(t: ^Textures, data: []u8) -> (Texture_Id, bool) {
 	info, err := image.info(data)

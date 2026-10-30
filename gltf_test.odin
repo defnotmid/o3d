@@ -8,7 +8,7 @@ import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:testing"
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
 // Builds a self-contained glTF 2.0 JSON (with embedded base64 binary buffer)
 // containing:
