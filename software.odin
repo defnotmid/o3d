@@ -990,7 +990,9 @@ emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, d
 // Runs `work(data, i, worker)` for every i in 0 ..< count: on the caller
 // (worker 0) and up to a pool thread per item (worker 1 + its task), each
 // claiming the next item until none is left; the caller waits for the
-// tasks to finish (they may start after the items ran out).
+// tasks to finish (they may start after the items ran out), then takes
+// them off the pool's done list, which would otherwise keep every task
+// of every frame (the caller's own done tasks stay).
 @(private)
 parallel :: proc(pool: ^thread.Pool, count: int, data: rawptr, work: proc(data: rawptr, i, worker: int)) {
 	Parallel :: struct {
@@ -1029,6 +1031,21 @@ parallel :: proc(pool: ^thread.Pool, count: int, data: rawptr, work: proc(data: 
 	claim(&p, 0)
 	for sync.atomic_load(&p.running) > 0 {
 		thread.yield()
+	}
+	// A task joins the done list just after it returns: the newest are ours.
+	for left := helpers; left > 0; {
+		sync.lock(&pool.mutex)
+		for i := len(pool.tasks_done) - 1; i >= 0 && left > 0; i -= 1 {
+			if pool.tasks_done[i].data == rawptr(&p) {
+				ordered_remove(&pool.tasks_done, i)
+				sync.atomic_sub(&pool.num_done, 1)
+				left -= 1
+			}
+		}
+		sync.unlock(&pool.mutex)
+		if left > 0 {
+			thread.yield()
+		}
 	}
 }
 

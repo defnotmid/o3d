@@ -167,6 +167,7 @@ test_software_pool :: proc(t: ^testing.T) {
 			differ += 1 if got[i] != want[i] else 0
 		}
 		testing.expectf(t, differ == 0, "%d bytes differ", differ)
+		testing.expectf(t, thread.pool_is_empty(&pool), "%d tasks left done on the pool", thread.pool_num_done(&pool))
 	}
 }
 
