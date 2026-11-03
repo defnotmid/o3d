@@ -1,7 +1,6 @@
 package o3d
 
-import "core:bytes"
-import "core:compress/zlib"
+import "core:compress/deflate"
 import "core:strings"
 
 // A flat ZIP reader for the formats that are archives (3MF, USDZ): the
@@ -146,12 +145,11 @@ zip_extract :: proc(archive: []u8, entries: []Zip_Entry, path: string) -> (data:
 			if e.uncomp_size == 0 {
 				return nil, true
 			}
-			buf: bytes.Buffer
-			buf.buf = make([dynamic]u8, 0, int(e.uncomp_size), context.temp_allocator)
-			if zlib.inflate_from_byte_array_raw(comp, &buf, expected_output_size = int(e.uncomp_size)) != nil {
+			out := make([dynamic]u8, 0, int(e.uncomp_size), context.temp_allocator)
+			if deflate.inflate_raw(&out, comp, int(e.uncomp_size), allocator = context.temp_allocator) != nil {
 				return nil, false
 			}
-			return buf.buf[:], true
+			return out[:], true
 		case:
 			return nil, false
 		}

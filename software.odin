@@ -1024,7 +1024,7 @@ parallel :: proc(pool: ^thread.Pool, count: int, data: rawptr, work: proc(data: 
 	}
 	p.running = max(helpers, 0)
 	for i in 0 ..< helpers {
-		thread.pool_add_task(pool, context.allocator, task, &p, i)
+		thread.pool_add_task(pool, context.allocator, task, rawptr(&p), i) // waited for below
 	}
 	claim(&p, 0)
 	for sync.atomic_load(&p.running) > 0 {
