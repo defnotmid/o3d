@@ -655,6 +655,9 @@ pose_nodes :: proc(m: ^Model, p: ^Model_Pose, transform: Mat4, anim: int, time: 
 				}
 				continue
 			}
+			if m.nodes.has_matrix[ch.node] && !p.dirty[ch.node] {
+				p.translation[ch.node], p.rotation[ch.node], p.scale[ch.node] = trs_of(m.nodes.local[ch.node])
+			}
 			v := sample_channel(m, ch, t)
 			switch ch.path {
 			case .Translation:
@@ -1359,7 +1362,7 @@ build_skins :: proc(doc: ^Gltf_Document, m: ^Model, node_map: []i32, floats: ^[d
 		joints := doc.node_lists[gs.joints.first:][:gs.joints.count]
 		jcount := min(len(joints), MAX_JOINTS)
 		ibm_acc := gs.inverse_bind_matrices
-		has_ibm := ibm_acc >= 0 && doc.accessors[ibm_acc].count >= jcount && budget_take(&doc.budget, .Gltf_Values, jcount * 16)
+		has_ibm := ibm_acc >= 0 && doc.accessors[ibm_acc].type == .Mat4 && doc.accessors[ibm_acc].count >= jcount && budget_take(&doc.budget, .Gltf_Values, jcount * 16)
 		if has_ibm {
 			unpack_floats_to(doc, ibm_acc, floats, jcount * 16)
 		}

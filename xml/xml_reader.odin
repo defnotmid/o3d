@@ -1,12 +1,13 @@
 // core:encoding/xml from Odin dev-2026-11a: its tokenizer.odin and
-// xml_reader.odin, unchanged but for this package's name and the string
-// arena's setup in parse_bytes (out of band from its block size, which is
-// rounded to its minimum alignment). dev-2026-11 keeps each element's
-// attributes in that arena, whose blocks (max(256, len(data) / 4) bytes)
-// refused anything bigger yet under its 6,554-byte out-of-band size, and the
-// failed append went unchecked: in a file under 2 KB an element kept its
-// first 8 attributes. Delete this copy, and import core:encoding/xml again,
-// once Odin's has the fix.
+// xml_reader.odin, unchanged but for this package's name and two fixes in
+// parse_bytes. The string arena's setup (out of band from its block size,
+// which is rounded to its minimum alignment): dev-2026-11 keeps each
+// element's attributes in that arena, whose blocks (max(256, len(data) / 4)
+// bytes) refused anything bigger yet under its 6,554-byte out-of-band size,
+// and the failed append went unchecked: in a file under 2 KB an element kept
+// its first 8 attributes. And `<![` that does not start CDATA is an error:
+// Odin's unreads it and reads it again for ever, its memory growing. Delete
+// this copy, and import core:encoding/xml again, once Odin's has both.
 package o3d_xml
 /*
 	An XML 1.0 / 1.1 parser
@@ -330,6 +331,11 @@ parse_bytes :: proc(data: []u8, options := DEFAULT_OPTIONS, path := "", error_ha
 
 				case .Open_Bracket:
 					// This could be a CDATA tag part of a tag's body. Unread the `<![`
+					// (anything else would come back here for ever).
+					if !strings.has_prefix(string(t.src[t.offset - 3:]), CDATA_START) {
+						error(t, t.offset, "Unexpected Token after <!: %#v", next)
+						return doc, .Invalid_Token
+					}
 					t.offset -= 3
 					t.read_offset = t.offset
 

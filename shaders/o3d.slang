@@ -7,8 +7,8 @@
 // set 3.
 //
 // Exact shapes (curve.odin) draw with fs_curves, which takes coverage from
-// their curves by ovg's curves.slang (each pixel's exact covered area), as raster.odin
-// does with ovg's curves package.
+// their curves by ocurves' curves.slang (each pixel's exact covered area), as raster.odin
+// does with ocurves' curves package.
 import common;
 #include "curves.slang"
 
@@ -535,7 +535,7 @@ float3 shade(float3 base, float roughness_in, float metalness, float3 world, flo
             }
             if (l.kind == LIGHT_SPOT) {
                 float cos_angle = dot(ldir, l.ground.xyz);
-                float denom = max(l.ground.w - l.color.w, 1e-6);
+                float denom = max(l.ground.w - l.color.w, 1e-5);
                 float spot = saturate((cos_angle - l.color.w) / denom);
                 falloff *= spot * spot * (3 - 2 * spot);
             }
@@ -835,7 +835,7 @@ float4 smeared_map(LaneUv at, float4 motion, uint flags) {
 // TRANSMIT: whether the entry reads frameMap, the transmission snapshot or
 // the reflection (fs_sprite has its depth there instead). `smear`: a
 // smeared particle's (SpriteRow.motion).
-float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1), float4 smear = float4(0)) {
+float4 surface<let TRANSMIT : bool>(VS_Out i, float4 tint = float4(1), float4 smear = float4(0)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
     float a = material.color.a * saturate(tint.a);
@@ -936,12 +936,16 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
             ly.thickness *= read_layer(LAYER_THICKNESS, at).g;
         }
         float3 n = normalize(i.normal);
+        // The triangle's normal, facing the eye (screen derivatives run with y
+        // down). A two-sided surface's normal turns to this side: a smooth normal
+        // can lean away from the eye at a silhouette and still be on the eye's
+        // side of its triangle.
+        float3 face = cross(dp_dx, dp_dy);
+        if (dot(face, lighting.eye.xyz - i.world) < 0) {
+            face = -face;
+        }
         if ((flags & FLAG_FLAT_SHADING) != 0) {
-            n = normalize(cross(dp_dx, dp_dy));
-            // Screen derivatives run with y down: face the eye.
-            if (dot(n, lighting.eye.xyz - i.world) < 0) {
-                n = -n;
-            }
+            n = normalize(face);
         }
         float4 shadows = float4(1);
         if ((flags & FLAG_RECEIVE_SHADOW) != 0) {
@@ -949,7 +953,7 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
                 shadows[si] = shadow_factor(si, i.world, n);
             }
         }
-        if ((flags & FLAG_TWO_SIDED) != 0 && !front) {
+        if ((flags & FLAG_TWO_SIDED) != 0 && dot(n, face) < 0) {
             n = -n;
         }
         // The coat's normal: the surface's before its normal map, or the
@@ -1009,8 +1013,8 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, bool front, float4 tint = float4(1
 }
 
 [shader("fragment")]
-float4 fs_main(VS_Out i, bool front : SV_IsFrontFace) : SV_Target {
-    return surface<true>(i, front);
+float4 fs_main(VS_Out i) : SV_Target {
+    return surface<true>(i);
 }
 
 // The mirror's pass: the light, and how far the mirror's ray runs past the
@@ -1031,9 +1035,9 @@ struct Mirror_Out {
 };
 
 [shader("fragment")]
-Mirror_Out fs_mirror(VS_Out i, bool front : SV_IsFrontFace) {
+Mirror_Out fs_mirror(VS_Out i) {
     Mirror_Out o;
-    o.color = surface<true>(i, front);
+    o.color = surface<true>(i);
     o.run = mirror_run_of(i.world, o.color);
     return o;
 }
@@ -1078,7 +1082,7 @@ float sprite_visibility(float4 probe) {
 // probe's disc unhidden and by how far in front of the frame's depth it is
 // (soft particles).
 [shader("fragment")]
-float4 fs_sprite(VS_Curves_Out i, bool front : SV_IsFrontFace) : SV_Target {
+float4 fs_sprite(VS_Curves_Out i) : SV_Target {
     SpriteRow r = spriteRows[material.curve_table + i.quad];
     float4 row = r.color;
     if (r.probe.w > 0) {
@@ -1089,7 +1093,7 @@ float4 fs_sprite(VS_Curves_Out i, bool front : SV_IsFrontFace) : SV_Target {
         float behind = view_depth(sceneDepth.SampleLevel(uv, 0));
         row.a *= saturate((behind - view_depth(i.position.z)) / material.softness);
     }
-    return surface<false>(curves_surface_in(i), front, row, r.motion);
+    return surface<false>(curves_surface_in(i), row, r.motion);
 }
 
 // Sample positions in a pixel (the standard 4x MSAA pattern, software.odin's
@@ -1138,8 +1142,8 @@ struct Curves_Out {
 // of the 2x2 quad, as the software renderer's) and taken before any
 // discard.
 [shader("fragment")]
-Curves_Out fs_curves(VS_Curves_Out i, bool front : SV_IsFrontFace) {
-    return curves_out(i, front);
+Curves_Out fs_curves(VS_Curves_Out i) {
+    return curves_out(i);
 }
 
 struct Curves_Mirror_Out {
@@ -1150,8 +1154,8 @@ struct Curves_Mirror_Out {
 
 // An exact shape in the mirror's pass (fs_mirror's runs).
 [shader("fragment")]
-Curves_Mirror_Out fs_curves_mirror(VS_Curves_Out i, bool front : SV_IsFrontFace) {
-    Curves_Out c = curves_out(i, front);
+Curves_Mirror_Out fs_curves_mirror(VS_Curves_Out i) {
+    Curves_Out c = curves_out(i);
     Curves_Mirror_Out o;
     o.color = c.color;
     o.mask = c.mask;
@@ -1159,13 +1163,13 @@ Curves_Mirror_Out fs_curves_mirror(VS_Curves_Out i, bool front : SV_IsFrontFace)
     return o;
 }
 
-Curves_Out curves_out(VS_Curves_Out i, bool front) {
+Curves_Out curves_out(VS_Curves_Out i) {
     float2 dx = fine_ddx(i.uv1);
     float2 dy = fine_ddy(i.uv1);
     uint entry = curveWords[material.curve_table + i.quad];
     uint s = entry & ~CURVE_EVEN_ODD;
     Curves_Fill_Rule rule = curve_entry_rule(entry);
-    float4 color = surface<true>(curves_surface_in(i), front);
+    float4 color = surface<true>(curves_surface_in(i));
     Curves_Out o;
     if ((material.flags & FLAG_BLENDED) != 0) {
         float cov = curves_coverage_affine(curveWords, s, i.uv1, dx, dy, rule);
@@ -1368,6 +1372,7 @@ Velocity_Out fs_velocity_curves(VS_Velocity_Out i) {
     if (!curves_fill_inside(curves_winding(velocityCurveWords, entry & ~CURVE_EVEN_ODD, i.uv1), curve_entry_rule(entry))) {
         discard;
     }
+    depth_mask(i.uv, i.uv1);
     return velocity_out(i.position, i.opened);
 }
 

@@ -614,9 +614,15 @@ usd_paths :: proc(l: ^Usd_Layer, value: u64, out: ^[dynamic]u32) -> (ok: bool) {
 	case .Path_List_Op:
 		c := at(l, rep)
 		take_list_op(&c, out)
+		if c.failed {
+			return false
+		}
 	case .Path_Vector:
 		c := at(l, rep)
 		take_u32s(&c, out, take_count(&c))
+		if c.failed {
+			return false
+		}
 	case:
 		return false
 	}
@@ -773,11 +779,11 @@ take_count :: proc "contextless" (c: ^Usd_Cursor) -> int {
 
 @(private = "file")
 take_u32s :: proc(c: ^Usd_Cursor, out: ^[dynamic]u32, n: int) {
-	if c.failed || n < 0 || n > (cursor_end(c) - c.pos) / 4 {
-		c.failed = true
+	clear(out)
+	if c.failed || n < 0 || n > (cursor_end(c) - c.pos) / 4 || !grow(c, out, n) {
+		fail(c)
 		return
 	}
-	resize(out, n)
 	for i in 0 ..< n {
 		out[i] = take_u32(c)
 	}
@@ -797,6 +803,9 @@ take_list_op :: proc(c: ^Usd_Cursor, out: ^[dynamic]u32) {
 			continue
 		}
 		take_u32s(c, &items, int(take_u64(c)))
+		if c.failed {
+			return
+		}
 		if bit != 1 << 3 && bit != 1 << 4 {
 			append(out, ..items[:])
 		}
@@ -928,7 +937,7 @@ read_tokens :: proc(c: ^Usd_Cursor) {
 	n := take_u64(c)
 	raw_size, packed_size := take_u64(c), take_u64(c)
 	packed := take_bytes(c, int(min(packed_size, u64(max(int)))))
-	if c.failed || raw_size > u64(len(c.l.bytes)) * 256 || n > raw_size {
+	if c.failed || raw_size > u64(len(c.l.bytes)) * 256 || n > raw_size || !budget_take_wide(&c.l.budget, .Gltf_Buffer_Bytes, i128(raw_size)) || !budget_take_wide(&c.l.budget, .Gltf_Values, i128(n)) {
 		fail(c)
 		return
 	}
@@ -1120,17 +1129,19 @@ read_specs :: proc(c: ^Usd_Cursor) {
 		return
 	}
 	l.specs = make([]Usd_Spec, n)
+	run_len := make([]u32, len(l.field_sets), context.temp_allocator)
+	acc: u32
+	#reverse for v, idx in l.field_sets {
+		acc = 0 if v == max(u32) else acc + 1
+		run_len[idx] = acc
+	}
 	for i in 0 ..< n {
 		p, fs, t := paths[i], sets[i], types[i]
 		if p < 0 || int(p) >= len(l.paths) || fs < 0 || int(fs) >= len(l.field_sets) || t <= 0 || t > i64(max(Usd_Spec_Type)) || fs > 0 && l.field_sets[fs - 1] != max(u32) || l.paths[p].spec >= 0 {
 			fail(c)
 			return
 		}
-		end := int(fs)
-		for end < len(l.field_sets) && l.field_sets[end] != max(u32) {
-			end += 1
-		}
-		l.specs[i] = {path = u32(p), fields = {u32(fs), u32(end - int(fs))}, type = Usd_Spec_Type(t)}
+		l.specs[i] = {path = u32(p), fields = {u32(fs), run_len[fs]}, type = Usd_Spec_Type(t)}
 		l.paths[p].spec = i32(i)
 	}
 }

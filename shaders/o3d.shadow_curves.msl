@@ -397,11 +397,11 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 }
 
 
-#line 1103 "o3d.slang"
+#line 1107 "o3d.slang"
 int curve_entry_rule_0(uint entry_0)
 {
 
-#line 1104
+#line 1108
     return int(entry_0 >> 31U);
 }
 
@@ -514,125 +514,125 @@ struct KernelContext_0
 };
 
 
-#line 1197
+#line 1201
 void depth_mask_0(float2 uv_2, float2 uv1_2, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1198
+#line 1202
     if(((kernelContext_0->material_0->flags_0) & 2048U) != 0U)
     {
 
-#line 1198
+#line 1202
         uint mask_slot_0;
 
 
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
-#line 1201
+#line 1205
             mask_slot_0 = 0U;
 
-#line 1201
+#line 1205
         }
         else
         {
 
-#line 1201
+#line 1205
             mask_slot_0 = 6U;
 
-#line 1201
+#line 1205
         }
 
-#line 1201
+#line 1205
         float2 raw_0;
         if((((kernelContext_0->material_0->uv_sets_0) >> mask_slot_0) & 1U) != 0U)
         {
 
-#line 1202
+#line 1206
             raw_0 = uv1_2;
 
-#line 1202
+#line 1206
         }
         else
         {
 
-#line 1202
+#line 1206
             raw_0 = uv_2;
 
-#line 1202
+#line 1206
         }
         float a_1 = kernelContext_0->material_0->color_2.w;
 
-#line 1203
+#line 1207
         float a_2;
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
             float3 _S26 = float3(raw_0, 1.0f);
 
-#line 1207
+#line 1211
             a_2 = a_1 * ((kernelContext_0->colorMap_texture_0).sample((kernelContext_0->colorMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[0U].xyz, _S26), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[1U].xyz, _S26))), level((0.0f)))).w;
 
-#line 1204
+#line 1208
         }
         else
         {
 
-#line 1204
+#line 1208
             a_2 = a_1;
 
-#line 1204
+#line 1208
         }
 
-#line 1210
+#line 1214
         if(((kernelContext_0->material_0->flags_0) & 16384U) != 0U)
         {
 
             float3 _S27 = float3(raw_0, 1.0f);
 
-#line 1213
+#line 1217
             a_2 = a_2 * ((kernelContext_0->shadowAlphaMap_texture_0).sample((kernelContext_0->shadowAlphaMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[12U].xyz, _S27), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[13U].xyz, _S27))), level((0.0f)))).y;
 
-#line 1210
+#line 1214
         }
 
-#line 1216
+#line 1220
         if(a_2 < (kernelContext_0->material_0->alpha_cutoff_0))
         {
 
-#line 1217
+#line 1221
             discard_fragment();
 
-#line 1216
+#line 1220
         }
 
-#line 1198
+#line 1202
     }
 
-#line 1220
+#line 1224
     return;
 }
 
 
-#line 1222
+#line 1226
 float shadow_depth_0(const VS_Out_0 thread* i_3, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 1222
+#line 1226
     depth_mask_0(i_3->uv_0, i_3->uv1_0, kernelContext_1);
 
     return i_3->position_0.z;
 }
 
 
-#line 1224
+#line 1228
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 1224
+#line 1228
 struct pixelInput_0
 {
     float3 world_2 [[user(TEXCOORD)]];
@@ -646,70 +646,70 @@ struct pixelInput_0
 [[fragment]] pixelOutput_0 fs_shadow_curves(pixelInput_0 _S28 [[stage_in]], float4 position_2 [[position]], Material_0 constant* material_1 [[buffer(0)]], uint device* shadowCurveWords_1 [[buffer(1)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> shadowAlphaMap_texture_1 [[texture(1)]], sampler shadowAlphaMap_sampler_1 [[sampler(1)]])
 {
 
-#line 1234
+#line 1238
     thread KernelContext_0 kernelContext_2;
 
-#line 1234
+#line 1238
     (&kernelContext_2)->material_0 = material_1;
 
-#line 1234
+#line 1238
     (&kernelContext_2)->shadowCurveWords_0 = shadowCurveWords_1;
 
-#line 1234
+#line 1238
     (&kernelContext_2)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 1234
+#line 1238
     (&kernelContext_2)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 1234
+#line 1238
     (&kernelContext_2)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
 
-#line 1234
+#line 1238
     (&kernelContext_2)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
     uint entry_1 = shadowCurveWords_1[material_1->curve_table_0 + _S28.quad_1];
     if(!curves_fill_inside_0(curves_winding_0(shadowCurveWords_1, entry_1 & 2147483647U, _S28.uv1_3), curve_entry_rule_0(entry_1)))
     {
 
-#line 1237
+#line 1241
         discard_fragment();
 
-#line 1236
+#line 1240
     }
 
-#line 1236
+#line 1240
     thread VS_Curves_Out_0 _S29;
 
-#line 1236
+#line 1240
     (&_S29)->position_1 = position_2;
 
-#line 1236
+#line 1240
     (&_S29)->world_1 = _S28.world_2;
 
-#line 1236
+#line 1240
     (&_S29)->normal_1 = _S28.normal_2;
 
-#line 1236
+#line 1240
     (&_S29)->uv_1 = _S28.uv_3;
 
-#line 1236
+#line 1240
     (&_S29)->uv1_1 = _S28.uv1_3;
 
-#line 1236
+#line 1240
     (&_S29)->quad_0 = _S28.quad_1;
 
-#line 1236
+#line 1240
     (&_S29)->color_1 = _S28.color_3;
 
-#line 1236
+#line 1240
     VS_Out_0 _S30 = curves_surface_in_0(&_S29);
 
-#line 1236
+#line 1240
     thread VS_Out_0 _S31 = _S30;
 
-#line 1236
+#line 1240
     float _S32 = shadow_depth_0(&_S31, &kernelContext_2);
 
-#line 1236
+#line 1240
     pixelOutput_0 _S33 = { _S32 };
 
 

@@ -29,7 +29,7 @@ Meshopt_Filter :: enum u8 {
 // at 0, 2, 4 or 8 bits.
 @(private)
 meshopt_decode_vertices :: proc(dst, src: []u8, count, stride: int) -> bool {
-	if stride <= 0 || stride > 256 || stride % 4 != 0 || len(dst) < count * stride {
+	if count < 0 || stride <= 0 || stride > 256 || stride % 4 != 0 || len(dst) / stride < count {
 		return false
 	}
 	tail := max(stride, 32)
@@ -114,7 +114,7 @@ meshopt_unpack :: proc "contextless" (src: []u8, at: int, out: []u8, $BITS: uint
 // `src`.
 @(private)
 meshopt_decode_triangles :: proc(dst, src: []u8, count, stride: int) -> bool {
-	if count % 3 != 0 || stride != 2 && stride != 4 || len(dst) < count * stride {
+	if count < 0 || count % 3 != 0 || stride != 2 && stride != 4 || len(dst) / stride < count {
 		return false
 	}
 	if len(src) < 1 + count / 3 + 16 || src[0] != 0xe0 && src[0] != 0xe1 {
@@ -233,7 +233,7 @@ meshopt_decode_triangles :: proc(dst, src: []u8, count, stride: int) -> bool {
 // from one of two baselines, its low bit choosing which; a 4-byte tail.
 @(private)
 meshopt_decode_indices :: proc(dst, src: []u8, count, stride: int) -> bool {
-	if stride != 2 && stride != 4 || len(dst) < count * stride {
+	if count < 0 || stride != 2 && stride != 4 || len(dst) / stride < count {
 		return false
 	}
 	if len(src) < 1 + count + 4 || src[0] != 0xd0 && src[0] != 0xd1 {
@@ -297,6 +297,9 @@ meshopt_write :: #force_inline proc "contextless" (dst: []u8, i, stride: int, v:
 // the stride suits the filter.
 @(private)
 meshopt_unfilter :: proc(data: []u8, count, stride: int, filter: Meshopt_Filter) -> bool {
+	if count < 0 || stride <= 0 || len(data) / stride < count {
+		return false
+	}
 	switch filter {
 	case .None:
 	case .Octahedral:
@@ -326,10 +329,13 @@ meshopt_unfilter :: proc(data: []u8, count, stride: int, filter: Meshopt_Filter)
 			e[qc] = i16le(meshopt_round(w * 32767))
 		}
 	case .Exponential:
+		if stride < 4 || stride % 4 != 0 {
+			return false
+		}
 		for &v in mem.slice_data_cast([]u32le, data[:count * stride]) {
 			// A 24-bit mantissa and an 8-bit exponent, both signed.
 			m := i32(u32(v) << 8) >> 8
-			e := i32(u32(v)) >> 24
+			e := max(i32(u32(v)) >> 24, -127)
 			v = u32le(transmute(u32)(transmute(f32)(u32(e + 127) << 23) * f32(m)))
 		}
 	}
@@ -346,7 +352,8 @@ meshopt_octahedral :: proc(n: $T/[]$E, count: int) {
 		t := min(z, 0)
 		x += t if x >= 0 else -t
 		y += t if y >= 0 else -t
-		s := one / math.sqrt(x * x + y * y + z * z)
+		h := math.sqrt(x * x + y * y + z * z)
+		s := one / h if h != 0 else 0
 		e[0] = E(meshopt_round(x * s))
 		e[1] = E(meshopt_round(y * s))
 		e[2] = E(meshopt_round(z * s))

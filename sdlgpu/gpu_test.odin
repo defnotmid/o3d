@@ -151,6 +151,19 @@ test_background_color_match_software :: proc(t: ^testing.T) {expect_parity(t, "b
 @(test)
 test_sky_match_software :: proc(t: ^testing.T) {expect_parity(t, "sky")}
 
+// The frame's depth map (`Scene.depth`): the GPU's matches the software
+// renderer's (`o3d.software_depth`).
+@(test)
+test_depth :: proc(t: ^testing.T) {
+	g: GPU
+	if !test_gpu(t, &g) {
+		return
+	}
+	defer destroy(&g)
+	err := depth_check(&g)
+	testing.expectf(t, err == "", "%s", err)
+}
+
 // The frame's depth as distance into the host's image, as o3d.depth_image
 // makes the software renderer's.
 @(test)

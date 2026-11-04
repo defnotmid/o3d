@@ -152,7 +152,7 @@ motion_gather :: proc(data: rawptr, y, _: int) {
 			job.out[i] = job.color[i]
 			continue
 		}
-		lx := max(math.sqrt(length2(motion_cut(job.velocity[i], job.max_blur))), 0.5)
+		lx := clamp(math.sqrt(length2(job.velocity[i])), 0.5, max(job.max_blur, 0.5))
 		ln := math.sqrt(length2(vn))
 		nx := job.nearness[i]
 		// What passes in front of the pixel, each tap its share of the
@@ -169,7 +169,7 @@ motion_gather :: proc(data: rawptr, y, _: int) {
 			py := clamp(int(math.floor(f32(y) + 0.5 + vn.y * t)), 0, h - 1)
 			j := py * w + px
 			d := math.sqrt(length2({f32(px - x), f32(py - y)}))
-			ly := max(math.sqrt(length2(motion_cut(job.velocity[j], job.max_blur))), 0.5)
+			ly := clamp(math.sqrt(length2(job.velocity[j])), 0.5, max(job.max_blur, 0.5))
 			ny := job.nearness[j]
 			front := clamp(1 - (nx - ny) / job.scale, 0, 1) // it in front of the pixel, or level
 			level := clamp(1 - (ny - nx) / job.scale, 0, 1) // it behind, or level

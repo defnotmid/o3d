@@ -24,6 +24,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, job.height)
 	// The second part of a frame (after its snapshot) draws over the first.
+	bg_filled := job.keep || job.bg_tex == 0
 	if !job.keep {
 		slice.fill(s.depth[y0 * width * SAMPLES:y1 * width * SAMPLES], 0)
 		if job.runs != nil {
@@ -31,37 +32,24 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 		}
 		if job.bg_tex == 0 {
 			slice.fill(s.light[y0 * width * SAMPLES:y1 * width * SAMPLES], job.clear)
-		} else {
-			// The background first, as the GPU draws it: what is drawn then
-			// blends over it or adds to it.
-			inv_w := 2.0 / f32(width)
-			inv_h := 2.0 / f32(job.height)
-			for y in y0 ..< y1 {
-				ndc_y := 1 - (f32(y) + 0.5) * inv_h
-				// From the near plane (depth 1) to the far (0).
-				p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
-				p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
-				p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
-				p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
-				ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
-				ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
-				for x in 0 ..< width {
-					dir := linalg.normalize(ray0 + f32(x) * ray_step)
-					c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
-					slice.fill(s.light[(y * width + x) * SAMPLES:][:SAMPLES], to_halves({c.r, c.g, c.b, 1}))
-				}
-			}
 		}
 	}
 	refs := s.band_tris[s.band_start[band]:s.band_start[band + 1]]
 	for r := 0; r < len(refs); {
 		t := s.chunks[refs[r].chunk].tris[refs[r].tri] // gathered from the columns once
+		if !bg_filled && blend_of(&s.materials[t.draw]) != .Opaque {
+			fill_band_bg(job, s, width, y0, y1)
+			bg_filled = true
+		}
 		if s.materials[t.draw].shader != 0 {
 			r += draw_custom(job, &s.workers[wi], refs[r:], y0, y1)
 			continue
 		}
 		draw_standard(job, refs[r], t, y0, y1)
 		r += 1
+	}
+	if !bg_filled {
+		fill_band_bg(job, s, width, y0, y1)
 	}
 	// The pixels: their samples' light averaged, kept (the snapshot's or
 	// the reflection's level 0), or tone mapped and encoded as the frame's.
@@ -89,9 +77,52 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 		}
 		return
 	}
+	clear_u64 := transmute(u64)job.clear
+	clear_out := output(from_halves(job.clear), job.tone_mapping, job.tone_exposure)
+	px_out := slice.reinterpret([][4]u8, s.pixels)
 	for i in y0 * width ..< y1 * width {
-		out := output(pixel_light(s, i), job.tone_mapping, job.tone_exposure)
-		copy(s.pixels[i * 4:][:4], out[:])
+		px := s.light[i * SAMPLES:][:SAMPLES]
+		first := transmute(u64)px[0]
+		if transmute(u64)px[1] == first && transmute(u64)px[2] == first && transmute(u64)px[3] == first {
+			px_out[i] = clear_out if first == clear_u64 else output(from_halves(px[0]), job.tone_mapping, job.tone_exposure)
+		} else {
+			sum := from_halves(px[0]) + from_halves(px[1]) + from_halves(px[2]) + from_halves(px[3])
+			px_out[i] = output(sum * (1.0 / SAMPLES), job.tone_mapping, job.tone_exposure)
+		}
+	}
+}
+
+// Fills uncovered samples in [y0, y1) with the equirectangular background
+// (deferred until the first blended draw or band resolve so fully opaque
+// pixels skip sampling the background).
+@(private = "file")
+fill_band_bg :: proc(job: ^Frame_Job, s: ^Software, width, y0, y1: int) {
+	inv_w := 2.0 / f32(width)
+	inv_h := 2.0 / f32(job.height)
+	for y in y0 ..< y1 {
+		ndc_y := 1 - (f32(y) + 0.5) * inv_h
+		// From the near plane (depth 1) to the far (0).
+		p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
+		p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
+		p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
+		p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
+		ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
+		ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
+		for x in 0 ..< width {
+			base := (y * width + x) * SAMPLES
+			d := s.depth[base:][:SAMPLES]
+			if d[0] > 0 && d[1] > 0 && d[2] > 0 && d[3] > 0 {
+				continue
+			}
+			dir := linalg.normalize(ray0 + f32(x) * ray_step)
+			c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
+			px := to_halves({c.r, c.g, c.b, 1})
+			for k in 0 ..< SAMPLES {
+				if d[k] == 0 {
+					s.light[base + k] = px
+				}
+			}
+		}
 	}
 }
 
@@ -130,12 +161,10 @@ output :: #force_inline proc "contextless" (light: [4]f32, mode: Tone_Mapping, e
 	return {u8(math.round(linear_to_srgb(c.r) * m * 255)), u8(math.round(linear_to_srgb(c.g) * m * 255)), u8(math.round(linear_to_srgb(c.b) * m * 255)), u8(math.round(a * 255))}
 }
 
-// What a transmissive point sees behind it (`shade`'s `behind`), its
-// normal facing the eye as `shade` turns it; the layers' thickness becomes
-// the refracted ray's world length.
+// What a transmissive point sees behind it (`shade`'s `behind`) along its
+// normal; the layers' thickness becomes the refracted ray's world length.
 @(private = "file")
-behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n_in: Vec3, roughness: f32, ly: ^Shading_Layers, two_sided: bool) -> Vec4 {
-	n := -n_in if two_sided && linalg.dot(n_in, job.eye - world) < 0 else n_in
+behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n: Vec3, roughness: f32, ly: ^Shading_Layers) -> Vec4 {
 	uv, lod, distance := refraction(world, n, job.eye, roughness, ly, job.view_proj, job.width)
 	ly.thickness = distance
 	if job.mirrored {
@@ -240,10 +269,10 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 		if curved {
 			words, rule = curve_entry_words(job.geos, t.curve)
 		}
-		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
-		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, size)
+		span := tri_span(t, size)
 		for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
-			for x in x_lo ..< x_hi {
+			lo, hi := row_span(span, f32(y), f32(y + 1))
+			for x in lo ..< hi {
 				c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
 				if !inside(t, c, area) {
 					continue
@@ -254,7 +283,7 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 				z := b0 * t.p[0].z + b1 * t.p[1].z + b2 * t.p[2].z
 				i := y * size + x
 				if z >= 0 && z <= 1 && z > smap[i] {
-					iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+					iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
 					if curved && !curves_inside(words, (rc[0] * b0 + rc[1] * b1 + rc[2] * b2) / iw, rule) {
 						continue
 					}
@@ -356,8 +385,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 	}
 	out_alpha := m.opacity if blend else 1
 	dz := depth_plane(t, area)
-	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
-	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	span := tri_span(t, width)
 	// The mirror's pass clips; a reflective draw reads the reflection.
 	clipping := job.clip != {}
 	reflective := .Reflection in m.flags
@@ -368,14 +396,26 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 		world[k] = (^Vec3)(&vs[k * UNTEX_FLOATS])^
 		normal[k] = (^Vec3)(&vs[k * UNTEX_FLOATS + 3])^
 	}
-	flat_n: Vec3
-	if .Flat_Shading in m.flags {
+	// The triangle's normal, facing the eye: its corners run counter-clockwise
+	// on the screen, which a mirror's pass reverses. A two-sided surface's normal
+	// turns to this side: a smooth normal can lean away from the eye at a
+	// silhouette and still be on the eye's side of its triangle.
+	face_n: Vec3
+	if m.flags & {.Flat_Shading, .Two_Sided} != {} {
 		w0 := world[0] / t.inv_w[0]
-		flat_n = linalg.normalize(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
+		face_n = linalg.normalize0(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
+		if job.mirrored {
+			face_n = -face_n
+		}
 	}
 	for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
-		for x in x_lo ..< x_hi {
+		lo, hi := row_span(span, f32(y), f32(y + 1))
+		for x in lo ..< hi {
 			covered := coverage(t, x, y, area)
+			if covered == {} {
+				continue
+			}
+			covered = depth_mask(s, width, dz, x, y, covered)
 			if covered == {} {
 				continue
 			}
@@ -384,20 +424,23 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
 			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
 			b2 := 1 - b0 - b1
-			iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+			iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
 			p := (world[0] * b0 + world[1] * b1 + world[2] * b2) / iw
 			if clipping && clipped(job, p) {
 				continue
 			}
-			n := flat_n
+			n := face_n
 			if .Flat_Shading not_in m.flags {
-				n = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
+				n = linalg.normalize0((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
 			}
 			shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
 			if receive {
 				for si in 0 ..< job.shadow_count {
 					shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
 				}
+			}
+			if .Two_Sided in m.flags && linalg.dot(n, face_n) < 0 {
+				n = -n
 			}
 			// The layers as they are, or (transmission) a copy taking the
 			// ray's length.
@@ -407,7 +450,7 @@ draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0
 			if .Transmission in m.flags {
 				local = m.layers
 				ly = &local
-				behind = behind_of(job, p, n, m.roughness, ly, .Two_Sided in m.flags)
+				behind = behind_of(job, p, n, m.roughness, ly)
 			}
 			mirror: Mirror_Light = ---
 			mp: ^Mirror_Light
@@ -440,8 +483,7 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 	s := job.s
 	width := job.width
 	dz := depth_plane(t, area)
-	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
-	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	span := tri_span(t, width)
 	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
 	world, normal: [3]Vec3
 	for k in 0 ..< 3 {
@@ -449,8 +491,13 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 		normal[k] = (^Vec3)(&vs[k * UNTEX_FLOATS + 3])^
 	}
 	for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
-		for x in x_lo ..< x_hi {
+		lo, hi := row_span(span, f32(y), f32(y + 1))
+		for x in lo ..< hi {
 			covered := coverage(t, x, y, area)
+			if covered == {} {
+				continue
+			}
+			covered = depth_mask(s, width, dz, x, y, covered)
 			if covered == {} {
 				continue
 			}
@@ -458,9 +505,9 @@ draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Mate
 			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
 			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
 			b2 := 1 - b0 - b1
-			iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+			iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
 			p := (world[0] * b0 + world[1] * b1 + world[2] * b2) / iw
-			n := linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
+			n := linalg.normalize0((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
 			mask: f32 = 1
 			for si in 0 ..< job.shadow_count {
 				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
@@ -492,10 +539,17 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 			vcolor[k] = (^Vec4)(&vs[base + STANDARD_FLOATS])^
 		}
 	}
-	flat_n: Vec3
-	if .Flat_Shading in m.flags {
+	// The triangle's normal, facing the eye: its corners run counter-clockwise
+	// on the screen, which a mirror's pass reverses. A two-sided surface's normal
+	// turns to this side: a smooth normal can lean away from the eye at a
+	// silhouette and still be on the eye's side of its triangle.
+	face_n: Vec3
+	if m.flags & {.Flat_Shading, .Two_Sided} != {} {
 		w0 := world[0] / t.inv_w[0]
-		flat_n = linalg.normalize(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
+		face_n = linalg.normalize0(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
+		if job.mirrored {
+			face_n = -face_n
+		}
 	}
 	curved := .Curves in m.flags
 	words: []u32
@@ -518,13 +572,23 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 		row.color.a *= sprite_visibility(row.probe, s.depth_map[:], s.width, s.height)
 	}
 	inv_area := 1 / area
-	x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width) &~ 1
-	x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	span := tri_span(t, width)
 	clipping := job.clip != {}
 	reflective := .Reflection in m.flags
 	for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
-		for qx := x_lo; qx < x_hi; qx += 2 {
-			lanes, helpers := quad_coverage(t, qx, qy, width, y1, area)
+		lo, hi := row_span(span, f32(qy), f32(qy + 2), 2)
+		for qx := lo &~ 1; qx < hi; qx += 2 {
+			lanes: [4]Sample_Mask
+			helpers: oksl.Quad_Lanes
+			for l in 0 ..< 4 {
+				x, y := qx + l & 1, qy + l >> 1
+				if x < width && y < y1 {
+					lanes[l] = depth_mask(s, width, dz, x, y, coverage(t, x, y, area))
+				}
+				if lanes[l] == {} {
+					helpers += {l}
+				}
+			}
 			if card(helpers) == 4 {
 				continue
 			}
@@ -537,9 +601,9 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				b0 := edge(t.p[1].xy, t.p[2].xy, c) * inv_area
 				b1 := edge(t.p[2].xy, t.p[0].xy, c) * inv_area
 				b2 := 1 - b0 - b1
-				inv_iw := 1 / (b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2])
-				worlds[l] = (world[0] * b0 + world[1] * b1 + world[2] * b2) * inv_iw
+				inv_iw := 1 / max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
 				uvs[l] = (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) * inv_iw
+				worlds[l] = (world[0] * b0 + world[1] * b1 + world[2] * b2) * inv_iw
 				uv1s[l] = (uv1[0] * b0 + uv1[1] * b1 + uv1[2] * b2) * inv_iw
 				if coloured {
 					colors[l] = (vcolor[0] * b0 + vcolor[1] * b1 + vcolor[2] * b2) * inv_iw
@@ -548,7 +612,7 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 					projected[l] = (frame.to_local * Vec4{worlds[l].x, worlds[l].y, worlds[l].z, 1}).xyz * m.projection_scale
 				}
 				if l not_in helpers && .Flat_Shading not_in m.flags {
-					norms[l] = linalg.normalize((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) * inv_iw)
+					norms[l] = linalg.normalize0((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) * inv_iw)
 				}
 			}
 			for l in 0 ..< 4 {
@@ -562,7 +626,7 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				lane: Triplanar_Lane = ---
 				tl: ^Triplanar_Lane
 				if triplanar {
-					project_lane(&lane, projected, l, frame.normal_to_local * (flat_n if .Flat_Shading in m.flags else norms[l]), m.projection_sharpness)
+					project_lane(&lane, projected, l, frame.normal_to_local * (face_n if .Flat_Shading in m.flags else norms[l]), m.projection_sharpness)
 					tl = &lane
 				}
 				pm := surface(m)
@@ -639,7 +703,7 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				if .Ao_Map in m.flags {
 					ao = (read_map(job, m, tl, .Ao, m.ao_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).r - 1) * m.ao_intensity + 1
 				}
-				n := flat_n if .Flat_Shading in m.flags else norms[l]
+				n := face_n if .Flat_Shading in m.flags else norms[l]
 				shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
 				if receive {
 					for si in 0 ..< job.shadow_count {
@@ -647,7 +711,7 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 					}
 				}
 				// The layers' maps, and the coat's normal: the surface's
-				// before its normal map (facing the eye when two-sided), or
+				// before its normal map (on the eye's side when two-sided), or
 				// the coat's normal map's.
 				ly := &m.layers
 				local: Shading_Layers = ---
@@ -658,10 +722,9 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 						read_layers(job, m, tl, ly, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
 					}
 				}
-				if .Two_Sided in pm.flags && linalg.dot(n, job.eye - worlds[l]) < 0 {
+				if .Two_Sided in m.flags && linalg.dot(n, face_n) < 0 {
 					n = -n
 				}
-				pm.flags -= {.Two_Sided}
 				coat_n := n
 				if .Normal_Map in m.flags || .Clearcoat_Normal_Map in m.flags {
 					dp_dx, dp_dy := quad_deriv(worlds, l)
@@ -674,7 +737,7 @@ draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: T
 				}
 				behind: Vec4
 				if .Transmission in m.flags {
-					behind = behind_of(job, worlds[l], n, pm.roughness, ly, false)
+					behind = behind_of(job, worlds[l], n, pm.roughness, ly)
 				}
 				mirror: Mirror_Light = ---
 				mp: ^Mirror_Light
@@ -749,7 +812,7 @@ project_lane :: #force_inline proc "contextless" (at: ^Triplanar_Lane, projected
 	at.proj = {p.zy, p.xz, p.xy}
 	at.proj_dx = {dx.zy, dx.xz, dx.xy}
 	at.proj_dy = {dy.zy, dy.xz, dy.xy}
-	n := linalg.normalize(normal)
+	n := linalg.normalize0(normal)
 	w := Vec3{math.pow(abs(n.x), sharpness), math.pow(abs(n.y), sharpness), math.pow(abs(n.z), sharpness)}
 	at.weights = w / max(w.x + w.y + w.z, 1e-20)
 }
@@ -907,16 +970,11 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 	s := job.s
 	width := job.width
 	q := &w.quads
-	clear(&q.origin)
-	clear(&q.helpers)
-	clear(&q.facing)
-	clear(&q.covered)
-	clear(&q.tri)
 	draw := -1
 	taken := 0
 	for ref in refs {
 		t := s.chunks[ref.chunk].tris[ref.tri]
-		if draw >= 0 && (t.draw != draw || len(q.origin) >= QUAD_BATCH) {
+		if draw >= 0 && t.draw != draw {
 			break
 		}
 		draw = t.draw
@@ -926,10 +984,10 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 			continue
 		}
 		// Quads at even pixels: a band (BAND_ROWS even) holds whole quads.
-		x_lo := clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width) &~ 1
-		x_hi := clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+		span := tri_span(t, width)
 		for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
-			for qx := x_lo; qx < x_hi; qx += 2 {
+			lo, hi := row_span(span, f32(qy), f32(qy + 2), 2)
+			for qx := lo &~ 1; qx < hi; qx += 2 {
 				lanes, helpers := quad_coverage(t, qx, qy, width, y1, area)
 				if card(helpers) == 4 {
 					continue
@@ -939,12 +997,24 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 				append(&q.facing, t.front)
 				append(&q.covered, lanes)
 				append(&q.tri, ref)
+				if len(q.origin) >= QUAD_BATCH {
+					flush_custom_quads(job, w, draw)
+				}
 			}
 		}
 	}
+	flush_custom_quads(job, w, draw)
+	return taken
+}
+
+@(private = "file")
+flush_custom_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
+	s := job.s
+	width := job.width
+	q := &w.quads
 	nq := len(q.origin)
 	if nq == 0 {
-		return taken
+		return
 	}
 	sh := shader_get(job.shaders, s.materials[draw].shader)
 	nf := sh.varying_floats
@@ -960,7 +1030,7 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
 			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
 			b2 := 1 - b0 - b1
-			iw := b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2]
+			iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
 			j := qi * 4 + l
 			for f in 0 ..< nf {
 				q.values[f * nq * 4 + j] = (vs[f] * b0 + vs[nf + f] * b1 + vs[2 * nf + f] * b2) / iw
@@ -1009,7 +1079,11 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 			write_samples(s, width, dz, x, y, q.covered[qi][l], {c.r * k, c.g * k, c.b * k, a}, blend, nil, 0, false)
 		}
 	}
-	return taken
+	clear(&q.origin)
+	clear(&q.helpers)
+	clear(&q.facing)
+	clear(&q.covered)
+	clear(&q.tri)
 }
 
 // A ShaderMaterial draw's textures, for its sampler, and `shadowAt`'s
@@ -1050,6 +1124,64 @@ sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32) -> [
 		return sample_external(ext, {uv.x, 1 - uv.y})
 	}
 	return sample_lod(maps.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = false)
+}
+
+@(private = "file")
+Tri_Span :: struct {
+	ax, ay, slope: [3]f32,
+	kind:          [3]i8, // 1: left (dy > 0), -1: right (dy < 0), 0: horizontal
+	x_lo, x_hi:    int,
+}
+
+@(private = "file")
+tri_span :: #force_inline proc "contextless" (t: Tri, width: int) -> (s: Tri_Span) {
+	s.x_lo = clamp(int(math.floor(min(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	s.x_hi = clamp(int(math.ceil(max(t.p[0].x, t.p[1].x, t.p[2].x))), 0, width)
+	for k in 0 ..< 3 {
+		a, b := t.p[k].xy, t.p[(k + 1) % 3].xy
+		dx, dy := b.x - a.x, b.y - a.y
+		s.ax[k], s.ay[k] = a.x, a.y
+		if dy > 1e-5 {
+			s.kind[k] = 1
+			s.slope[k] = dx / dy
+		} else if dy < -1e-5 {
+			s.kind[k] = -1
+			s.slope[k] = dx / dy
+		}
+	}
+	return
+}
+
+// Pixel X range [lo, hi) a block of width `step` (1 or 2) can touch the
+// triangle in, over y in [y_min, y_max].
+@(private = "file")
+row_span :: #force_inline proc "contextless" (s: Tri_Span, y_min, y_max: f32, step: f32 = 1) -> (lo, hi: int) {
+	lo, hi = s.x_lo, s.x_hi
+	for k in 0 ..< 3 {
+		if s.kind[k] == 0 {
+			continue
+		}
+		x0 := s.ax[k] + s.slope[k] * (y_min - s.ay[k])
+		x1 := s.ax[k] + s.slope[k] * (y_max - s.ay[k])
+		if s.kind[k] > 0 {
+			lo = max(lo, int(math.floor(min(x0, x1) - step - 0.01)))
+		} else {
+			hi = min(hi, int(math.ceil(max(x0, x1) + 0.01)) + 1)
+		}
+	}
+	return
+}
+
+@(private = "file")
+depth_mask :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask) -> (passed: Sample_Mask) {
+	base := (y * width + x) * SAMPLES
+	for k in covered {
+		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
+		if z >= 0 && z <= 1 && z > s.depth[base + k] {
+			passed += {k}
+		}
+	}
+	return
 }
 
 // The samples of pixel (x, y) inside the triangle.

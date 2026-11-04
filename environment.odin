@@ -68,9 +68,37 @@ shading_background :: proc(scene: ^Scene, textures: ^Textures) -> (tex: Texture_
 // Maps a unit direction `d` to equirectangular uvs (three.js's equirectUv:
 // v = 1 at +Y zenith, v = 0 at -Y nadir).
 equirect_uv :: #force_inline proc "contextless" (d: Vec3) -> Vec2 {
-	u := math.atan2(d.z, d.x) * (0.5 / math.PI) + 0.5
-	v := math.asin(clamp(d.y, -1, 1)) * (1.0 / math.PI) + 0.5
+	u := atan2_fast(d.z, d.x) * (0.5 / math.PI) + 0.5
+	v := asin_fast(clamp(d.y, -1, 1)) * (1.0 / math.PI) + 0.5
 	return {u, v}
+}
+
+@(private = "file")
+atan2_fast :: #force_inline proc "contextless" (y, x: f32) -> f32 {
+	ax, ay := abs(x), abs(y)
+	hi := max(ax, ay)
+	if hi == 0 {
+		return 0
+	}
+	z := min(ax, ay) / hi
+	z2 := z * z
+	// A minimax fit on [0, 1]: 8e-5 radians at worst, 0.03 of a 2048-wide map's texels.
+	a := z * (0.99921392 + z2 * (-0.32117611 + z2 * (0.14626728 - 0.03898843 * z2)))
+	if ay > ax {
+		a = (math.PI * 0.5) - a
+	}
+	if x < 0 {
+		a = math.PI - a
+	}
+	return -a if y < 0 else a
+}
+
+@(private = "file")
+asin_fast :: #force_inline proc "contextless" (x: f32) -> f32 {
+	a := abs(x)
+	p := 1.5707963050 + a * (-0.2145310995 + a * (0.0879711881 + a * (-0.0451302664 + a * (0.0194851998 - 0.0043691962 * a))))
+	r := (math.PI * 0.5) - math.sqrt(max(1 - a, 0)) * p
+	return -r if x < 0 else r
 }
 
 // Maps equirectangular uvs back to a unit world direction.
@@ -120,6 +148,7 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 	} else {
 		rad_tex, irr_tex = prefilter(&t.texels, src_tex)
 	}
+	generation_take(&t.generation)
 	append(&t.list, rad_tex)
 	radiance = Texture_Id(len(t.list))
 	append(&t.list, irr_tex)

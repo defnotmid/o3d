@@ -1170,7 +1170,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 				m := (M * Vec4{p.velocity.x, p.velocity.y, p.velocity.z, 0}).xyz * shutter
 				c0 := view_proj * Vec4{w.x - m.x * 0.5, w.y - m.y * 0.5, w.z - m.z * 0.5, 1}
 				c1 := view_proj * Vec4{w.x + m.x * 0.5, w.y + m.y * 0.5, w.z + m.z * 0.5, 1}
-				if c0.w > 1e-6 && c1.w > 1e-6 {
+				if c0.w > 1e-6 && c1.w > 1e-6 && half.x > 1e-6 && half.y > 1e-6 {
 					depth := (view_proj * Vec4{w.x, w.y, w.z, 1}).w if !scene.camera.orthographic else 1
 					px := (c1.xy / c1.w - c0.xy / c0.w) * frame * 0.5
 					way := px * scale_px * depth
@@ -1211,7 +1211,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 				// Behind the camera: off the frame.
 				row.probe = {-1e6, -1e6, -1, probe_radius}
 				clip := view_proj * Vec4{w.x, w.y, w.z, 1}
-				if clip.w > 0 {
+				if clip.w > 0 && (!scene.camera.orthographic || clip.z <= clip.w) {
 					row.probe.xyz = {(clip.x / clip.w * 0.5 + 0.5) * frame.x, (0.5 - clip.y / clip.w * 0.5) * frame.y, clip.z / clip.w}
 				}
 			}
@@ -1225,7 +1225,7 @@ expand_particles :: proc(exp: ^Expanded_Draws, scene: ^Scene, d: Draw, geo: Geom
 		mat := instance_material(d.material, base_lin, inst)
 		mat.mode = .Sprites
 		mat.flags += {.Basic, .Transparent}
-		mat.flags -= {.Vertex_Colors}
+		mat.flags -= {.Vertex_Colors, .Shadow_Only}
 		append(draws, Draw{geometry = DYNAMIC_GEO_BIT + Geometry_Id(len(exp.geos) - 1), model = linalg.MATRIX4F32_IDENTITY, material = mat})
 	}
 }
@@ -1676,9 +1676,9 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 	// plane, the projection sheared so the focus plane falls where it does
 	// through the centre.
 	o := lens * aperture
-	forward := linalg.normalize(c.target - c.position)
-	right := linalg.normalize(linalg.cross(forward, up))
-	cam_up := linalg.cross(right, forward)
+	v0 := look_at(c.position, c.target, up)
+	right := Vec3{v0[0, 0], v0[0, 1], v0[0, 2]}
+	cam_up := Vec3{v0[1, 0], v0[1, 1], v0[1, 2]}
 	shift := right * o.x + cam_up * o.y
 	view = look_at(c.position + shift, c.target + shift, up)
 	proj[0, 2] = -proj[0, 0] * o.x / c.focus
@@ -1691,7 +1691,7 @@ camera_matrices :: proc "contextless" (c: Camera, width, height: int) -> (view, 
 sprite_materials :: proc "contextless" (scene: ^Scene, geos: ^Geometries, exp: ^Expanded_Draws, materials: []Shading_Material) {
 	for g, i in scene.draws.geometry[:len(scene.draws)] {
 		if geo, ok := geometry_get_any(geos, exp, g); ok && geo.mode == .Sprites && i < len(materials) {
-			materials[i].flags = materials[i].flags + {.Sprite} - {.Reflection}
+			materials[i].flags = materials[i].flags + {.Sprite} - {.Reflection, .Shadow_Only}
 		}
 	}
 }
@@ -1759,7 +1759,7 @@ view_depth :: proc "contextless" (c: Camera, depth: f32) -> f32 {
 camera_project :: proc "contextless" (c: Camera, width, height: int, p: Vec3) -> (pixel: Vec2, depth: f32, in_front: bool) {
 	view, proj := camera_matrices(c, width, height)
 	clip := proj * view * Vec4{p.x, p.y, p.z, 1}
-	if clip.w <= 0 {
+	if clip.w <= 0 || (c.orthographic && clip.z > clip.w) {
 		return {}, 0, false
 	}
 	iw := 1 / clip.w
@@ -1890,7 +1890,7 @@ refraction :: #force_inline proc "contextless" (world, n, eye: Vec3, roughness: 
 	c := view_proj * Vec4{world.x + ray.x, world.y + ray.y, world.z + ray.z, 1}
 	w := c.w if abs(c.w) > 1e-6 else 1e-6
 	uv = linalg.clamp(c.xy / w * 0.5 + 0.5, 0, 1)
-	lod = math.log2(f32(max(width, 1))) * clamp(roughness, 0.0525, 1) * clamp(ly.ior * 2 - 2, 0, 1)
+	lod = log2_fast(f32(max(width, 1))) * clamp(roughness, 0.0525, 1) * clamp(ly.ior * 2 - 2, 0, 1)
 	return uv, lod, linalg.length(ray)
 }
 
@@ -2671,10 +2671,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 		return 1, base + emissive
 	}
 	n := n_in
-	v := linalg.normalize(eye - world)
-	if linalg.dot(n, v) < 0 && .Two_Sided in m.flags {
-		n = -n
-	}
+	v := linalg.normalize0(eye - world)
 	diffuse := base * (1 - m.metalness)
 	when LAYERED {
 		ly := layers
@@ -2690,9 +2687,6 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 		sheen, coat_l: Vec3
 	}
 	when LAYERED do if coat {
-		if linalg.dot(cn, v) < 0 && .Two_Sided in m.flags {
-			cn = -cn
-		}
 		cc = clamp(ly.clearcoat, 0, 1)
 		cr = clamp(ly.clearcoat_roughness, 0.0525, 1)
 		cnv = clamp(linalg.dot(cn, v), 1e-4, 1)
@@ -2721,9 +2715,10 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 				dist := linalg.length(d)
 				ldir = d / max(dist, 1e-6)
 				decay := l.decay if l.decay > 0 else 2
-				falloff := 1 / max(math.pow(dist, decay), 0.01)
+				dist_decay := dist * dist if decay == 2 else (dist if decay == 1 else math.pow(dist, decay))
+				falloff := 1 / max(dist_decay, 0.01)
 				if l.distance > 0 {
-					t := clamp(1 - math.pow(dist / l.distance, 4), 0, 1)
+					t := clamp(1 - pow4(dist / l.distance), 0, 1)
 					falloff *= t * t
 				}
 				if l.kind == .Spot {
@@ -2744,7 +2739,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 				toon_nl := 0.22 + 0.46 * toon_step(0.12, 0.18, raw_nl) + 0.32 * toon_step(0.50, 0.58, raw_nl)
 				spec_term := Vec3{}
 				if raw_nl > 0.12 && roughness < 0.85 {
-					h := linalg.normalize(ldir + v)
+					h := linalg.normalize0(ldir + v)
 					nh := clamp(linalg.dot(n, h), 0, 1)
 					thresh := 1.0 - (1.0 - roughness) * 0.18
 					spec_s := toon_step(thresh - 0.02, thresh + 0.02, nh) * (1.0 - roughness) * 0.55
@@ -2757,7 +2752,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 			when LAYERED do if coat {
 				// The coat by its own normal, whatever the surface's.
 				if cnl := clamp(linalg.dot(cn, ldir), 0, 1); cnl > 0 {
-					ch := linalg.normalize(ldir + v)
+					ch := linalg.normalize0(ldir + v)
 					coat_l += light * cnl * ggx(0.04, cr * cr, cnl, cnv, clamp(linalg.dot(cn, ch), 0, 1), clamp(linalg.dot(v, ch), 0, 1))
 				}
 			}
@@ -2766,7 +2761,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 				continue
 			}
 			irradiance := light * nl
-			h := linalg.normalize(ldir + v)
+			h := linalg.normalize0(ldir + v)
 			nh := clamp(linalg.dot(n, h), 0, 1)
 			vh := clamp(linalg.dot(v, h), 0, 1)
 			out_d += irradiance * diffuse / math.PI
@@ -2825,7 +2820,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 		out = out * (1 - 0.157 * max(ly.sheen.r, ly.sheen.g, ly.sheen.b)) + sheen
 	}
 	when LAYERED do if coat {
-		out = out * (1 - cc * (0.04 + 0.96 * math.pow(1 - cnv, 5))) + coat_l * cc
+		out = out * (1 - cc * (0.04 + 0.96 * pow5(1 - cnv))) + coat_l * cc
 	}
 	return
 }
@@ -2834,7 +2829,7 @@ shade_point :: #force_inline proc "contextless" (m: Surface, world, n_in, eye: V
 // GGX distribution) of reflectance `f0` and alpha (roughness squared).
 @(private = "file")
 ggx :: #force_inline proc "contextless" (f0: Vec3, alpha, nl, nv, nh, vh: f32) -> Vec3 {
-	fresnel := f0 + (1 - f0) * math.pow(1 - vh, 5)
+	fresnel := f0 + (1 - f0) * pow5(1 - vh)
 	a2 := alpha * alpha
 	gv := nl * math.sqrt(a2 + (1 - a2) * nv * nv)
 	gl := nv * math.sqrt(a2 + (1 - a2) * nl * nl)

@@ -643,6 +643,10 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	for i in indices {
 		lo, hi = min(lo, i), max(hi, i)
 	}
+	if len(indices) == 0 || int(hi) >= len(vertices) {
+		slice.zero(s.chunk_bands[ci * job.bands:][:job.bands])
+		return
+	}
 	count := int(hi - lo) + 1
 	sh := shader_get(job.shaders, m.shader) if !job.depth_only else nil
 	textured := m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite, .Vertex_Colors}) != {}
@@ -1004,7 +1008,11 @@ parallel :: proc(pool: ^thread.Pool, count: int, data: rawptr, work: proc(data: 
 		ctx:     runtime.Context,
 	}
 	claim :: proc(p: ^Parallel, worker: int) {
+		temp := context.temp_allocator
 		context = p.ctx
+		if worker > 0 {
+			context.temp_allocator = temp
+		}
 		for {
 			i := sync.atomic_add(&p.next, 1)
 			if i >= p.count {

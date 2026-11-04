@@ -670,6 +670,11 @@ upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, pass: ^sdl.GPUCopyPass
 			return .Out_Of_Memory
 		}
 		mapped := sdl.MapGPUTransferBuffer(g.device, transfer, false)
+		if mapped == nil {
+			sdl.ReleaseGPUTransferBuffer(g.device, transfer)
+			sdl.ReleaseGPUTexture(g.device, gpu_tex)
+			return .Device
+		}
 		if tex.hdr {
 			mem.copy(mapped, raw_data(textures.hdr_texels[tex.first_texel:]), int(byte_size))
 		} else {
@@ -995,11 +1000,12 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	// The frame's light blurred along its motion, then tone mapped and
 	// encoded (through its depth of field: its tables, then the gather as
 	// the output), then copied out.
+	job.post.tone.zw = {f32(g.capacity.x), f32(g.capacity.y)}
 	if job.motion {
 		record_motion_blur(g, &job.motion_tables, cmd, light, job.velocity_map, job.nearness_map, job.blurred, width, height, job.motion_params, g.capacity) or_return
 		light = job.blurred
+		job.post.tone.zw = {f32(job.blurred_size.x), f32(job.blurred_size.y)}
 	}
-	job.post.tone.zw = {f32(g.capacity.x), f32(g.capacity.y)}
 	if job.focus {
 		tiles, near, half, half_keys := job.focus_tables[0], job.focus_tables[1], job.focus_tables[2], job.focus_tables[3]
 		tile_size := [2]u32{u32(job.post.frame.z), u32(job.post.frame.w)}
@@ -1272,6 +1278,9 @@ download :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height, texel_size: u32, 
 	}
 	defer sdl.ReleaseGPUTransferBuffer(g.device, transfer)
 	cmd := sdl.AcquireGPUCommandBuffer(g.device)
+	if cmd == nil {
+		return nil, .Device
+	}
 	pass := sdl.BeginGPUCopyPass(cmd)
 	sdl.DownloadFromGPUTexture(pass, {texture = tex, w = width, h = height, d = 1}, {transfer_buffer = transfer, pixels_per_row = width, rows_per_layer = height})
 	sdl.EndGPUCopyPass(pass)
@@ -1282,6 +1291,9 @@ download :: proc(g: ^GPU, tex: ^sdl.GPUTexture, width, height, texel_size: u32, 
 	_ = sdl.WaitForGPUFences(g.device, true, &fence, 1)
 	sdl.ReleaseGPUFence(g.device, fence)
 	mapped := ([^]u8)(sdl.MapGPUTransferBuffer(g.device, transfer, false))
+	if mapped == nil {
+		return nil, .Device
+	}
 	defer sdl.UnmapGPUTransferBuffer(g.device, transfer)
 	pixels = make([]u8, int(size), allocator)
 	copy(pixels, mapped[:size])

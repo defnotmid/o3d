@@ -54,7 +54,7 @@ struct Opened_VS_natural_0
 };
 
 
-#line 1256 "o3d.slang"
+#line 1260 "o3d.slang"
 struct KernelContext_0
 {
     Draw_VS_natural_0 constant* draw_0;
@@ -62,7 +62,7 @@ struct KernelContext_0
 };
 
 
-#line 1261
+#line 1265
 struct VS_Velocity_Out_0
 {
     float4 position_2;
@@ -73,49 +73,49 @@ struct VS_Velocity_Out_0
 };
 
 
-#line 1261
+#line 1265
 [[vertex]] vs_velocity_curves_Result_0 vs_velocity_curves(vertexInput_0 _S1 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_1 [[buffer(0)]], Opened_VS_natural_0 constant* opened_3 [[buffer(1)]])
 {
 
-#line 1261
+#line 1265
     thread KernelContext_0 kernelContext_0;
 
-#line 1261
+#line 1265
     (&kernelContext_0)->draw_0 = draw_1;
 
-#line 1261
+#line 1265
     (&kernelContext_0)->opened_1 = opened_3;
 
-#line 1310
+#line 1314
     thread VS_Velocity_Out_0 o_0;
     float4 _S2 = float4(_S1.position_1, 1.0f);
 
-#line 1311
+#line 1315
     (&o_0)->position_2 = (((_S2) * (matrix<float,int(4),int(4)> (draw_1->mvp_0.data_0[int(0)][int(0)], draw_1->mvp_0.data_0[int(1)][int(0)], draw_1->mvp_0.data_0[int(2)][int(0)], draw_1->mvp_0.data_0[int(3)][int(0)], draw_1->mvp_0.data_0[int(0)][int(1)], draw_1->mvp_0.data_0[int(1)][int(1)], draw_1->mvp_0.data_0[int(2)][int(1)], draw_1->mvp_0.data_0[int(3)][int(1)], draw_1->mvp_0.data_0[int(0)][int(2)], draw_1->mvp_0.data_0[int(1)][int(2)], draw_1->mvp_0.data_0[int(2)][int(2)], draw_1->mvp_0.data_0[int(3)][int(2)], draw_1->mvp_0.data_0[int(0)][int(3)], draw_1->mvp_0.data_0[int(1)][int(3)], draw_1->mvp_0.data_0[int(2)][int(3)], draw_1->mvp_0.data_0[int(3)][int(3)]))));
     (&o_0)->opened_2 = (((_S2) * (matrix<float,int(4),int(4)> (opened_3->mvp_1.data_0[int(0)][int(0)], opened_3->mvp_1.data_0[int(1)][int(0)], opened_3->mvp_1.data_0[int(2)][int(0)], opened_3->mvp_1.data_0[int(3)][int(0)], opened_3->mvp_1.data_0[int(0)][int(1)], opened_3->mvp_1.data_0[int(1)][int(1)], opened_3->mvp_1.data_0[int(2)][int(1)], opened_3->mvp_1.data_0[int(3)][int(1)], opened_3->mvp_1.data_0[int(0)][int(2)], opened_3->mvp_1.data_0[int(1)][int(2)], opened_3->mvp_1.data_0[int(2)][int(2)], opened_3->mvp_1.data_0[int(3)][int(2)], opened_3->mvp_1.data_0[int(0)][int(3)], opened_3->mvp_1.data_0[int(1)][int(3)], opened_3->mvp_1.data_0[int(2)][int(3)], opened_3->mvp_1.data_0[int(3)][int(3)])))).xyw;
     (&o_0)->uv_2 = _S1.uv_1;
     (&o_0)->uv1_2 = _S1.uv1_1;
     (&o_0)->quad_1 = vid_0 / 4U;
 
-#line 1315
+#line 1319
     thread vs_velocity_curves_Result_0 _S3;
 
-#line 1315
+#line 1319
     (&_S3)->position_0 = o_0.position_2;
 
-#line 1315
+#line 1319
     (&_S3)->uv_0 = o_0.uv_2;
 
-#line 1315
+#line 1319
     (&_S3)->uv1_0 = o_0.uv1_2;
 
-#line 1315
+#line 1319
     (&_S3)->opened_0 = o_0.opened_2;
 
-#line 1315
+#line 1319
     (&_S3)->quad_0 = o_0.quad_1;
 
-#line 1315
+#line 1319
     return _S3;
 }
 

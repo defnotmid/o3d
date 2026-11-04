@@ -558,7 +558,7 @@ build_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 	sx, sy, sz := int(p[3]), int(p[4]), int(p[5])
 	// One face: axes u, v across it, `w` the outward axis (three.js's
 	// buildPlane: px, nx, py, ny, pz, nz).
-	face :: proc(verts: ^[dynamic]Vertex, idx: ^[dynamic]u32, u, v, w: int, udir, vdir: f32, width, height, depth: f32, gx, gy: int) {
+	face :: proc(verts: ^[dynamic]Vertex, idx: ^[dynamic]u32, u, v, w: int, udir, vdir, wdir: f32, width, height, depth: f32, gx, gy: int) {
 		base := u32(len(verts))
 		for iy in 0 ..= gy {
 			y := f32(iy) * height / f32(gy) - height / 2
@@ -567,9 +567,9 @@ build_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 				p: Vec3
 				p[u] = x * udir
 				p[v] = y * vdir
-				p[w] = depth / 2
+				p[w] = depth / 2 * wdir
 				n: Vec3
-				n[w] = 1 if depth > 0 else -1
+				n[w] = wdir
 				append(verts, Vertex{position = p, normal = n, uv = {f32(ix) / f32(gx), 1 - f32(iy) / f32(gy)}})
 			}
 		}
@@ -583,12 +583,12 @@ build_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 			}
 		}
 	}
-	face(verts, idx, 2, 1, 0, -1, -1, d, h, w, sz, sy) // +x
-	face(verts, idx, 2, 1, 0, 1, -1, d, h, -w, sz, sy) // -x
-	face(verts, idx, 0, 2, 1, 1, 1, w, d, h, sx, sz) // +y
-	face(verts, idx, 0, 2, 1, 1, -1, w, d, -h, sx, sz) // -y
-	face(verts, idx, 0, 1, 2, 1, -1, w, h, d, sx, sy) // +z
-	face(verts, idx, 0, 1, 2, -1, -1, w, h, -d, sx, sy) // -z
+	face(verts, idx, 2, 1, 0, -1, -1, 1, d, h, w, sz, sy) // +x
+	face(verts, idx, 2, 1, 0, 1, -1, -1, d, h, w, sz, sy) // -x
+	face(verts, idx, 0, 2, 1, 1, 1, 1, w, d, h, sx, sz) // +y
+	face(verts, idx, 0, 2, 1, 1, -1, -1, w, d, h, sx, sz) // -y
+	face(verts, idx, 0, 1, 2, 1, -1, 1, w, h, d, sx, sy) // +z
+	face(verts, idx, 0, 1, 2, -1, -1, -1, w, h, d, sx, sy) // -z
 }
 
 @(private = "file")
@@ -654,15 +654,19 @@ build_rounded_box :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynami
 	along :: proc "contextless" (face, n, sign: Vec3, uv_axis, flat_axis: int, r, side: f32) -> f32 {
 		arc := 2 * math.PI * r / 4
 		flat := max(side - 2 * r, 0)
+		denom := arc + flat
+		if denom <= 0 {
+			return 0
+		}
 		t := n
 		t[flat_axis] = 0
 		t = linalg.normalize0(t)
-		arc_uv := 0.5 * arc / (arc + flat)
+		arc_uv := 0.5 * arc / denom
 		arc_angle := 1 - math.acos(clamp(linalg.dot(t, face), -1, 1)) / (math.PI / 4)
 		if sign[uv_axis] > 0 {
 			return arc_angle * arc_uv
 		}
-		return flat / (arc + flat) + arc_uv + arc_uv * (1 - arc_angle)
+		return flat / denom + arc_uv + arc_uv * (1 - arc_angle)
 	}
 	X, Y, Z :: 0, 1, 2
 	for &v, i in verts {
@@ -693,8 +697,9 @@ build_circle :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32
 	append(verts, Vertex{normal = {0, 0, 1}, uv = {0.5, 0.5}})
 	for s in 0 ..= segs {
 		a := start + f32(s) / f32(segs) * length
-		pos := Vec3{r * math.cos(a), r * math.sin(a), 0}
-		append(verts, Vertex{position = pos, normal = {0, 0, 1}, uv = {(pos.x / r + 1) / 2, (pos.y / r + 1) / 2}})
+		c, sn := math.cos(a), math.sin(a)
+		pos := Vec3{r * c, r * sn, 0}
+		append(verts, Vertex{position = pos, normal = {0, 0, 1}, uv = {(c + 1) / 2, (sn + 1) / 2}})
 	}
 	for i in 1 ..= u32(segs) {
 		append(idx, i, i + 1, 0)
@@ -707,12 +712,13 @@ build_ring :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) 
 	ts, ps := int(p[2]), int(p[3])
 	start, length := p[4], p[5]
 	step := (outer - inner) / f32(ps)
+	inv_outer := 1 / outer if outer != 0 else 0
 	r := inner
 	for _ in 0 ..= ps {
 		for i in 0 ..= ts {
 			a := start + f32(i) / f32(ts) * length
 			pos := Vec3{r * math.cos(a), r * math.sin(a), 0}
-			append(verts, Vertex{position = pos, normal = {0, 0, 1}, uv = {(pos.x / outer + 1) / 2, (pos.y / outer + 1) / 2}})
+			append(verts, Vertex{position = pos, normal = {0, 0, 1}, uv = {(pos.x * inv_outer + 1) / 2, (pos.y * inv_outer + 1) / 2}})
 		}
 		r += step
 	}
@@ -750,7 +756,7 @@ build_plane :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 build_cylinder :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32) {
 	rt, rb, h := p[0], p[1], p[2]
 	rs, hs, open := int(p[3]), int(p[4]), p[5] != 0
-	slope := (rb - rt) / h
+	slope := (rb - rt) / h if h != 0 else 0
 	for iy in 0 ..= hs {
 		v := f32(iy) / f32(hs)
 		r := v * (rb - rt) + rt
@@ -758,7 +764,7 @@ build_cylinder :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u
 			u := f32(ix) / f32(rs)
 			theta := u * 2 * math.PI
 			s, c := math.sin(theta), math.cos(theta)
-			n := linalg.normalize(Vec3{s, slope, c})
+			n := linalg.normalize(Vec3{s, slope, c}) if h != 0 || rb == rt else Vec3{0, 1 if rb > rt else -1, 0}
 			append(verts, Vertex{position = {r * s, -v * h + h / 2, r * c}, normal = n, uv = {u, 1 - v}})
 		}
 	}
@@ -808,7 +814,8 @@ build_torus :: proc(p: [PARAMS]f32, verts: ^[dynamic]Vertex, idx: ^[dynamic]u32)
 			v := f32(j) / f32(rs) * 2 * math.PI
 			pos := Vec3{(R + r * math.cos(v)) * math.cos(u), (R + r * math.cos(v)) * math.sin(u), r * math.sin(v)}
 			centre := Vec3{R * math.cos(u), R * math.sin(u), 0}
-			append(verts, Vertex{position = pos, normal = linalg.normalize(pos - centre), uv = {f32(i) / f32(ts), f32(j) / f32(rs)}})
+			n := linalg.normalize(pos - centre) if r != 0 else Vec3{math.cos(v) * math.cos(u), math.cos(v) * math.sin(u), math.sin(v)}
+			append(verts, Vertex{position = pos, normal = n, uv = {f32(i) / f32(ts), f32(j) / f32(rs)}})
 		}
 	}
 	for j in 1 ..= rs {

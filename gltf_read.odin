@@ -970,11 +970,12 @@ parse_meshopt :: proc(r: ^Gltf_Reader, o: json.Object, view: i32, buffers: int, 
 	if m.buffer < 0 || m.stride <= 0 || m.stride > 256 || m.filter != .None && m.mode != .Attributes {
 		fail(r)
 	}
-	size := m.count * m.stride
-	if r.err != nil || !budget_take(&r.doc.budget, .Gltf_Buffer_Bytes, size) {
+	wide_size := i128(m.count) * i128(m.stride)
+	if r.err != nil || !budget_take_wide(&r.doc.budget, .Gltf_Buffer_Bytes, wide_size) || i128(decoded^) + wide_size + 3 > i128(max(int)) {
 		fail(r, .Limit if r.err == nil else r.err)
 		return
 	}
+	size := int(wide_size)
 	v := &r.doc.views[view]
 	v.buffer, v.offset, v.length = i32(buffers), decoded^, size
 	decoded^ = (decoded^ + size + 3) & ~int(3)
@@ -1329,6 +1330,10 @@ gltf_load_buffers :: proc(r: ^Gltf_Reader, root: json.Object, bin: []u8, has_bin
 			if i == 0 && has_bin {
 				if len(bin) < size {
 					fail(r, .Data_Too_Short)
+					return
+				}
+				if !budget_take(&doc.budget, .Gltf_Buffer_Bytes, size) {
+					fail(r, .Limit)
 					return
 				}
 				doc.buffers[0] = bin[:size]

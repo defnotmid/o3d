@@ -301,6 +301,12 @@ obj_parse :: proc(bytes: []u8, geos: ^Geometries, textures: ^Textures = nil, bas
 		model_destroy(&m)
 		return {}, .No_Geometry
 	}
+	num_nodes := len(m.nodes)
+	resize(&m.scratch.translation, num_nodes)
+	resize(&m.scratch.rotation, num_nodes)
+	resize(&m.scratch.scale, num_nodes)
+	resize(&m.scratch.dirty, num_nodes)
+	resize(&m.scratch.world, num_nodes)
 	return m, .None
 }
 
@@ -664,6 +670,7 @@ obj_build_primitive :: proc(
 	}
 
 	palette := make([dynamic][4]u8, 0, 16, context.temp_allocator)
+	palette_map := make(map[[4]u8]int, 16, context.temp_allocator)
 	corner_pal := make([]int, c_count if any_vcolor else 0, context.temp_allocator)
 	if any_vcolor {
 		for c, ci in corners {
@@ -674,15 +681,10 @@ obj_build_primitive :: proc(
 				u8(clamp(vc.b * 255.0 + 0.5, 0, 255)),
 				255,
 			}
-			found := -1
-			for p, pi in palette {
-				if p == rgba {
-					found = pi
-					break
-				}
-			}
-			if found < 0 {
+			found, ok := palette_map[rgba]
+			if !ok {
 				found = len(palette)
+				palette_map[rgba] = found
 				append(&palette, rgba)
 			}
 			corner_pal[ci] = found

@@ -82,8 +82,8 @@ sky_shade :: #force_inline proc "contextless" (k: ^Sky_Terms, dir: Vec3) -> Vec3
 	r := cos_theta * 0.5 + 0.5
 	r_phase := THREE_OVER_SIXTEEN_PI * (1 + r * r)
 	g2 := k.g * k.g
-	m_phase := ONE_OVER_FOUR_PI * (1 - g2) / math.pow(1 - 2 * k.g * cos_theta + g2, 1.5)
-	scatter := k.sun_e * (k.beta_r * r_phase + k.beta_m * m_phase) / (k.beta_r + k.beta_m)
+	m_phase := ONE_OVER_FOUR_PI * (1 - g2) / math.pow(max(1 - 2 * k.g * cos_theta + g2, 1e-12), 1.5)
+	scatter := k.sun_e * (k.beta_r * r_phase + k.beta_m * m_phase) / linalg.max(k.beta_r + k.beta_m, 1e-12)
 	lin := pow3(scatter * (1 - fex), 1.5)
 	lin *= linalg.lerp(Vec3{1, 1, 1}, pow3(scatter * fex, 0.5), k.horizon)
 	// The night sky's floor and the sun's disc.

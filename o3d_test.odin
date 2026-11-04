@@ -2990,3 +2990,132 @@ test_snapshot_mips_blit :: proc(t: ^testing.T) {
 	eg, _ := texture_get(&textures, eid)
 	testing.expect_value(t, f32(textures.hdr_texels[eg.mips[1]].r), 0.5)
 }
+
+// equirect_uv's fast arcs agree with atan2 and asin all round, the diagonals
+// too (a jump there breaks a panorama in two): under a quarter of a texel of
+// a 4K map.
+@(test)
+test_equirect_uv_accurate :: proc(t: ^testing.T) {
+	worst: f32
+	for i in 0 ..< 7200 {
+		a := f32(i) / 7200 * 2 * math.PI
+		for k in 0 ..< 9 {
+			y := f32(k - 4) / 4.5
+			r := math.sqrt(1 - y * y)
+			d := Vec3{r * math.cos(a), y, r * math.sin(a)}
+			uv := equirect_uv(d)
+			du := abs(uv.x - (math.atan2(d.z, d.x) * (0.5 / math.PI) + 0.5))
+			worst = max(worst, min(du, 1 - du), abs(uv.y - (math.asin(d.y) * (1.0 / math.PI) + 0.5)))
+		}
+	}
+	testing.expectf(t, worst < 0.25 / 4096, "%f of the map off", worst)
+}
+
+// A sky at its documented limit (g = 1, the sun's direction dividing by 0),
+// and one with nothing to scatter, stays numbers: a NaN in the bake spreads
+// across the prefiltered environment.
+@(test)
+test_sky_limits :: proc(t: ^testing.T) {
+	sun := Vec3{0, 0.1, 0.995}
+	skies := []Sky{{sun = sun, up = {0, 1, 0}, turbidity = 10, rayleigh = 0.5, mie_coefficient = 0.005, mie_directional_g = 1}, {sun = sun, up = {0, 1, 0}}}
+	for sky in skies {
+		for dir in ([]Vec3{{0, 1, 0}, sun, {1, 0, 0}, {0, 0.1, -0.995}}) {
+			c := sky_radiance(sky, dir)
+			testing.expectf(t, c == c, "%v towards %v", c, dir)
+		}
+	}
+}
+
+// A tile keeps the first velocity at the cap, as the GPU's fs_motion_rows:
+// two past it are level, however long before the cut.
+@(test)
+test_motion_tile_at_the_cap :: proc(t: ^testing.T) {
+	W, H :: 10, 10
+	color, out: [W * H][4]f32
+	velocity: [W * H][2]f32
+	nearness: [W * H]f32
+	velocity[0], velocity[1] = {100, 0}, {0, 11}
+	tables: Motion_Tables
+	defer motion_tables_destroy(&tables)
+	motion_blur(&tables, color[:], velocity[:], nearness[:], W, H, {max_blur = 10, depth_scale = 1}, out[:])
+	testing.expect_value(t, tables.tiles[0], [2]f32{10, 0})
+}
+
+// A Basic material ignores shadows, textured or not: the same pixels with
+// .Receive_Shadow under a shadow-casting light as without.
+@(test)
+test_basic_ignores_shadows :: proc(t: ^testing.T) {
+	render :: proc(flags: Material_Flags) -> []u8 {
+		g: Geometries
+		defer geometries_destroy(&g)
+		textures: Textures
+		defer textures_destroy(&textures)
+		scene: Scene
+		defer scene_destroy(&scene)
+		scene_clear(&scene)
+		scene.camera = {position = {0, 0, 4}, target = {}, fov = 45, near = 0.1, far = 50}
+		append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 2, position = {1, 2, 3}, cast_shadow = true, shadow = {map_size = 64}})
+		px := [16]u8{255, 64, 64, 255, 64, 255, 64, 255, 64, 64, 255, 255, 255, 255, 64, 255}
+		m := MATERIAL_DEFAULT
+		m.color_map = texture_add(&textures, px[:], 2, 2)
+		m.flags = flags
+		append(&scene.draws, Draw{box(&g, 1, 1, 1), compose({}, {0.3, 0.5, 0}), m})
+		sw: Software
+		defer software_destroy(&sw)
+		return slice.clone(software_render(&sw, &scene, &g, nil, 64, 64, nil, &textures), context.temp_allocator)
+	}
+	testing.expect(t, slice.equal(render({.Basic}), render({.Basic, .Receive_Shadow, .Cast_Shadow})))
+}
+
+// A two-sided surface lights the side the eye sees, told by the triangle: a
+// smooth normal leaning past a silhouette stays as it is, a flat normal
+// already faces the eye, and a mirrored model's triangles wind backwards.
+@(test)
+test_two_sided :: proc(t: ^testing.T) {
+	SIZE :: 96
+	Shape :: enum {
+		Plane,
+		Sphere,
+	}
+	render :: proc(shape: Shape, side: Side, flags: Material_Flags, rotation: Vec3 = {}, scale: Vec3 = {1, 1, 1}) -> []u8 {
+		g: Geometries
+		defer geometries_destroy(&g)
+		textures: Textures
+		defer textures_destroy(&textures)
+		scene: Scene
+		defer scene_destroy(&scene)
+		scene_clear(&scene)
+		scene.camera = {position = {0, 0, 4}, target = {}, fov = 45, near = 0.1, far = 50}
+		append(&scene.lights, Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {0, 1, 1}})
+		m := MATERIAL_DEFAULT
+		m.side, m.flags = side, flags
+		id := plane(&g, 2, 2) if shape == .Plane else sphere(&g, 1, 8, 6)
+		append(&scene.draws, Draw{id, compose({}, rotation, scale), m})
+		sw: Software
+		defer software_destroy(&sw)
+		return slice.clone(software_render(&sw, &scene, &g, nil, SIZE, SIZE, nil, &textures), context.temp_allocator)
+	}
+	centre :: proc(p: []u8) -> [3]int {
+		i := (SIZE / 2 * SIZE + SIZE / 2) * 4
+		return {int(p[i]), int(p[i + 1]), int(p[i + 2])}
+	}
+	near :: proc(a, b: [3]int) -> bool {
+		return abs(a.r - b.r) <= 1 && abs(a.g - b.g) <= 1 && abs(a.b - b.b) <= 1
+	}
+	lit := centre(render(.Plane, .Double, {}))
+	testing.expectf(t, lit.r > 40, "lit plane %v", lit)
+	back := centre(render(.Plane, .Double, {}, {0, math.PI, 0}))
+	testing.expectf(t, near(back, lit), "back of a plane %v, front %v", back, lit)
+	flat := centre(render(.Plane, .Double, {.Flat_Shading}))
+	flat_back := centre(render(.Plane, .Double, {.Flat_Shading}, {0, math.PI, 0}))
+	testing.expectf(t, near(flat, lit) && near(flat_back, lit), "flat plane %v, its back %v, smooth %v", flat, flat_back, lit)
+	mirrored := centre(render(.Plane, .Double, {}, {}, {-1, 1, 1}))
+	testing.expectf(t, near(mirrored, lit), "mirrored plane %v, plane %v", mirrored, lit)
+	// A closed mesh from outside: only its front faces show, however it is sided.
+	one, two := render(.Sphere, .Front, {}), render(.Sphere, .Double, {})
+	worst := 0
+	for i in 0 ..< len(one) {
+		worst = max(worst, abs(int(one[i]) - int(two[i])))
+	}
+	testing.expectf(t, worst <= 8, "two-sided sphere is off by %d levels", worst)
+}

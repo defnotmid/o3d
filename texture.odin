@@ -329,7 +329,7 @@ sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: 
 	if rho2 <= 1 {
 		return sample_level(t, &tex, 0, uv)
 	}
-	lod := clamp(0.5 * math.log2(rho2), 0, f32(tex.levels - 1))
+	lod := clamp(0.5 * log2_fast(rho2), 0, f32(tex.levels - 1))
 	l0 := int(lod)
 	l1 := min(l0 + 1, int(tex.levels) - 1)
 	frac := lod - f32(l0)
@@ -353,32 +353,40 @@ sample_top :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2) -> Vec
 // Trilinearly samples `id` at explicit `lod`, repeating horizontally and,
 // with `clamp_v`, clamping vertically at the poles (equirectangular
 // environment and background maps); else repeating both ways.
-sample_lod :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32, clamp_v := true) -> Vec4 {
+sample_lod :: #force_inline proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32, clamp_v := true) -> Vec4 {
 	tex, ok := texture_get(t, id)
 	if !ok || tex.external {
 		return {0, 0, 0, 0}
 	}
+	return sample_tex_lod(t, &tex, uv, lod, clamp_v)
+}
+
+@(private = "file")
+sample_tex_lod :: #force_inline proc "contextless" (t: ^Textures, tex: ^Texture, uv: Vec2, lod: f32, clamp_v: bool) -> Vec4 {
 	// Not above 0 (magnified, or -inf or NaN where uv does not change).
 	if tex.levels <= 1 || !(lod > 0) {
-		return sample_level(t, &tex, 0, uv, clamp_v)
+		return sample_level(t, tex, 0, uv, clamp_v)
 	}
 	lod_clamped := clamp(lod, 0, f32(tex.levels - 1))
 	l0 := int(lod_clamped)
 	l1 := min(l0 + 1, int(tex.levels) - 1)
 	frac := lod_clamped - f32(l0)
-	c0 := sample_level(t, &tex, l0, uv, clamp_v)
+	c0 := sample_level(t, tex, l0, uv, clamp_v)
 	if l0 == l1 || frac <= 0 {
 		return c0
 	}
-	return linalg.lerp(c0, sample_level(t, &tex, l1, uv, clamp_v), frac)
+	return linalg.lerp(c0, sample_level(t, tex, l1, uv, clamp_v), frac)
 }
 
 // `sample_lod`'s colour, linear: an HDR texture's as it is, an 8-bit one's
 // decoded from sRGB (an environment's or background's either way).
-sample_lod_linear :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec3 {
+sample_lod_linear :: #force_inline proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec3 {
 	tex, ok := texture_get(t, id)
-	c := sample_lod(t, id, uv, lod)
-	return c.rgb if ok && tex.hdr else linear(c.rgb)
+	if !ok || tex.external {
+		return {}
+	}
+	c := sample_tex_lod(t, &tex, uv, lod, true)
+	return c.rgb if tex.hdr else linear(c.rgb)
 }
 
 BILINEAR_SCALE :: 256
@@ -454,6 +462,6 @@ perturb_normal :: proc "contextless" (n, dp_dx, dp_dy: Vec3, duv_dx, duv_dy: Vec
 	b := q1perp * duv_dx.y + q0perp * duv_dy.y
 	det := max(linalg.length2(t), linalg.length2(b))
 	scale := linalg.inverse_sqrt(det) if det > 0 else 0
-	return linalg.normalize(t * (map_n.x * scale) + b * (map_n.y * scale) + n * map_n.z)
+	return linalg.normalize0(t * (map_n.x * scale) + b * (map_n.y * scale) + n * map_n.z)
 }
 

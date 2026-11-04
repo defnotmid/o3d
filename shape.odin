@@ -61,11 +61,11 @@ shapes_from_contours :: proc(s: ^Shapes, c: ^curves.Contours, fill_rule := curve
 		for k in 0 ..< int(f[1]) {
 			start := len(s.points)
 			ci := int(f[0]) + k
-			shapes_push(s, out.pts[out.contours[ci].start])
+			shapes_push(s, out.pts[out.contours[ci].start], start)
 			it := curves.contour_segments(out, ci)
 			for q in curves.segments_next(&it) {
 				if q.kind == .Line {
-					shapes_push(s, q.p[3])
+					shapes_push(s, q.p[3], start)
 					continue
 				}
 				t := s.scratch.out_t[q.index]
@@ -75,7 +75,7 @@ shapes_from_contours :: proc(s: ^Shapes, c: ^curves.Contours, fill_rule := curve
 					u := f64(j) / f64(m)
 					w := 1 - u
 					p := w * w * w * p0 + 3 * w * w * u * c1 + 3 * w * u * u * c2 + u * u * u * p3
-					shapes_push(s, {f32(p.x), f32(p.y)})
+					shapes_push(s, {f32(p.x), f32(p.y)}, start)
 				}
 			}
 			if len(s.points) - start > 1 && s.points[len(s.points) - 1] == s.points[start] {
@@ -98,8 +98,8 @@ shapes_from_contours :: proc(s: ^Shapes, c: ^curves.Contours, fill_rule := curve
 }
 
 @(private = "file")
-shapes_push :: #force_inline proc(s: ^Shapes, p: Vec2) {
-	if len(s.points) == 0 || s.points[len(s.points) - 1] != p {
+shapes_push :: #force_inline proc(s: ^Shapes, p: Vec2, start := 0) {
+	if len(s.points) <= start || s.points[len(s.points) - 1] != p {
 		append(&s.points, p)
 	}
 }
@@ -382,6 +382,9 @@ shape_points :: proc(s: ^Shape_Points, shapes: ^Shapes, i: int) {
 // the same rings moved).
 @(private = "file")
 triangulate_rings :: proc(s: ^Shape_Points, points: [][2]f64, triangles: ^[dynamic]u32) {
+	if len(s.rings) == 0 {
+		return
+	}
 	resize(&s.starts, len(s.rings) - 1)
 	resize(&s.ends, len(s.rings) - 1)
 	k := s.rings[0]
@@ -795,10 +798,11 @@ wave_next_event :: proc(x: ^Extruder, t, until, eps: f64) -> (ev: Wave_Event, ok
 			continue
 		}
 		pv := wave_at(v, t)
+		dt_max := ev.t - t
 		for e, k in x.edge_lines {
 			rate := e.x * v.v.x + e.y * v.v.y - 1
 			gap := e.x * pv.x + e.y * pv.y - e.z
-			if rate >= 0 || gap < -eps {
+			if rate >= 0 || gap < -eps || gap > -rate * dt_max {
 				continue
 			}
 			te := t + max(gap, 0) / -rate
@@ -822,6 +826,7 @@ wave_next_event :: proc(x: ^Extruder, t, until, eps: f64) -> (ev: Wave_Event, ok
 				continue
 			}
 			ev, ok = {te, i32(vi), pi, true}, true
+			dt_max = ev.t - t
 		}
 	}
 	return
@@ -1253,20 +1258,24 @@ side_normals :: proc(x: ^Extruder, crease_angle: f32) {
 	defer delete(at)
 	fill := make([]u32, len(x.points))
 	defer delete(fill)
+	weighted := make([]Vec3, n * 3)
+	defer delete(weighted)
 	for t, i in x.sides {
-		for p in t.corners {
-			at[start[p] + fill[p]] = u32(i)
+		for p, k in t.corners {
+			ci := u32(i * 3 + k)
+			at[start[p] + fill[p]] = ci
 			fill[p] += 1
+			weighted[ci] = units[i] * corner_angle(x, t.corners, p)
 		}
 	}
 	cos_crease := math.cos(min(crease_angle, math.PI))
 	for t, i in x.sides {
 		for p, k in t.corners {
 			sum: Vec3
-			for f in at[start[p]:start[p + 1]] {
-				u := units[f]
+			for ci in at[start[p]:start[p + 1]] {
+				u := units[ci / 3]
 				if u.x * units[i].x + u.y * units[i].y + u.z * units[i].z >= cos_crease {
-					sum += u * corner_angle(x, x.sides[f].corners, p)
+					sum += weighted[ci]
 				}
 			}
 			l := math.sqrt(sum.x * sum.x + sum.y * sum.y + sum.z * sum.z)
@@ -1711,8 +1720,8 @@ sort_linked :: proc(e: ^Earcut, list_in: i32) -> i32 {
 // A point's z-order (Morton code) in the outline's bounds, 15 bits a side.
 @(private = "file")
 z_order :: proc "contextless" (e: ^Earcut, px, py: f64) -> i32 {
-	x := u32(i32((px - e.min_x) * e.inv_size))
-	y := u32(i32((py - e.min_y) * e.inv_size))
+	x := u32(clamp(i32((px - e.min_x) * e.inv_size), 0, 32767))
+	y := u32(clamp(i32((py - e.min_y) * e.inv_size), 0, 32767))
 	x = (x | (x << 8)) & 0x00FF00FF
 	x = (x | (x << 4)) & 0x0F0F0F0F
 	x = (x | (x << 2)) & 0x33333333

@@ -46,6 +46,8 @@ Threemf_Error :: enum u8 {
 	// `requiredextensions` names a 3MF extension o3d does not implement;
 	// `Model.unsupported_extension` has its namespace or prefix.
 	Unsupported_Extension,
+	// Past a limit (`Limits`); `Model.warnings` says which.
+	Limit,
 }
 
 @(rodata)
@@ -62,6 +64,7 @@ THREEMF_ERROR_TEXT := [Threemf_Error]string {
 	.Invalid_Model         = "not a valid 3MF model",
 	.Out_Of_Memory         = "out of memory",
 	.Unsupported_Extension = "requires an unsupported 3MF extension",
+	.Limit                 = "too large to read (a limit was reached)",
 }
 
 @(private = "file", rodata)
@@ -85,8 +88,9 @@ THREEMF_UNITS := [?]struct {
 }
 
 // Loads a `.3mf` file from disk into flat `Model`, `Geometries`, and
-// `Textures` tables; `err` says why not (`THREEMF_ERROR_TEXT`).
-threemf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil) -> (m: Model, err: Threemf_Error) {
+// `Textures` tables; `err` says why not (`THREEMF_ERROR_TEXT`). `limits`
+// bounds the work (nil: DEFAULT_LIMITS).
+threemf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil, limits: ^Limits = nil) -> (m: Model, err: Threemf_Error) {
 	if !os.exists(path) {
 		return {}, .File_Not_Found
 	}
@@ -95,12 +99,13 @@ threemf_load :: proc(path: string, geos: ^Geometries, textures: ^Textures = nil)
 		return {}, .Io
 	}
 	defer delete(data)
-	return threemf_parse(data, geos, textures)
+	return threemf_parse(data, geos, textures, limits)
 }
 
 // Parses a `.3mf` archive in memory into flat `Model`, `Geometries`, and
-// `Textures` tables; `err` says why not (`THREEMF_ERROR_TEXT`).
-threemf_parse :: proc(archive: []u8, geos: ^Geometries, textures: ^Textures = nil) -> (m: Model, err: Threemf_Error) {
+// `Textures` tables; `err` says why not (`THREEMF_ERROR_TEXT`). `limits`
+// bounds the work (nil: DEFAULT_LIMITS).
+threemf_parse :: proc(archive: []u8, geos: ^Geometries, textures: ^Textures = nil, limits: ^Limits = nil) -> (m: Model, err: Threemf_Error) {
 	if len(archive) == 0 {
 		return {}, .Empty
 	}
@@ -130,6 +135,7 @@ threemf_parse :: proc(archive: []u8, geos: ^Geometries, textures: ^Textures = ni
 	b.geos = geos
 	b.textures = textures
 	b.model = &m
+	budget_init(&b.budget, limits)
 
 	root_part, part_err := threemf_load_part(&b, root_path, is_root = true)
 	if part_err != .None {
@@ -144,6 +150,12 @@ threemf_parse :: proc(archive: []u8, geos: ^Geometries, textures: ^Textures = ni
 	for item in b.items[part.first_item:][:part.item_count] {
 		threemf_emit_node(&b, item.part, item.object_id, -1, item.transform, 0)
 	}
+	if b.budget.hit != {} {
+		model_destroy(&m)
+		cut: Model
+		budget_warn(&b.budget, &cut.warnings)
+		return cut, .Limit
+	}
 	num_nodes := len(m.nodes)
 	resize(&m.scratch.translation, num_nodes)
 	resize(&m.scratch.rotation, num_nodes)
@@ -153,12 +165,15 @@ threemf_parse :: proc(archive: []u8, geos: ^Geometries, textures: ^Textures = ni
 	return m, .None
 }
 
+@(private = "file")
+silent_xml_err :: proc(pos: xml.Pos, fmt: string, args: ..any) {}
+
 // Discovers the primary 3D model part via `_rels/.rels` (relationship type
 // `.../3dmodel`), falling back to `3D/3dmodel.model` or the first `.model` entry.
 @(private = "file")
 threemf_root_model_path :: proc(archive: []u8, entries: []Zip_Entry) -> string {
 	if rels, ok := zip_extract(archive, entries, "_rels/.rels"); ok && len(rels) > 0 {
-		if doc, err := xml.parse_bytes(rels, allocator = context.temp_allocator); err == .None && doc.element_count > 0 {
+		if doc, err := xml.parse_bytes(rels, allocator = context.temp_allocator, error_handler = silent_xml_err); err == .None && doc.element_count > 0 {
 			for el in doc.elements[:doc.element_count] {
 				if el.kind != .Element || !strings.equal_fold(xml_local(el.ident), "Relationship") {
 					continue
@@ -167,7 +182,7 @@ threemf_root_model_path :: proc(archive: []u8, entries: []Zip_Entry) -> string {
 				rel_type, r_ok := xml_attr(el, "Type")
 				if t_ok && r_ok && strings.has_suffix(strings.to_lower(rel_type, context.temp_allocator), "/3dmodel") {
 					clean := trim_archive_path(target)
-					if _, exists := zip_extract(archive, entries, clean); exists {
+					if _, exists := zip_find(entries, clean); exists {
 						return clean
 					}
 				}
@@ -255,6 +270,7 @@ Threemf_Builder :: struct {
 	geos:        ^Geometries,
 	textures:    ^Textures,
 	model:       ^Model,
+	budget:      Budget,
 	root_meters: f32,
 	parts:       [dynamic]Threemf_Part,
 	pbr_props:   [dynamic]Threemf_PBR_Prop,
@@ -489,7 +505,7 @@ threemf_load_part :: proc(b: ^Threemf_Builder, raw_path: string, is_root := fals
 	if !extracted || len(xml_bytes) == 0 {
 		return -1, .Missing_Model
 	}
-	doc, xml_err := xml.parse_bytes(xml_bytes, allocator = context.temp_allocator)
+	doc, xml_err := xml.parse_bytes(xml_bytes, allocator = context.temp_allocator, error_handler = silent_xml_err)
 	if xml_err != .None || doc == nil || doc.element_count == 0 {
 		return -1, .Invalid_Xml
 	}
@@ -885,7 +901,11 @@ threemf_resolve_triangle :: proc(
 			if mat.opacity < 1 {
 				mat.flags += {.Transparent}
 			}
-			key = (u64(u32(gi) + 1) << 32) | u64(0x80000000 | (p1 ~ (p2 << 10) ~ (p3 << 20)))
+			r8 := u32(clamp(mat.color.r * 255.0 + 0.5, 0, 255))
+			g8 := u32(clamp(mat.color.g * 255.0 + 0.5, 0, 255))
+			b8 := u32(clamp(mat.color.b * 255.0 + 0.5, 0, 255))
+			a7 := u32(clamp(mat.opacity * 127.0 + 0.5, 0, 127))
+			key = (u64(u32(gi) + 1) << 32) | u64(0x80000000 | r8 | (g8 << 8) | (b8 << 16) | (a7 << 24))
 			return mat, {}, key, 0
 		}
 		mat = b.materials[g.first_item + p1]
@@ -1081,7 +1101,7 @@ threemf_build_mesh :: proc(
 // Emits topologically ordered `Model_Node`s (`parent < i`) for `(part_idx, object_id)`.
 @(private = "file")
 threemf_emit_node :: proc(b: ^Threemf_Builder, part_idx: i32, object_id: u32, parent: i32, transform: Mat4, depth: int) {
-	if depth > 64 || part_idx < 0 || int(part_idx) >= len(b.parts) {
+	if depth > 64 || part_idx < 0 || int(part_idx) >= len(b.parts) || !budget_take(&b.budget, .Gltf_Nodes) {
 		return
 	}
 	part := b.parts[part_idx]

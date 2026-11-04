@@ -193,6 +193,11 @@ test_glyph_run_geometry :: proc(t: ^testing.T) {
 	ws, _ := curve_set_get(&g, from_words)
 	testing.expect_value(t, ws.origin, origin)
 	testing.expect_value(t, curve_set_add_words(&g, w[:4], origin, extent), Curve_Set_Id(0))
+	// A grid too big for its words, its size wrapping past an int: refused.
+	big := make([]u32, len(w), context.temp_allocator)
+	copy(big, w)
+	big[0], big[1] = 1 << 31, 1 << 31
+	testing.expect_value(t, curve_set_add_words(&g, big, origin, extent), Curve_Set_Id(0))
 	testing.expect_value(t, glyph_run_geometry(&g, {{0, {}}}), Geometry_Id(0))
 	testing.expect_value(t, glyph_run_geometry(&g, glyphs, {1, 0}), Geometry_Id(0))
 }

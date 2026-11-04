@@ -1,5 +1,6 @@
 package o3d
 
+import "base:runtime"
 import "core:math/linalg"
 
 import curves "deps:ocurves"
@@ -87,6 +88,10 @@ curve_set_add_words :: proc(g: ^Geometries, words: []u32, origin: Vec2, extent: 
 	if len(words) < curves.HEADER || int(words[6]) > len(words) || !(extent > 0) {
 		return 0
 	}
+	nx, ny := int(words[0]), int(words[1])
+	if nx <= 0 || ny <= 0 || nx > (int(words[6]) - curves.HEADER) / 4 / ny {
+		return 0
+	}
 	x0, y0, x1, y1 := curves.bounds(words)
 	if !(x1 > x0) || !(y1 > y0) {
 		return 0
@@ -124,6 +129,7 @@ glyph_run_geometry :: proc(g: ^Geometries, glyphs: []Glyph, scale: Vec2 = 1) -> 
 	if scale.x == 0 || scale.y == 0 {
 		return 0
 	}
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	vertices := make([dynamic]Vertex, 0, 4 * len(glyphs), context.temp_allocator)
 	indices := make([dynamic]u32, 0, 6 * len(glyphs), context.temp_allocator)
 	entries := make([dynamic]u32, 0, len(glyphs), context.temp_allocator)

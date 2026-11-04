@@ -145,7 +145,7 @@ zip_extract :: proc(archive: []u8, entries: []Zip_Entry, path: string) -> (data:
 			if e.uncomp_size == 0 {
 				return nil, true
 			}
-			out := make([dynamic]u8, 0, int(e.uncomp_size), context.temp_allocator)
+			out := make([dynamic]u8, context.temp_allocator)
 			if deflate.inflate_raw(&out, comp, int(e.uncomp_size), allocator = context.temp_allocator) != nil {
 				return nil, false
 			}

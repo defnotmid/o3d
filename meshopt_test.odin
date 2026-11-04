@@ -106,6 +106,29 @@ test_meshopt_decode :: proc(t: ^testing.T) {
 
 // Filters: an octahedral normal back to unit length, a quaternion with its
 // largest component restored, an exponential float.
+// Either slow code with an extra byte of 0 restarts `next` (the spec, and
+// the indices here are meshoptimizer's reference decoder's for these streams).
+@(test)
+test_meshopt_triangle_reset :: proc(t: ^testing.T) {
+	table: [16]u8
+	Case :: struct {
+		head: []u8,
+		want: [6]u32le,
+	}
+	cases := []Case {
+		{{0xe1, 0xfe, 0xfe, 0x00, 0x00}, {0, 1, 2, 0, 1, 2}},
+		{{0xe1, 0xfe, 0xff, 0x00, 0x00, 0x2a}, {0, 1, 2, 21, 0, 1}},
+	}
+	for c in cases {
+		src := make([dynamic]u8, context.temp_allocator)
+		append(&src, ..c.head)
+		append(&src, ..table[:])
+		got: [6]u32le
+		testing.expect(t, meshopt_decode_triangles(slice.to_bytes(got[:]), src[:], 6, 4))
+		testing.expect_value(t, got, c.want)
+	}
+}
+
 @(test)
 test_meshopt_unfilter :: proc(t: ^testing.T) {
 	// +z: x = y = 0, z = 127.

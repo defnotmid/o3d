@@ -353,7 +353,11 @@ property :: proc(b: ^Usd_Builder, p: Usd_Prim, name: i32) -> i32 {
 // The strongest value of an attribute: its default or first time sample.
 @(private = "file")
 value :: proc(b: ^Usd_Builder, p: Usd_Prim, prop: Usd_Prop) -> (rep: u64, ok: bool) {
-	name := b.names[prop]
+	return value_token(b, p, b.names[prop])
+}
+
+@(private = "file")
+value_token :: proc(b: ^Usd_Builder, p: Usd_Prim, name: i32) -> (rep: u64, ok: bool) {
 	if name < 0 {
 		return
 	}
@@ -464,6 +468,9 @@ build_prim :: proc(b: ^Usd_Builder, p: Usd_Prim, name: i32, parent: i32, binding
 		binding = rep
 	}
 
+	if !budget_take(&l.budget, .Gltf_Nodes, 1) {
+		return
+	}
 	local, reset := xform(b, p)
 	node := i32(len(b.m.nodes))
 	append(&b.m.nodes, Model_Node{
@@ -534,15 +541,7 @@ xform :: proc(b: ^Usd_Builder, p: Usd_Prim) -> (local: Mat4, reset: bool) {
 		}
 		invert := strings.has_prefix(op, "!invert!")
 		name := op[len("!invert!"):] if invert else op
-		prop := property(b, p, find_token(b, name))
-		if prop < 0 {
-			continue
-		}
-		spec := l.paths[prop].spec
-		vrep, has := usd_field(l, spec, .Default)
-		if !has {
-			vrep, has = usd_field(l, spec, .Time_Samples)
-		}
+		vrep, has := value_token(b, p, find_token(b, name))
 		if !has {
 			continue
 		}
@@ -640,14 +639,7 @@ Usd_Primvar :: struct {
 primvar :: proc(b: ^Usd_Builder, p: Usd_Prim, name: string, default_interpolation: Usd_Interpolation) -> (pv: Usd_Primvar) {
 	l := b.l
 	token := find_token(b, name)
-	prop := property(b, p, token)
-	if prop < 0 {
-		return
-	}
-	rep, ok := usd_field(l, l.paths[prop].spec, .Default)
-	if !ok {
-		rep, ok = usd_field(l, l.paths[prop].spec, .Time_Samples)
-	}
+	rep, ok := value_token(b, p, token)
 	if !ok {
 		return
 	}
@@ -679,10 +671,8 @@ primvar :: proc(b: ^Usd_Builder, p: Usd_Prim, name: string, default_interpolatio
 			break
 		}
 	}
-	if iprop := property(b, p, find_token(b, strings.concatenate({name, ":indices"}, context.temp_allocator))); iprop >= 0 {
-		if irep, has := usd_field(l, l.paths[iprop].spec, .Default); has && usd_ints(l, irep, &b.ints) {
-			pv.indices = slice.clone(b.ints[:], context.temp_allocator)
-		}
+	if irep, has := value_token(b, p, find_token(b, strings.concatenate({name, ":indices"}, context.temp_allocator))); has && usd_ints(l, irep, &b.ints) {
+		pv.indices = slice.clone(b.ints[:], context.temp_allocator)
 	}
 	pv.ok = true
 	return
@@ -823,6 +813,7 @@ build_mesh :: proc(b: ^Usd_Builder, p: Usd_Prim, binding: i32) -> i32 {
 		st_name = strings.concatenate({"primvars:", b.varnames[binding - 1]}, context.temp_allocator)
 	}
 	mix(&key, property(b, p, find_token(b, st_name)))
+	mix(&key, property(b, p, find_token(b, strings.concatenate({st_name, ":indices"}, context.temp_allocator))))
 	for s in subsets {
 		mix(&key, s.key)
 	}
@@ -879,17 +870,18 @@ build_mesh :: proc(b: ^Usd_Builder, p: Usd_Prim, binding: i32) -> i32 {
 	// Faces: each its first corner; a face whose corners run past the
 	// indices, or name a point that is not there, is left out.
 	face_first := make([]int, len(counts) + 1, context.temp_allocator)
-	tris := 0
+	tris: i128
 	for c, f in counts {
-		face_first[f + 1] = face_first[f] + int(max(c, 0))
+		step := int(clamp(c, 0, i64(len(corners) + 1 - face_first[f])))
+		face_first[f + 1] = face_first[f] + step
 		if c >= 3 {
-			tris += int(c) - 2
+			tris += min(i128(c - 2), i128(max(int)))
 		}
 	}
 	if face_first[len(counts)] > len(corners) {
 		warn(b, "a USD mesh has fewer face vertex indices than its counts ask for; the rest is left out")
 	}
-	if !budget_take_wide(&l.budget, .Gltf_Values, i128(tris) * 3 * 10) {
+	if !budget_take_wide(&l.budget, .Gltf_Values, tris * 3 * 10) {
 		return -1
 	}
 

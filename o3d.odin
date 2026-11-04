@@ -173,6 +173,18 @@ log2_fast :: #force_inline proc "contextless" (x: f32) -> f32 {
 	return f32(i32(bits >> 23) - 127) + table_lerp(&agx_tables.log2_mantissa, mantissa)
 }
 
+@(private)
+pow4 :: #force_inline proc "contextless" (x: f32) -> f32 {
+	x2 := x * x
+	return x2 * x2
+}
+
+@(private)
+pow5 :: #force_inline proc "contextless" (x: f32) -> f32 {
+	x2 := x * x
+	return x2 * x2 * x
+}
+
 @(private = "file")
 agx_pow22 :: #force_inline proc "contextless" (x: f32) -> f32 {
 	if x > 1 {
@@ -202,7 +214,7 @@ linear_to_srgb_exact :: proc "contextless" (value: f32) -> f32 {
 	return c * 12.92 if c <= 0.0031308 else 1.055 * math.pow(c, 1 / 2.4) - 0.055
 }
 
-linear :: proc "contextless" (c: Vec3) -> Vec3 {
+linear :: #force_inline proc "contextless" (c: Vec3) -> Vec3 {
 	return {srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)}
 }
 
@@ -233,7 +245,7 @@ tone_map :: proc "contextless" (c: Vec3, mode: Tone_Mapping, exposure: f32 = 1) 
 		return c
 	}
 	exp := exposure if exposure > 0 else 1
-	v := c * exp
+	v := linalg.clamp(c * exp, 0, 1e10)
 	switch mode {
 	case .None:
 		return c
@@ -244,7 +256,7 @@ tone_map :: proc "contextless" (c: Vec3, mode: Tone_Mapping, exposure: f32 = 1) 
 	case .Cineon:
 		x := linalg.max(v - Vec3{0.004, 0.004, 0.004}, Vec3{0, 0, 0})
 		u := (x * (6.2 * x + Vec3{0.5, 0.5, 0.5})) / (x * (6.2 * x + Vec3{1.7, 1.7, 1.7}) + Vec3{0.06, 0.06, 0.06})
-		return {math.pow(u.r, 2.2), math.pow(u.g, 2.2), math.pow(u.b, 2.2)}
+		return {agx_pow22(u.r), agx_pow22(u.g), agx_pow22(u.b)}
 	case .ACES_Filmic:
 		v *= 1.0 / 0.6
 		v = {

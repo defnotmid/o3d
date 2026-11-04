@@ -1165,6 +1165,70 @@ test_threemf_errors :: proc(t: ^testing.T) {
 	m_wide, err_wide := threemf_parse(zip_wide, &geos)
 	defer model_destroy(&m_wide)
 	testing.expect_value(t, err_wide, Threemf_Error.Unsupported_Extension)
+
+	// `<![` that does not start CDATA is an error, not a parser going round
+	// for ever (Odin's), and CDATA still reads.
+	zip_hang := make_test_zip({{name = "3D/3dmodel.model", data = `<model><![[x<b/></model>`}})
+	m_hang, err_hang := threemf_parse(zip_hang, &geos)
+	defer model_destroy(&m_hang)
+	testing.expect_value(t, err_hang, Threemf_Error.Invalid_Xml)
+	cdata_xml := `<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><metadata name="Title"><![CDATA[a<b]]></metadata><resources/><build/></model>`
+	zip_cdata := make_test_zip({{name = "3D/3dmodel.model", data = cdata_xml}})
+	m_cdata, err_cdata := threemf_parse(zip_cdata, &geos)
+	defer model_destroy(&m_cdata)
+	testing.expect_value(t, err_cdata, Threemf_Error.None)
+}
+
+// A build that expands past the node limit fails the file and says so, not
+// a part of the model and no word of it.
+@(test)
+test_threemf_node_limit :: proc(t: ^testing.T) {
+	geos: Geometries
+	defer geometries_destroy(&geos)
+	model_xml := `<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>
+<object id="1" type="model"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>
+<object id="2" type="model"><components><component objectid="1"/><component objectid="1"/><component objectid="1"/></components></object>
+</resources><build><item objectid="2"/></build></model>`
+	z := make_test_zip({{name = "3D/3dmodel.model", data = model_xml}})
+	limits := DEFAULT_LIMITS
+	limits[.Gltf_Nodes] = 4
+	fits, err_fits := threemf_parse(z, &geos, nil, &limits)
+	defer model_destroy(&fits)
+	testing.expect_value(t, err_fits, Threemf_Error.None)
+	testing.expect_value(t, len(fits.nodes), 4)
+	limits[.Gltf_Nodes] = 3
+	cut, err_cut := threemf_parse(z, &geos, nil, &limits)
+	defer model_destroy(&cut)
+	testing.expect_value(t, err_cut, Threemf_Error.Limit)
+	testing.expect_value(t, len(cut.nodes), 0)
+	testing.expect_value(t, len(cut.warnings), 1)
+}
+
+// A deflated entry inflates to its declared size; a declared size it does
+// not fit is refused.
+@(test)
+test_zip_deflated :: proc(t: ^testing.T) {
+	// "o3d zip entry " 40 times, raw deflate.
+	packed := []u8{0xcb, 0x37, 0x4e, 0x51, 0xa8, 0xca, 0x2c, 0x50, 0x48, 0xcd, 0x2b, 0x29, 0xaa, 0x54, 0xc8, 0x1f, 0xe5, 0x8d, 0xf2, 0xf0, 0xf2, 0x00}
+	archive := make_test_zip({{name = "a", data = string(packed)}})
+	// make_test_zip stores: the entry's method (at the local and central
+	// headers) and size in the central directory are set here.
+	entries, err := zip_read_directory(archive)
+	testing.expect_value(t, err, Zip_Error.None)
+	if len(entries) != 1 {
+		return
+	}
+	entries[0].method = 8
+	entries[0].uncomp_size = 560
+	got, ok := zip_extract(archive, entries, "a")
+	testing.expect(t, ok)
+	testing.expect_value(t, len(got), 560)
+	if len(got) == 560 {
+		testing.expect_value(t, string(got[546:]), "o3d zip entry ")
+	}
+	entries[0].uncomp_size = 100
+	_, small := zip_extract(archive, entries, "a")
+	testing.expect(t, !small)
 }
 
 // Verifies 3MF crease-angle normal smoothing: faces meeting at < 60° share

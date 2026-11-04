@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 1097 "o3d.slang"
+#line 1101 "o3d.slang"
 constant array<float2, int(4)> SAMPLE_OFFSETS_0 = { { float2(0.375f, 0.125f), float2(0.875f, 0.375f), float2(0.125f, 0.625f), float2(0.625f, 0.875f) } };
 
 #line 248
@@ -1660,7 +1660,7 @@ float3 shade_0(float3 base_0, float roughness_in_0, float metalness_1, float3 wo
             if((l_1.kind_0) == 4U)
             {
                 float _S82 = l_1.color_2.w;
-                float spot_0 = saturate((dot(ldir_1, l_1.ground_0.xyz) - _S82) / max(l_1.ground_0.w - _S82, 9.99999997475242708e-07f));
+                float spot_0 = saturate((dot(ldir_1, l_1.ground_0.xyz) - _S82) / max(l_1.ground_0.w - _S82, 0.00000999999974738f));
 
 #line 539
                 falloff_2 = falloff_1 * (spot_0 * spot_0 * (3.0f - 2.0f * spot_0));
@@ -2107,7 +2107,7 @@ float3 shade_0(float3 base_0, float roughness_in_0, float metalness_1, float3 wo
 
 
 #line 838
-float4 surface_0(const VS_Out_0 thread* i_2, bool front_0, float4 tint_0, float4 smear_0, KernelContext_0 thread* kernelContext_19)
+float4 surface_0(const VS_Out_0 thread* i_2, float4 tint_0, float4 smear_0, KernelContext_0 thread* kernelContext_19)
 {
 
 #line 839
@@ -2606,338 +2606,345 @@ float4 surface_0(const VS_Out_0 thread* i_2, bool front_0, float4 tint_0, float4
 
 #line 938
             float3 _S121 = normalize(i_2->normal_0);
-            if((flags_3 & 2U) != 0U)
+
+#line 943
+            float3 face_0 = cross(dp_dx_2, dp_dy_2);
+            if((dot(face_0, kernelContext_19->lighting_0->eye_0.xyz - _S90)) < 0.0f)
             {
 
-#line 940
-                float3 n_5 = normalize(cross(dp_dx_2, dp_dy_2));
+#line 944
+                c_6 = - face_0;
 
-                if((dot(n_5, kernelContext_19->lighting_0->eye_0.xyz - _S90)) < 0.0f)
-                {
-
-#line 942
-                    c_6 = - n_5;
-
-#line 942
-                }
-                else
-                {
-
-#line 942
-                    c_6 = n_5;
-
-#line 942
-                }
-
-#line 939
+#line 944
             }
             else
             {
 
-#line 939
-                c_6 = _S121;
+#line 944
+                c_6 = face_0;
 
-#line 939
+#line 944
             }
 
-#line 946
+#line 944
+            float3 n_5;
+
+
+            if((flags_3 & 2U) != 0U)
+            {
+
+#line 947
+                n_5 = normalize(c_6);
+
+#line 947
+            }
+            else
+            {
+
+#line 947
+                n_5 = _S121;
+
+#line 947
+            }
+
+
             thread float4 shadows_1 = float4(int4(int(1)) );
             if((flags_3 & 16U) != 0U)
             {
 
-#line 947
+#line 951
                 si_0 = int(0);
                 for(;;)
                 {
 
-#line 948
+#line 952
                     if(si_0 < (kernelContext_19->lighting_0->count_0.w))
                     {
                     }
                     else
                     {
 
-#line 948
+#line 952
                         break;
                     }
 
-#line 948
-                    float _S122 = shadow_factor_0(si_0, _S90, c_6, kernelContext_19);
+#line 952
+                    float _S122 = shadow_factor_0(si_0, _S90, n_5, kernelContext_19);
                     shadows_1[si_0] = _S122;
 
-#line 948
+#line 952
                     si_0 = si_0 + int(1);
 
-#line 948
+#line 952
                 }
 
-#line 947
+#line 951
             }
 
-#line 952
+#line 956
             if((flags_3 & 4U) != 0U)
             {
 
-#line 952
-                _S92 = !front_0;
+#line 956
+                _S92 = (dot(n_5, c_6)) < 0.0f;
 
-#line 952
+#line 956
             }
             else
             {
 
-#line 952
+#line 956
                 _S92 = false;
 
-#line 952
+#line 956
             }
 
-#line 952
+#line 956
             if(_S92)
             {
 
-#line 952
-                c_6 = - c_6;
+#line 956
+                n_5 = - n_5;
 
-#line 952
+#line 956
             }
 
-#line 952
+#line 956
             float3 n_6;
 
-#line 958
+#line 962
             if((flags_3 & 64U) != 0U)
             {
 
-#line 959
+#line 963
                 float2 _S123 = kernelContext_19->material_0->normal_scales_0.xy;
 
-#line 959
+#line 963
                 thread LaneUv_0 _S124 = at_7;
 
-#line 959
-                float3 _S125 = map_normal_0(kernelContext_19->normalMap_texture_0, kernelContext_19->normalMap_sampler_0, 1U, _S123, &_S124, c_6, dp_dx_2, dp_dy_2, kernelContext_19);
+#line 963
+                float3 _S125 = map_normal_0(kernelContext_19->normalMap_texture_0, kernelContext_19->normalMap_sampler_0, 1U, _S123, &_S124, n_5, dp_dx_2, dp_dy_2, kernelContext_19);
 
-#line 959
+#line 963
                 n_6 = _S125;
 
-#line 958
+#line 962
             }
             else
             {
 
-#line 958
-                n_6 = c_6;
+#line 962
+                n_6 = n_5;
 
-#line 958
+#line 962
             }
 
-#line 958
+#line 962
             float3 coat_n_1;
 
 
             if((flags_3 & 33554432U) != 0U)
             {
 
-#line 961
+#line 965
                 uint _S126 = layer_texture_0(2U, kernelContext_19);
 
                 if(_S126 == 1U)
                 {
 
-#line 964
+#line 968
                     float2 _S127 = kernelContext_19->material_0->normal_scales_0.zw;
 
-#line 964
+#line 968
                     thread LaneUv_0 _S128 = at_7;
 
-#line 964
-                    float3 _S129 = map_normal_0(kernelContext_19->layerMap0_texture_0, kernelContext_19->layerMap0_sampler_0, 9U, _S127, &_S128, c_6, dp_dx_2, dp_dy_2, kernelContext_19);
+#line 968
+                    float3 _S129 = map_normal_0(kernelContext_19->layerMap0_texture_0, kernelContext_19->layerMap0_sampler_0, 9U, _S127, &_S128, n_5, dp_dx_2, dp_dy_2, kernelContext_19);
 
-#line 964
+#line 968
                     coat_n_1 = _S129;
 
-#line 963
+#line 967
                 }
                 else
                 {
 
-#line 965
+#line 969
                     if(_S126 == 2U)
                     {
 
-#line 966
+#line 970
                         float2 _S130 = kernelContext_19->material_0->normal_scales_0.zw;
 
-#line 966
+#line 970
                         thread LaneUv_0 _S131 = at_7;
 
-#line 966
-                        float3 _S132 = map_normal_0(kernelContext_19->layerMap1_texture_0, kernelContext_19->layerMap1_sampler_0, 9U, _S130, &_S131, c_6, dp_dx_2, dp_dy_2, kernelContext_19);
+#line 970
+                        float3 _S132 = map_normal_0(kernelContext_19->layerMap1_texture_0, kernelContext_19->layerMap1_sampler_0, 9U, _S130, &_S131, n_5, dp_dx_2, dp_dy_2, kernelContext_19);
 
-#line 966
+#line 970
                         coat_n_1 = _S132;
 
-#line 965
+#line 969
                     }
                     else
                     {
 
-#line 965
-                        coat_n_1 = c_6;
+#line 969
+                        coat_n_1 = n_5;
 
-#line 965
+#line 969
                     }
 
-#line 963
+#line 967
                 }
 
-#line 961
+#line 965
             }
             else
             {
 
-#line 961
-                coat_n_1 = c_6;
+#line 965
+                coat_n_1 = n_5;
 
-#line 961
+#line 965
             }
 
-#line 969
+#line 973
             float4 _S133 = float4(int4(int(0)) );
 
-#line 969
+#line 973
             float4 behind_1;
             if((flags_3 & 8388608U) != 0U)
             {
 
-#line 971
+#line 975
                 thread float lod_4;
 
-#line 971
+#line 975
                 thread float distance_2;
 
-#line 971
+#line 975
                 float2 _S134 = refraction_0(_S90, n_6, fog_0, (&ly_1)->thickness_0, &lod_4, &distance_2, kernelContext_19);
 
                 (&ly_1)->thickness_0 = distance_2;
 
-#line 973
+#line 977
                 float4 _S135 = frame_behind_0(_S134, lod_4, kernelContext_19);
 
-#line 973
+#line 977
                 behind_1 = _S135;
 
-#line 970
+#line 974
             }
             else
             {
 
-#line 970
+#line 974
                 behind_1 = _S133;
 
-#line 970
+#line 974
             }
 
-#line 980
+#line 984
             bool _S136 = (flags_3 & 67108864U) != 0U;
 
-#line 980
+#line 984
             float4 mirror_1;
 
-#line 980
+#line 984
             float4 mirror_coat_1;
             if(_S136)
             {
 
-#line 982
+#line 986
                 float2 uv_12 = i_2->position_0.xy / kernelContext_19->lighting_0->frameParams_0.xy;
                 bool coated_0 = (flags_3 & 2097152U) != 0U;
                 float d_3 = length(_S90 - kernelContext_19->lighting_0->eye_0.xyz);
 
-#line 984
+#line 988
                 float _S137;
                 if(coated_0)
                 {
 
-#line 985
+#line 989
                     _S137 = (&ly_1)->clearcoat_roughness_0;
 
-#line 985
+#line 989
                 }
                 else
                 {
 
-#line 985
+#line 989
                     _S137 = 0.0f;
 
-#line 985
+#line 989
                 }
 
-#line 985
+#line 989
                 float _S138 = reflection_lod_0(max(fog_0, _S137), 1.0e+09f, d_3, kernelContext_19);
 
-#line 985
+#line 989
                 float _S139 = reflected_run_0(uv_12, _S138, kernelContext_19);
                 float3 _S140 = float3(uv_12, 0.0f);
 
-#line 986
+#line 990
                 float _S141 = reflection_lod_0(fog_0, _S139, d_3, kernelContext_19);
 
-#line 986
+#line 990
                 float4 _S142 = ((kernelContext_19->frameMap_texture_0).sample((kernelContext_19->frameMap_sampler_0), ((_S140)).xy, uint(((_S140)).z), level((_S141))));
                 if(coated_0)
                 {
 
-#line 987
+#line 991
                     float _S143 = reflection_lod_0((&ly_1)->clearcoat_roughness_0, _S139, d_3, kernelContext_19);
 
-#line 987
+#line 991
                     mirror_1 = ((kernelContext_19->frameMap_texture_0).sample((kernelContext_19->frameMap_sampler_0), ((_S140)).xy, uint(((_S140)).z), level((_S143))));
 
-#line 987
+#line 991
                 }
                 else
                 {
 
-#line 987
+#line 991
                     mirror_1 = _S133;
 
-#line 987
+#line 991
                 }
 
-#line 979
+#line 983
                 float4 _S144 = mirror_1;
 
-#line 979
+#line 983
                 mirror_1 = _S142;
 
-#line 979
+#line 983
                 mirror_coat_1 = _S144;
 
             }
             else
             {
 
-#line 981
+#line 985
                 mirror_1 = _S133;
 
-#line 981
+#line 985
                 mirror_coat_1 = _S133;
 
-#line 981
+#line 985
             }
 
-#line 991
+#line 995
             float3 _S145 = kernelContext_19->lighting_0->eye_0.xyz;
 
-#line 991
+#line 995
             thread Layers_0 _S146 = ly_1;
 
-#line 991
+#line 995
             float3 _S147 = shade_0(base_2, fog_0, metalness_3, _S90, n_6, _S145, shadows_1, ao_1, flags_3, emissive_2, &_S146, coat_n_1, behind_1, mirror_1, mirror_coat_1, _S136, &ta_0, kernelContext_19);
 
-#line 991
+#line 995
             c_6 = _S147;
 
 #line 908
@@ -2946,64 +2953,64 @@ float4 surface_0(const VS_Out_0 thread* i_2, bool front_0, float4 tint_0, float4
 #line 899
     }
 
-#line 994
+#line 998
     if((kernelContext_19->lighting_0->count_0.z) != int(0))
     {
 
-#line 995
+#line 999
         float dist_1 = length(_S90 - kernelContext_19->lighting_0->eye_0.xyz);
         if((kernelContext_19->lighting_0->count_0.z) == int(1))
         {
 
-#line 996
+#line 1000
             fog_0 = saturate((dist_1 - kernelContext_19->lighting_0->fogParams_0.x) / max(kernelContext_19->lighting_0->fogParams_0.y - kernelContext_19->lighting_0->fogParams_0.x, 9.99999997475242708e-07f));
 
-#line 996
+#line 1000
         }
         else
         {
 
-#line 998
+#line 1002
             if((kernelContext_19->lighting_0->count_0.z) == int(2))
             {
 
-#line 999
+#line 1003
                 float d_4 = kernelContext_19->lighting_0->envParams_0.w * dist_1;
 
-#line 999
+#line 1003
                 fog_0 = saturate(1.0f - exp(- d_4 * d_4));
 
-#line 998
+#line 1002
             }
             else
             {
 
-#line 998
+#line 1002
                 fog_0 = 0.0f;
 
-#line 998
+#line 1002
             }
 
-#line 996
+#line 1000
         }
 
-#line 994
+#line 998
     }
     else
     {
 
-#line 994
+#line 998
         fog_0 = 0.0f;
 
-#line 994
+#line 998
     }
 
-#line 1008
+#line 1012
     return float4(mix(c_6, kernelContext_19->lighting_0->fogColor_0.xyz, float3(fog_0) ) * float3(a_5) , a_5 * ta_0);
 }
 
 
-#line 1109
+#line 1113
 float2 fine_ddx_0(float2 v_2)
 {
 
@@ -3020,11 +3027,11 @@ float2 fine_ddy_0(float2 v_3)
 }
 
 
-#line 1103
+#line 1107
 int curve_entry_rule_0(uint entry_0)
 {
 
-#line 1104
+#line 1108
     return int(entry_0 >> 31U);
 }
 
@@ -5630,7 +5637,7 @@ bool curves_fill_inside_0(int w_5, int rule_3)
 }
 
 
-#line 1127 "o3d.slang"
+#line 1131 "o3d.slang"
 struct Curves_Out_0
 {
     float4 color_4;
@@ -5638,11 +5645,11 @@ struct Curves_Out_0
 };
 
 
-#line 1162
-Curves_Out_0 curves_out_0(const VS_Curves_Out_0 thread* i_8, bool front_1, KernelContext_0 thread* kernelContext_20)
+#line 1166
+Curves_Out_0 curves_out_0(const VS_Curves_Out_0 thread* i_8, KernelContext_0 thread* kernelContext_20)
 {
 
-#line 1162
+#line 1166
     float2 _S324 = i_8->uv1_3;
     float2 dx_7 = fine_ddx_0(i_8->uv1_3);
     float2 dy_7 = fine_ddy_0(i_8->uv1_3);
@@ -5650,7 +5657,7 @@ Curves_Out_0 curves_out_0(const VS_Curves_Out_0 thread* i_8, bool front_1, Kerne
     uint s_10 = entry_1 & 2147483647U;
     int rule_4 = curve_entry_rule_0(entry_1);
 
-#line 1167
+#line 1171
     VS_Out_0 _S325 = curves_surface_in_0(i_8);
 
 #line 838
@@ -5663,110 +5670,110 @@ Curves_Out_0 curves_out_0(const VS_Curves_Out_0 thread* i_8, bool front_1, Kerne
     thread VS_Out_0 _S328 = _S325;
 
 #line 838
-    float4 _S329 = surface_0(&_S328, front_1, _S326, _S327, kernelContext_20);
+    float4 _S329 = surface_0(&_S328, _S326, _S327, kernelContext_20);
 
-#line 1169
+#line 1173
     thread Curves_Out_0 o_2;
     if(((kernelContext_20->material_0->flags_0) & 8U) != 0U)
     {
 
-#line 1171
+#line 1175
         float cov_1 = curves_coverage_affine_0(kernelContext_20->curveWords_0, s_10, _S324, dx_7, dy_7, rule_4);
         if(cov_1 <= 0.0f)
         {
 
-#line 1173
+#line 1177
             discard_fragment();
 
-#line 1172
+#line 1176
         }
 
 
         (&o_2)->color_4 = _S329 * float4(cov_1) ;
         (&o_2)->mask_1 = 15U;
 
-#line 1170
+#line 1174
     }
     else
     {
 
-#line 1170
+#line 1174
         uint k_10 = 0U;
 
-#line 1170
+#line 1174
         uint mask_2 = 0U;
 
-#line 1179
+#line 1183
         for(;;)
         {
 
-#line 1179
+#line 1183
             if(k_10 < 4U)
             {
             }
             else
             {
 
-#line 1179
+#line 1183
                 break;
             }
 
-#line 1180
+#line 1184
             float2 off_0 = SAMPLE_OFFSETS_0[k_10] - float2(0.5f) ;
             if(curves_fill_inside_0(curves_winding_0(kernelContext_20->curveWords_0, s_10, _S324 + dx_7 * float2(off_0.x)  + dy_7 * float2(off_0.y) ), rule_4))
             {
 
-#line 1181
+#line 1185
                 mask_2 = mask_2 | (1U << k_10);
 
-#line 1181
+#line 1185
             }
 
-#line 1179
+#line 1183
             k_10 = k_10 + 1U;
 
-#line 1179
+#line 1183
         }
 
-#line 1185
+#line 1189
         if(mask_2 == 0U)
         {
 
-#line 1186
+#line 1190
             discard_fragment();
 
-#line 1185
+#line 1189
         }
 
 
         (&o_2)->color_4 = _S329;
         (&o_2)->mask_1 = mask_2;
 
-#line 1170
+#line 1174
     }
 
-#line 1191
+#line 1195
     return o_2;
 }
 
 
-#line 1020
+#line 1024
 float4 mirror_run_of_0(float3 world_6, float4 color_5, KernelContext_0 thread* kernelContext_21)
 {
 
-#line 1021
+#line 1025
     float3 n_15 = kernelContext_21->lighting_0->clipPlane_0.xyz;
     float _S330 = max(dot(n_15, world_6) + kernelContext_21->lighting_0->clipPlane_0.w, 0.0f);
 
 
     float _S331 = color_5.w;
 
-#line 1025
+#line 1029
     return float4(length(world_6 - kernelContext_21->lighting_0->eye_0.xyz) * _S330 / max(_S330 + - (dot(n_15, kernelContext_21->lighting_0->eye_0.xyz) + kernelContext_21->lighting_0->clipPlane_0.w), 9.99999997475242708e-07f) * _S331, _S331, 0.0f, _S331);
 }
 
 
-#line 1145
+#line 1149
 struct Curves_Mirror_Out_0
 {
     float4 color_6 [[color(0)]];
@@ -5775,7 +5782,7 @@ struct Curves_Mirror_Out_0
 };
 
 
-#line 1145
+#line 1149
 struct pixelInput_0
 {
     float3 world_7 [[user(TEXCOORD)]];
@@ -5787,150 +5794,150 @@ struct pixelInput_0
 };
 
 
-#line 1153
-[[fragment]] Curves_Mirror_Out_0 fs_curves_mirror(pixelInput_0 _S332 [[stage_in]], bool front_2 [[front_facing]], float4 position_2 [[position]], Material_0 constant* material_1 [[buffer(0)]], uint device* curveWords_1 [[buffer(2)]], Lighting_natural_0 constant* lighting_1 [[buffer(1)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> alphaMap_texture_1 [[texture(12)]], sampler alphaMap_sampler_1 [[sampler(12)]], texture2d<float, access::sample> emissiveMap_texture_1 [[texture(4)]], sampler emissiveMap_sampler_1 [[sampler(4)]], texture2d<float, access::sample> shadowMap_texture_1 [[texture(1)]], sampler shadowMap_sampler_1 [[sampler(1)]], texture2d<float, access::sample> shadowMap1_texture_1 [[texture(9)]], sampler shadowMap1_sampler_1 [[sampler(9)]], texture2d<float, access::sample> shadowMap2_texture_1 [[texture(10)]], sampler shadowMap2_sampler_1 [[sampler(10)]], texture2d<float, access::sample> shadowMap3_texture_1 [[texture(11)]], sampler shadowMap3_sampler_1 [[sampler(11)]], texture2d<float, access::sample> roughnessMap_texture_1 [[texture(3)]], sampler roughnessMap_sampler_1 [[sampler(3)]], texture2d<float, access::sample> metalnessMap_texture_1 [[texture(7)]], sampler metalnessMap_sampler_1 [[sampler(7)]], texture2d<float, access::sample> aoMap_texture_1 [[texture(8)]], sampler aoMap_sampler_1 [[sampler(8)]], texture2d<float, access::sample> layerMap0_texture_1 [[texture(14)]], sampler layerMap0_sampler_1 [[sampler(14)]], texture2d<float, access::sample> layerMap1_texture_1 [[texture(15)]], sampler layerMap1_sampler_1 [[sampler(15)]], texture2d<float, access::sample> normalMap_texture_1 [[texture(2)]], sampler normalMap_sampler_1 [[sampler(2)]], texture2d_array<float, access::sample> frameMap_texture_1 [[texture(13)]], sampler frameMap_sampler_1 [[sampler(13)]], texture2d<float, access::sample> envIrradianceMap_texture_1 [[texture(6)]], sampler envIrradianceMap_sampler_1 [[sampler(6)]], texture2d<float, access::sample> envRadianceMap_texture_1 [[texture(5)]], sampler envRadianceMap_sampler_1 [[sampler(5)]])
+#line 1157
+[[fragment]] Curves_Mirror_Out_0 fs_curves_mirror(pixelInput_0 _S332 [[stage_in]], float4 position_2 [[position]], Material_0 constant* material_1 [[buffer(0)]], uint device* curveWords_1 [[buffer(2)]], Lighting_natural_0 constant* lighting_1 [[buffer(1)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> alphaMap_texture_1 [[texture(12)]], sampler alphaMap_sampler_1 [[sampler(12)]], texture2d<float, access::sample> emissiveMap_texture_1 [[texture(4)]], sampler emissiveMap_sampler_1 [[sampler(4)]], texture2d<float, access::sample> shadowMap_texture_1 [[texture(1)]], sampler shadowMap_sampler_1 [[sampler(1)]], texture2d<float, access::sample> shadowMap1_texture_1 [[texture(9)]], sampler shadowMap1_sampler_1 [[sampler(9)]], texture2d<float, access::sample> shadowMap2_texture_1 [[texture(10)]], sampler shadowMap2_sampler_1 [[sampler(10)]], texture2d<float, access::sample> shadowMap3_texture_1 [[texture(11)]], sampler shadowMap3_sampler_1 [[sampler(11)]], texture2d<float, access::sample> roughnessMap_texture_1 [[texture(3)]], sampler roughnessMap_sampler_1 [[sampler(3)]], texture2d<float, access::sample> metalnessMap_texture_1 [[texture(7)]], sampler metalnessMap_sampler_1 [[sampler(7)]], texture2d<float, access::sample> aoMap_texture_1 [[texture(8)]], sampler aoMap_sampler_1 [[sampler(8)]], texture2d<float, access::sample> layerMap0_texture_1 [[texture(14)]], sampler layerMap0_sampler_1 [[sampler(14)]], texture2d<float, access::sample> layerMap1_texture_1 [[texture(15)]], sampler layerMap1_sampler_1 [[sampler(15)]], texture2d<float, access::sample> normalMap_texture_1 [[texture(2)]], sampler normalMap_sampler_1 [[sampler(2)]], texture2d_array<float, access::sample> frameMap_texture_1 [[texture(13)]], sampler frameMap_sampler_1 [[sampler(13)]], texture2d<float, access::sample> envIrradianceMap_texture_1 [[texture(6)]], sampler envIrradianceMap_sampler_1 [[sampler(6)]], texture2d<float, access::sample> envRadianceMap_texture_1 [[texture(5)]], sampler envRadianceMap_sampler_1 [[sampler(5)]])
 {
 
-#line 1153
+#line 1157
     thread KernelContext_0 kernelContext_22;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->material_0 = material_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->curveWords_0 = curveWords_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->lighting_0 = lighting_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->alphaMap_texture_0 = alphaMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->alphaMap_sampler_0 = alphaMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->emissiveMap_texture_0 = emissiveMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->emissiveMap_sampler_0 = emissiveMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap_texture_0 = shadowMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap_sampler_0 = shadowMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap1_texture_0 = shadowMap1_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap1_sampler_0 = shadowMap1_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap2_texture_0 = shadowMap2_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap2_sampler_0 = shadowMap2_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap3_texture_0 = shadowMap3_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->shadowMap3_sampler_0 = shadowMap3_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->roughnessMap_texture_0 = roughnessMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->roughnessMap_sampler_0 = roughnessMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->metalnessMap_texture_0 = metalnessMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->metalnessMap_sampler_0 = metalnessMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->aoMap_texture_0 = aoMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->aoMap_sampler_0 = aoMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->layerMap0_texture_0 = layerMap0_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->layerMap0_sampler_0 = layerMap0_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->layerMap1_texture_0 = layerMap1_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->layerMap1_sampler_0 = layerMap1_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->normalMap_texture_0 = normalMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->normalMap_sampler_0 = normalMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->frameMap_texture_0 = frameMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->frameMap_sampler_0 = frameMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->envIrradianceMap_texture_0 = envIrradianceMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->envIrradianceMap_sampler_0 = envIrradianceMap_sampler_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->envRadianceMap_texture_0 = envRadianceMap_texture_1;
 
-#line 1153
+#line 1157
     (&kernelContext_22)->envRadianceMap_sampler_0 = envRadianceMap_sampler_1;
 
-#line 1153
+#line 1157
     thread VS_Curves_Out_0 _S333;
 
-#line 1153
+#line 1157
     (&_S333)->position_1 = position_2;
 
-#line 1153
+#line 1157
     (&_S333)->world_5 = _S332.world_7;
 
-#line 1153
+#line 1157
     (&_S333)->normal_3 = _S332.normal_4;
 
-#line 1153
+#line 1157
     (&_S333)->uv_13 = _S332.uv_14;
 
-#line 1153
+#line 1157
     (&_S333)->uv1_3 = _S332.uv1_4;
 
-#line 1153
+#line 1157
     (&_S333)->quad_0 = _S332.quad_1;
 
-#line 1153
+#line 1157
     (&_S333)->color_3 = _S332.color_7;
 
-#line 1153
-    Curves_Out_0 _S334 = curves_out_0(&_S333, front_2, &kernelContext_22);
+#line 1157
+    Curves_Out_0 _S334 = curves_out_0(&_S333, &kernelContext_22);
 
     thread Curves_Mirror_Out_0 o_3;
     (&o_3)->color_6 = _S334.color_4;
     (&o_3)->mask_3 = _S334.mask_1;
 
-#line 1157
+#line 1161
     float4 _S335 = mirror_run_of_0(_S332.world_7, _S334.color_4, &kernelContext_22);
     (&o_3)->run_1 = _S335;
     return o_3;

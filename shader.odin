@@ -1,5 +1,6 @@
 package o3d
 
+import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
@@ -385,6 +386,7 @@ shaders_destroy :: proc(s: ^Shaders) {
 // draws with it are left out, by both renderers; the id is the shader's
 // either way, so a broken one never stands in as the standard material.
 shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: []Shader_Error) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	key := shader_key(vertex, fragment, glsl3)
 	if found, ok := s.keys[key]; ok {
 		return found, s.list[found - 1].errors
@@ -400,6 +402,7 @@ shader :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Sh
 // (`errors` says why not), without making it: only reads `s`, so a host
 // may look up under a shared lock and make under an exclusive one.
 shader_find :: proc(s: ^Shaders, vertex, fragment: string, glsl3 := false) -> (id: Shader_Id, errors: []Shader_Error, found: bool) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	id, found = s.keys[shader_key(vertex, fragment, glsl3)]
 	if !found {
 		return 0, nil, false

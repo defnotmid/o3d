@@ -79,6 +79,35 @@ PARITY_CASES := [?]Parity_Case {
 	{"motion_focus", 271, 171, build_motion_focus},
 	{"motion_skinned", 160, 120, build_motion_skinned},
 	{"motion_custom", 240, 180, build_motion_custom},
+	{"two_sided", 240, 180, build_two_sided},
+}
+
+// Two-sided surfaces, lit on the side the eye sees: planes from behind (smooth,
+// flat, clear-coated), a plane mirrored by its scale (its triangles wind
+// backwards) and low-poly spheres, whose dark edges show a normal turned by
+// mistake.
+@(private = "file")
+build_two_sided :: proc(a: ^Parity_Assets) -> string {
+	s := &a.scene
+	o3d.scene_clear(s)
+	s.camera = {position = {0, 0, 5}, target = {}, fov = 45, near = 0.1, far = 50}
+	append(&s.lights, o3d.Light{kind = .Directional, color = {1, 1, 1}, intensity = 3, position = {1, 2, 2}})
+	m := o3d.MATERIAL_DEFAULT
+	m.color, m.side = {0.8, 0.5, 0.3}, .Double
+	flat := m
+	flat.flags += {.Flat_Shading}
+	coated := m
+	coated.clearcoat, coated.clearcoat_roughness = 1, 0.3
+	square := o3d.plane(&a.geos, 1.1, 1.1)
+	ball := o3d.sphere(&a.geos, 0.7, 8, 6)
+	behind := o3d.Vec3{0, math.PI, 0}
+	append(&s.draws, o3d.Draw{square, o3d.compose({-1.8, 0.8, 0}, behind), m})
+	append(&s.draws, o3d.Draw{square, o3d.compose({-0.6, 0.8, 0}, behind), flat})
+	append(&s.draws, o3d.Draw{square, o3d.compose({0.6, 0.8, 0}, behind), coated})
+	append(&s.draws, o3d.Draw{square, o3d.compose({1.8, 0.8, 0}, {}, {-1, 1, 1}), m})
+	append(&s.draws, o3d.Draw{ball, o3d.compose({-0.9, -0.8, 0}), m})
+	append(&s.draws, o3d.Draw{ball, o3d.compose({0.9, -0.8, 0}, {}, {-1, 1, 1}), m})
+	return ""
 }
 
 parity_assets_destroy :: proc(a: ^Parity_Assets) {
@@ -2395,7 +2424,7 @@ build_reflector :: proc(a: ^Parity_Assets) -> string {
 	floor.roughness_map = rough
 	floor.flags += {.Reflector}
 	floor.clearcoat, floor.clearcoat_roughness = 0.4, 0.05
-	floor.flags = {.Receive_Shadow}
+	floor.flags += {.Receive_Shadow}
 	append(&s.draws, o3d.Draw{o3d.plane(&a.geos, 7, 5), o3d.compose({}, {-math.PI / 2, 0, 0}), floor})
 	red := o3d.MATERIAL_DEFAULT
 	red.color, red.roughness, red.flags = {0.9, 0.15, 0.1}, 0.5, {.Cast_Shadow}

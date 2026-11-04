@@ -16,7 +16,7 @@ these (onimite's notices list them).
 | SDL 3 (`vendor:sdl3`) | the GPU renderer's device and SDL_GPU (`o3d/sdlgpu`) | `LICENSES/SDL3-Zlib.txt` |
 | three.js | o3d follows its conventions and models: MeshStandardMaterial's shading, PCF shadows, equirectangular environment lighting, GLTFLoader's material and scene rules; `shape.odin` ports its ShapePath.toShapes and ExtrudeGeometry | `LICENSES/three.js-MIT.txt` |
 | earcut (mapbox/earcut, as three.js carries it) | polygon triangulation with holes, ported to Odin (`triangulate_shape` in `shape.odin`) | `LICENSES/earcut-ISC.txt` |
-| Odin's `core:encoding/xml` | `xml`: a copy from Odin dev-2026-11a with one fix, read by the 3MF importer | `LICENSES/Odin-Zlib.txt` |
+| Odin's `core:encoding/xml` | `xml`: a copy from Odin dev-2026-11a with two fixes, read by the 3MF importer | `LICENSES/Odin-Zlib.txt` |
 | Odin core and vendor packages (Copyright 2016-2025 Ginger Bill) | the runtime and core library every Odin program links, and the vendor bindings above | `LICENSES/Odin-Zlib.txt` |
 
 The standard material's shaders are compiled offline by Slang
