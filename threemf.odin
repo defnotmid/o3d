@@ -1,12 +1,12 @@
 package o3d
 
 import "base:runtime"
-import "core:encoding/xml"
 import "core:math/linalg"
 import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import xml "xml"
 
 // 3MF (3D Manufacturing Format) import: reads `.3mf` ZIP archives (`3D/3dmodel.model`
 // and any production-extension sub-model `.model` parts) into the same flat

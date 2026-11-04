@@ -1146,6 +1146,25 @@ test_threemf_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, err_ext, Threemf_Error.Unsupported_Extension)
 	testing.expect_value(t, m_ext.unsupported_extension, "http://schemas.microsoft.com/3dmanufacturing/slice/2015/07")
 	testing.expect(t, THREEMF_ERROR_TEXT[err_ext] != "")
+
+	// The same past eight attributes, in a small file (Odin's XML once
+	// dropped the ninth there without an error).
+	wide_xml := `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
+       xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+       xmlns:b="http://schemas.microsoft.com/3dmanufacturing/beamlattice/2017/02"
+       xmlns:d="http://schemas.microsoft.com/3dmanufacturing/displacement/2022/07"
+       xmlns:v="http://schemas.microsoft.com/3dmanufacturing/volumetric/2022/01"
+       xmlns:s="http://schemas.microsoft.com/3dmanufacturing/slice/2015/07"
+       requiredextensions="s">
+	<resources/>
+	<build/>
+</model>`
+	zip_wide := make_test_zip({{name = "3D/3dmodel.model", data = wide_xml}})
+	m_wide, err_wide := threemf_parse(zip_wide, &geos)
+	defer model_destroy(&m_wide)
+	testing.expect_value(t, err_wide, Threemf_Error.Unsupported_Extension)
 }
 
 // Verifies 3MF crease-angle normal smoothing: faces meeting at < 60° share
