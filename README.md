@@ -736,7 +736,9 @@ garbage.
   `projectionMatrix` and `gl_FragCoord.z` follow it; `view_depth`,
   `point_hidden` and `depth_image` turn it into distances as before.
 - **Blending:** `blend_of(material)` is a draw's `Blend`: `.Opaque`
-  (depth written), `.Over` (blended: transparent with some alpha) or `.Add`
+  (depth written), `.Cut` (the same, for `.Alpha_Mask`: only its shader may
+  discard, since that costs a tile-based GPU its hidden-surface removal even
+  where nothing is cut), `.Over` (blended: transparent with some alpha) or `.Add`
   (`.Additive`, three.js's AdditiveBlending: the light times its opacity
   added, for any material: meshes, ShaderMaterials (SRC_ALPHA, ONE), shapes,
   lines, particles), in the frame's light (half floats, as both renderers

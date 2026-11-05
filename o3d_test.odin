@@ -729,6 +729,19 @@ test_generations :: proc(t: ^testing.T) {
 	testing.expect(t, g.generation != 0 && g.generation != first, "a new table, a new generation")
 }
 
+@(test)
+test_blend_of :: proc(t: ^testing.T) {
+	blend :: proc(flags: Shading_Flags) -> Blend {
+		m := Shading_Material{flags = flags}
+		return blend_of(&m)
+	}
+	testing.expect_value(t, blend({}), Blend.Opaque)
+	testing.expect_value(t, blend({.Alpha_Mask}), Blend.Cut)
+	testing.expect_value(t, blend({.Blended, .Alpha_Mask}), Blend.Over)
+	testing.expect_value(t, blend({.Additive, .Blended, .Alpha_Mask}), Blend.Add)
+	testing.expect(t, replaces(.Opaque) && replaces(.Cut) && !replaces(.Over) && !replaces(.Add))
+}
+
 // Alpha_Mask discards fragments and shadow casters below alpha_cutoff (cut-out
 // shadows); ao_map occludes indirect light only (ambient/hemisphere/environment,
 // not direct lights) and reads uv1 when tex_coord == 1; Texture_Transform shifts,

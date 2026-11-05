@@ -22,9 +22,11 @@ import curves "deps:ocurves"
 VERT_SPV :: #load("../shaders/o3d.vert.spv")
 SKINNED_VERT_SPV :: #load("../shaders/o3d.skinned_vert.spv")
 FRAG_SPV :: #load("../shaders/o3d.frag.spv")
+FRAG_CUT_SPV :: #load("../shaders/o3d.frag_cut.spv")
 VERT_MSL :: #load("../shaders/o3d.vert.msl")
 SKINNED_VERT_MSL :: #load("../shaders/o3d.skinned_vert.msl")
 FRAG_MSL :: #load("../shaders/o3d.frag.msl")
+FRAG_CUT_MSL :: #load("../shaders/o3d.frag_cut.msl")
 FRAG_MIRROR_SPV :: #load("../shaders/o3d.frag_mirror.spv")
 FRAG_MIRROR_MSL :: #load("../shaders/o3d.frag_mirror.msl")
 SHADOW_SPV :: #load("../shaders/o3d.shadow.spv")
@@ -219,6 +221,8 @@ GPU :: struct {
 	device:                   ^sdl.GPUDevice,
 	owns_device:              bool,
 	vert, skinned_vert, frag: ^sdl.GPUShader,
+	// `frag` with its discards, for every blend but `.Opaque` (`o3d.Cut`).
+	frag_cut:                 ^sdl.GPUShader,
 	bg_vert, bg_frag:         ^sdl.GPUShader,
 	samples:                  sdl.GPUSampleCount,
 	depth_format:             sdl.GPUTextureFormat,
@@ -477,7 +481,8 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	vert_code, skinned_vert_code, frag_code, shadow_code, bg_vert_code, bg_frag_code, curves_vert_code, curves_code, shadow_curves_code, sprite_code, depth_vert_code, depth_frag_code, post_vert_code, output_code, mirror_code, curves_mirror_code: []u8
 	format: sdl.GPUShaderFormat
 	vs_entry, skinned_vs_entry, fs_entry, shadow_entry, curves_vs_entry, curves_entry, shadow_curves_entry, sprite_entry: cstring
-	output_entry, mirror_entry, curves_mirror_entry: cstring = "main", "main", "main"
+	output_entry, mirror_entry, curves_mirror_entry, cut_entry: cstring = "main", "main", "main", "main"
+	cut_code: []u8
 	switch {
 	case .SPIRV in formats:
 		vert_code, skinned_vert_code, frag_code, shadow_code = VERT_SPV, SKINNED_VERT_SPV, FRAG_SPV, SHADOW_SPV
@@ -486,6 +491,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 		post_vert_code, output_code = POST_VERT_SPV, OUTPUT_FRAG_SPV
 		curves_vert_code, curves_code, shadow_curves_code, sprite_code = CURVES_VERT_SPV, CURVES_FRAG_SPV, SHADOW_CURVES_SPV, SPRITE_FRAG_SPV
 		mirror_code, curves_mirror_code = FRAG_MIRROR_SPV, CURVES_FRAG_MIRROR_SPV
+		cut_code = FRAG_CUT_SPV
 		format = {.SPIRV}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "main", "main", "main", "main"
 		curves_vs_entry, curves_entry, shadow_curves_entry, sprite_entry = "main", "main", "main", "main"
@@ -497,6 +503,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 		curves_vert_code, curves_code, shadow_curves_code, sprite_code = CURVES_VERT_MSL, CURVES_FRAG_MSL, SHADOW_CURVES_MSL, SPRITE_FRAG_MSL
 		mirror_code, curves_mirror_code = FRAG_MIRROR_MSL, CURVES_FRAG_MIRROR_MSL
 		mirror_entry, curves_mirror_entry = "fs_mirror", "fs_curves_mirror"
+		cut_code, cut_entry = FRAG_CUT_MSL, "fs_cut"
 		format = {.MSL}
 		vs_entry, skinned_vs_entry, fs_entry, shadow_entry = "vs_main", "vs_skinned", "fs_main", "fs_shadow"
 		curves_vs_entry, curves_entry, shadow_curves_entry, sprite_entry = "vs_curves", "fs_curves", "fs_shadow_curves", "fs_sprite"
@@ -510,6 +517,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.shadow_frag = sdl.CreateGPUShader(g.device, {code_size = len(shadow_code), code = raw_data(shadow_code), entrypoint = shadow_entry, format = format, stage = .FRAGMENT, num_samplers = 2, num_uniform_buffers = 1})
 	g.curves_vert = sdl.CreateGPUShader(g.device, {code_size = len(curves_vert_code), code = raw_data(curves_vert_code), entrypoint = curves_vs_entry, format = format, stage = .VERTEX, num_uniform_buffers = 1})
 	g.curves_frag = sdl.CreateGPUShader(g.device, {code_size = len(curves_code), code = raw_data(curves_code), entrypoint = curves_entry, format = format, stage = .FRAGMENT, num_samplers = 16, num_storage_buffers = 1, num_uniform_buffers = 2})
+	g.frag_cut = sdl.CreateGPUShader(g.device, {code_size = len(cut_code), code = raw_data(cut_code), entrypoint = cut_entry, format = format, stage = .FRAGMENT, num_samplers = 16, num_uniform_buffers = 2})
 	g.frag_mirror = sdl.CreateGPUShader(g.device, {code_size = len(mirror_code), code = raw_data(mirror_code), entrypoint = mirror_entry, format = format, stage = .FRAGMENT, num_samplers = 16, num_uniform_buffers = 2})
 	g.curves_frag_mirror = sdl.CreateGPUShader(g.device, {code_size = len(curves_mirror_code), code = raw_data(curves_mirror_code), entrypoint = curves_mirror_entry, format = format, stage = .FRAGMENT, num_samplers = 16, num_storage_buffers = 1, num_uniform_buffers = 2})
 	g.sprite_frag = sdl.CreateGPUShader(g.device, {code_size = len(sprite_code), code = raw_data(sprite_code), entrypoint = sprite_entry, format = format, stage = .FRAGMENT, num_samplers = 16, num_storage_buffers = 1, num_uniform_buffers = 2})
@@ -545,7 +553,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 			return .Shader
 		}
 	}
-	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.frag_mirror == nil || g.curves_frag_mirror == nil || g.shadow_frag == nil || g.curves_vert == nil || g.curves_frag == nil || g.sprite_frag == nil || g.shadow_curves_frag == nil || g.bg_vert == nil || g.bg_frag == nil || g.depth_vert == nil || g.depth_frag == nil || g.post_vert == nil || g.output_frag == nil {
+	if g.vert == nil || g.skinned_vert == nil || g.frag == nil || g.frag_cut == nil || g.frag_mirror == nil || g.curves_frag_mirror == nil || g.shadow_frag == nil || g.curves_vert == nil || g.curves_frag == nil || g.sprite_frag == nil || g.shadow_curves_frag == nil || g.bg_vert == nil || g.bg_frag == nil || g.depth_vert == nil || g.depth_frag == nil || g.post_vert == nil || g.output_frag == nil {
 		return .Shader
 	}
 	g.depth_format = .D32_FLOAT
@@ -761,7 +769,7 @@ destroy :: proc(g: ^GPU) {
 	if g.dummy_shadow != nil {
 		sdl.ReleaseGPUTexture(g.device, g.dummy_shadow)
 	}
-	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.frag_mirror, g.curves_frag_mirror, g.sprite_frag, g.shadow_curves_frag, g.depth_vert, g.depth_frag, g.post_vert, g.output_frag}) {
+	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.frag_cut, g.frag_mirror, g.curves_frag_mirror, g.sprite_frag, g.shadow_curves_frag, g.depth_vert, g.depth_frag, g.post_vert, g.output_frag}) {
 		if sh != nil {
 			sdl.ReleaseGPUShader(g.device, sh)
 		}
@@ -855,7 +863,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 		{
 			format = LIGHT_FORMAT,
 			blend_state = {
-				enable_blend = blend != .Opaque,
+				enable_blend = !o3d.replaces(blend),
 				src_color_blendfactor = .SRC_ALPHA if raw else .ONE,
 				dst_color_blendfactor = .ONE if blend == .Add else .ONE_MINUS_SRC_ALPHA,
 				color_blend_op = .ADD,
@@ -867,7 +875,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 		{
 			format = RUNS_FORMAT,
 			blend_state = {
-				enable_blend = blend != .Opaque,
+				enable_blend = !o3d.replaces(blend),
 				src_color_blendfactor = .ONE,
 				dst_color_blendfactor = .ONE_MINUS_SRC_ALPHA,
 				color_blend_op = .ADD,
@@ -894,7 +902,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = cull, front_face = .CLOCKWISE if mirrored else .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = g.samples},
-		depth_stencil_state = {compare_op = .GREATER, enable_depth_test = true, enable_depth_write = blend == .Opaque},
+		depth_stencil_state = {compare_op = .GREATER, enable_depth_test = true, enable_depth_write = o3d.replaces(blend)},
 		target_info = {color_target_descriptions = &colors[0], num_color_targets = 2 if mirrored else 1, depth_stencil_format = g.depth_format, has_depth_stencil_target = true},
 	}
 	return sdl.CreateGPUGraphicsPipeline(g.device, info)
@@ -905,7 +913,7 @@ make_pipeline :: proc(g: ^GPU, vert, frag: ^sdl.GPUShader, attrs: []sdl.GPUVerte
 @(private = "file")
 make_draw_pipeline :: proc(g: ^GPU, kind: Draw_Kind, side: o3d.Side, blend: o3d.Blend, targets: Targets) -> ^sdl.GPUGraphicsPipeline {
 	mirrored := targets != .Light
-	frag := g.frag_mirror if mirrored else g.frag
+	frag := g.frag_mirror if mirrored else g.frag if blend == .Opaque else g.frag_cut
 	switch kind {
 	case .Skinned:
 		return make_pipeline(g, g.skinned_vert, frag, SKINNED_ATTRIBUTES[:], side, blend, false, true, targets)

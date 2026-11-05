@@ -835,7 +835,7 @@ float4 smeared_map(LaneUv at, float4 motion, uint flags) {
 // TRANSMIT: whether the entry reads frameMap, the transmission snapshot or
 // the reflection (fs_sprite has its depth there instead). `smear`: a
 // smeared particle's (SpriteRow.motion).
-float4 surface<let TRANSMIT : bool>(VS_Out i, float4 tint = float4(1), float4 smear = float4(0)) {
+float4 surface<let TRANSMIT : bool, let CUT : bool>(VS_Out i, float4 tint = float4(1), float4 smear = float4(0)) {
     uint flags = material.flags;
     float3 base = material.color.rgb * linear_rgb(tint.rgb);
     float a = material.color.a * saturate(tint.a);
@@ -853,8 +853,9 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, float4 tint = float4(1), float4 sm
         project_lane(at, i.world, tn);
     }
     // The mirror's pass leaves out what is behind its plane (after the
-    // derivatives; a zero plane in the other passes).
-    if (dot(lighting.clipPlane.xyz, i.world) + lighting.clipPlane.w < 0) {
+    // derivatives; a zero plane in the other passes). CUT: this surface may
+    // discard at all, which fs_main's can't (scene.odin's Blend says why).
+    if (CUT && dot(lighting.clipPlane.xyz, i.world) + lighting.clipPlane.w < 0) {
         discard;
     }
     if ((flags & FLAG_VERTEX_COLORS) != 0) {
@@ -883,7 +884,7 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, float4 tint = float4(1), float4 sm
         a *= read_map(alphaMap, SLOT_ALPHA, at).g;
     }
     if ((flags & FLAG_ALPHA_MASK) != 0) {
-        if (a < material.alpha_cutoff) {
+        if (CUT && a < material.alpha_cutoff) {
             discard;
         }
         if ((flags & FLAG_BLENDED) == 0) {
@@ -1014,7 +1015,13 @@ float4 surface<let TRANSMIT : bool>(VS_Out i, float4 tint = float4(1), float4 sm
 
 [shader("fragment")]
 float4 fs_main(VS_Out i) : SV_Target {
-    return surface<true>(i);
+    return surface<true, false>(i);
+}
+
+// fs_main for draws that may cut: masked, blended or added.
+[shader("fragment")]
+float4 fs_cut(VS_Out i) : SV_Target {
+    return surface<true, true>(i);
 }
 
 // The mirror's pass: the light, and how far the mirror's ray runs past the
@@ -1037,7 +1044,7 @@ struct Mirror_Out {
 [shader("fragment")]
 Mirror_Out fs_mirror(VS_Out i) {
     Mirror_Out o;
-    o.color = surface<true>(i);
+    o.color = surface<true, true>(i);
     o.run = mirror_run_of(i.world, o.color);
     return o;
 }
@@ -1093,7 +1100,7 @@ float4 fs_sprite(VS_Curves_Out i) : SV_Target {
         float behind = view_depth(sceneDepth.SampleLevel(uv, 0));
         row.a *= saturate((behind - view_depth(i.position.z)) / material.softness);
     }
-    return surface<false>(curves_surface_in(i), row, r.motion);
+    return surface<false, true>(curves_surface_in(i), row, r.motion);
 }
 
 // Sample positions in a pixel (the standard 4x MSAA pattern, software.odin's
@@ -1169,7 +1176,7 @@ Curves_Out curves_out(VS_Curves_Out i) {
     uint entry = curveWords[material.curve_table + i.quad];
     uint s = entry & ~CURVE_EVEN_ODD;
     Curves_Fill_Rule rule = curve_entry_rule(entry);
-    float4 color = surface<true>(curves_surface_in(i));
+    float4 color = surface<true, true>(curves_surface_in(i));
     Curves_Out o;
     if ((material.flags & FLAG_BLENDED) != 0) {
         float cov = curves_coverage_affine(curveWords, s, i.uv1, dx, dy, rule);

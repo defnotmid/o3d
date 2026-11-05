@@ -2,6 +2,7 @@ package o3d_sdlgpu
 
 import "core:log"
 import "core:os"
+import "core:strings"
 import "core:testing"
 
 import sdl "vendor:sdl3"
@@ -20,6 +21,14 @@ test_gpu :: proc(t: ^testing.T, g: ^GPU) -> bool {
 		return false
 	}
 	testing.fail_now(t, "no GPU device (set O3D_NO_GPU=1 to skip the GPU tests)")
+}
+
+// The shader of every opaque draw may not discard: on a tile-based GPU that
+// costs hidden-surface removal even when no fragment is ever cut.
+@(test)
+test_opaque_shader_never_discards :: proc(t: ^testing.T) {
+	testing.expect(t, !strings.contains(string(FRAG_MSL), "discard_fragment"))
+	testing.expect(t, strings.contains(string(FRAG_CUT_MSL), "discard_fragment"))
 }
 
 // A PARITY_CASES case drawn the same by the GPU and the software renderer.

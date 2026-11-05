@@ -71,7 +71,7 @@ float key_at_0(int2 p_1, KernelContext_0 thread* kernelContext_1)
 }
 
 
-#line 119
+#line 127
 struct Half_Out_0
 {
     float4 light_0 [[color(0)]];
@@ -81,22 +81,22 @@ struct Half_Out_0
 [[fragment]] Half_Out_0 fs_focus_half(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> depthMap_texture_1 [[texture(1)]], sampler depthMap_sampler_1 [[sampler(1)]])
 {
 
-#line 125
+#line 133
     thread KernelContext_0 kernelContext_2;
 
-#line 125
+#line 133
     (&kernelContext_2)->post_0 = post_1;
 
-#line 125
+#line 133
     (&kernelContext_2)->lightMap_texture_0 = lightMap_texture_1;
 
-#line 125
+#line 133
     (&kernelContext_2)->lightMap_sampler_0 = lightMap_sampler_1;
 
-#line 125
+#line 133
     (&kernelContext_2)->depthMap_texture_0 = depthMap_texture_1;
 
-#line 125
+#line 133
     (&kernelContext_2)->depthMap_sampler_0 = depthMap_sampler_1;
     int2 _S2 = int2(position_0.xy);
     int2 _S3 = int2(post_1->frame_0.xy);
@@ -104,62 +104,62 @@ struct Half_Out_0
     (&o_0)->light_0 = float4(int4(int(0)) );
     (&o_0)->key_0 = 0.0f;
 
-#line 130
+#line 138
     int dy_0 = int(0);
     for(;;)
     {
 
-#line 131
+#line 139
         if(dy_0 < int(2))
         {
         }
         else
         {
 
-#line 131
+#line 139
             break;
         }
 
-#line 131
+#line 139
         int dx_0 = int(0);
         for(;;)
         {
 
-#line 132
+#line 140
             if(dx_0 < int(2))
             {
             }
             else
             {
 
-#line 132
+#line 140
                 break;
             }
 
-#line 133
+#line 141
             int2 p_2 = min(_S2 * int2(int(2))  + int2(dx_0, dy_0), _S3 - int2(int(1)) );
 
-#line 133
+#line 141
             float4 _S4 = light_at_0(p_2, &kernelContext_2);
             (&o_0)->light_0 = (&o_0)->light_0 + _S4;
 
-#line 134
+#line 142
             float _S5 = key_at_0(p_2, &kernelContext_2);
             (&o_0)->key_0 = (&o_0)->key_0 + _S5;
 
-#line 132
+#line 140
             dx_0 = dx_0 + int(1);
 
-#line 132
+#line 140
         }
 
-#line 131
+#line 139
         dy_0 = dy_0 + int(1);
 
-#line 131
+#line 139
     }
 
-#line 138
+#line 146
     (&o_0)->light_0 = (&o_0)->light_0 * float4(0.25f) ;
     (&o_0)->key_0 = (&o_0)->key_0 * 0.25f;
     return o_0;

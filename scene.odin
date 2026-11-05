@@ -2118,11 +2118,15 @@ blended :: proc "contextless" (m: Material) -> bool {
 }
 
 // How a draw's colour meets what is drawn before it: replacing it (its
-// depth written), blended over it, or added to it (three.js's
+// depth written), the same where its alpha passes the material's cutoff
+// (`.Alpha_Mask`), blended over it, or added to it (three.js's
 // AdditiveBlending, `.Additive`); blended and added draws test the depth
-// without writing it, in the transparent pass. Both renderers alike.
+// without writing it, in the transparent pass. Both renderers alike. `Cut`
+// stands apart from `Opaque` because a shader that may discard costs a
+// tile-based GPU its hidden-surface removal, whether or not it ever does.
 Blend :: enum u8 {
 	Opaque,
+	Cut,
 	Over,
 	Add,
 }
@@ -2132,7 +2136,15 @@ blend_of :: #force_inline proc "contextless" (m: ^Shading_Material) -> Blend {
 	if .Additive in m.flags {
 		return .Add
 	}
-	return .Over if .Blended in m.flags else .Opaque
+	if .Blended in m.flags {
+		return .Over
+	}
+	return .Cut if .Alpha_Mask in m.flags else .Opaque
+}
+
+// Whether a draw's colour replaces what is drawn before it, its depth written.
+replaces :: #force_inline proc "contextless" (b: Blend) -> bool {
+	return b == .Opaque || b == .Cut
 }
 
 // ---- shading ----------------------------------------------------------------------------

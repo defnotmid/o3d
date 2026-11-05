@@ -18,7 +18,7 @@ struct _MatrixStorage_float4x4_ColMajornatural_0
 };
 
 
-#line 1287
+#line 1294
 struct Draw_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 mvp_0;
@@ -30,7 +30,7 @@ struct Draw_VS_natural_0
 };
 
 
-#line 1260
+#line 1267
 struct Opened_VS_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 mvp_1;
@@ -40,7 +40,7 @@ struct Opened_VS_natural_0
 };
 
 
-#line 1260
+#line 1267
 struct KernelContext_0
 {
     Draw_VS_natural_0 constant* draw_0;
@@ -49,47 +49,47 @@ struct KernelContext_0
 };
 
 
-#line 1260
+#line 1267
 float3 morphed_0(Morph_Delta_natural_0 device* _S1, float3 _S2, uint _S3, uint _S4, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1260
+#line 1267
     uint k_0 = 0U;
 
-#line 1260
+#line 1267
     float3 _S5 = _S2;
 
-#line 1274
+#line 1281
     for(;;)
     {
 
-#line 1274
+#line 1281
         if(k_0 < _S4)
         {
         }
         else
         {
 
-#line 1274
+#line 1281
             break;
         }
 
-#line 1275
+#line 1282
         uint _S6 = k_0 >> 2U;
 
-#line 1275
+#line 1282
         uint _S7 = k_0 & 3U;
 
-#line 1275
+#line 1282
         float3 _S8 = _S5 + (float4(_S1[kernelContext_0->opened_0->morph_bases_1[_S6][_S7] + _S3].position_0) ).xyz * float3(kernelContext_0->opened_0->morph_weights_1[_S6][_S7]) ;
 
-#line 1274
+#line 1281
         k_0 = k_0 + 1U;
 
-#line 1274
+#line 1281
         _S5 = _S8;
 
-#line 1274
+#line 1281
     }
 
 
@@ -97,47 +97,47 @@ float3 morphed_0(Morph_Delta_natural_0 device* _S1, float3 _S2, uint _S3, uint _
 }
 
 
-#line 1277
+#line 1284
 float3 morphed_1(Morph_Delta_natural_0 device* _S9, float3 _S10, uint _S11, uint _S12, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 1277
+#line 1284
     uint k_1 = 0U;
 
-#line 1277
+#line 1284
     float3 _S13 = _S10;
 
-#line 1274
+#line 1281
     for(;;)
     {
 
-#line 1274
+#line 1281
         if(k_1 < _S12)
         {
         }
         else
         {
 
-#line 1274
+#line 1281
             break;
         }
 
-#line 1275
+#line 1282
         uint _S14 = k_1 >> 2U;
 
-#line 1275
+#line 1282
         uint _S15 = k_1 & 3U;
 
-#line 1275
+#line 1282
         float3 _S16 = _S13 + (float4(_S9[kernelContext_1->draw_0->morph_bases_0[_S14][_S15] + _S11].position_0) ).xyz * float3(kernelContext_1->draw_0->morph_weights_0[_S14][_S15]) ;
 
-#line 1274
+#line 1281
         k_1 = k_1 + 1U;
 
-#line 1274
+#line 1281
         _S13 = _S16;
 
-#line 1274
+#line 1281
     }
 
 
@@ -167,7 +167,7 @@ struct vertexInput_0
 };
 
 
-#line 1265 "o3d.slang"
+#line 1272 "o3d.slang"
 struct VS_Velocity_Out_0
 {
     float4 position_3;
@@ -178,29 +178,29 @@ struct VS_Velocity_Out_0
 };
 
 
-#line 1265
+#line 1272
 [[vertex]] vs_velocity_Result_0 vs_velocity(vertexInput_0 _S17 [[stage_in]], uint vid_0 [[vertex_id]], Draw_VS_natural_0 constant* draw_1 [[buffer(0)]], Morph_Delta_natural_0 device* skinnedMorphDeltas_1 [[buffer(2)]], Opened_VS_natural_0 constant* opened_3 [[buffer(1)]])
 {
 
-#line 1265
+#line 1272
     thread KernelContext_0 kernelContext_2;
 
-#line 1265
+#line 1272
     (&kernelContext_2)->draw_0 = draw_1;
 
-#line 1265
+#line 1272
     (&kernelContext_2)->skinnedMorphDeltas_0 = skinnedMorphDeltas_1;
 
-#line 1265
+#line 1272
     (&kernelContext_2)->opened_0 = opened_3;
 
-#line 1265
+#line 1272
     float3 _S18 = morphed_1(skinnedMorphDeltas_1, _S17.position_2, vid_0, draw_1->morph_info_0.x, &kernelContext_2);
 
-#line 1265
+#line 1272
     float3 _S19 = morphed_0((&kernelContext_2)->skinnedMorphDeltas_0, _S17.position_2, vid_0, (&kernelContext_2)->opened_0->morph_info_1.x, &kernelContext_2);
 
-#line 1286
+#line 1293
     thread VS_Velocity_Out_0 o_0;
 
 
@@ -210,25 +210,25 @@ struct VS_Velocity_Out_0
     (&o_0)->uv1_2 = _S17.uv1_1;
     (&o_0)->quad_1 = 0U;
 
-#line 1293
+#line 1300
     thread vs_velocity_Result_0 _S20;
 
-#line 1293
+#line 1300
     (&_S20)->position_1 = o_0.position_3;
 
-#line 1293
+#line 1300
     (&_S20)->uv_0 = o_0.uv_2;
 
-#line 1293
+#line 1300
     (&_S20)->uv1_0 = o_0.uv1_2;
 
-#line 1293
+#line 1300
     (&_S20)->opened_1 = o_0.opened_2;
 
-#line 1293
+#line 1300
     (&_S20)->quad_0 = o_0.quad_1;
 
-#line 1293
+#line 1300
     return _S20;
 }
 

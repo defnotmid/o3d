@@ -21,6 +21,7 @@ UNITS=(
 	o3d:skinned_vert:vs_skinned
 	o3d:curves_vert:vs_curves
 	o3d:frag:fs_main
+	o3d:frag_cut:fs_cut
 	o3d:frag_mirror:fs_mirror
 	o3d:shadow:fs_shadow
 	o3d:curves_frag:fs_curves

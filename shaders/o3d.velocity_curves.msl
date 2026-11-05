@@ -397,11 +397,11 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 }
 
 
-#line 1107 "o3d.slang"
+#line 1114 "o3d.slang"
 int curve_entry_rule_0(uint entry_0)
 {
 
-#line 1108
+#line 1115
     return int(entry_0 >> 31U);
 }
 
@@ -461,14 +461,14 @@ struct Material_0
 };
 
 
-#line 1331
+#line 1338
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 1331
+#line 1338
 struct Velocity_FS_natural_0
 {
     float4 frame_0;
@@ -477,7 +477,7 @@ struct Velocity_FS_natural_0
 };
 
 
-#line 1331
+#line 1338
 struct KernelContext_0
 {
     Material_0 constant* material_0;
@@ -490,118 +490,118 @@ struct KernelContext_0
 };
 
 
-#line 1201
+#line 1208
 void depth_mask_0(float2 uv_0, float2 uv1_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1202
+#line 1209
     if(((kernelContext_0->material_0->flags_0) & 2048U) != 0U)
     {
 
-#line 1202
+#line 1209
         uint mask_slot_0;
 
 
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
-#line 1205
+#line 1212
             mask_slot_0 = 0U;
 
-#line 1205
+#line 1212
         }
         else
         {
 
-#line 1205
+#line 1212
             mask_slot_0 = 6U;
 
-#line 1205
+#line 1212
         }
 
-#line 1205
+#line 1212
         float2 raw_0;
         if((((kernelContext_0->material_0->uv_sets_0) >> mask_slot_0) & 1U) != 0U)
         {
 
-#line 1206
+#line 1213
             raw_0 = uv1_0;
 
-#line 1206
+#line 1213
         }
         else
         {
 
-#line 1206
+#line 1213
             raw_0 = uv_0;
 
-#line 1206
+#line 1213
         }
         float a_1 = kernelContext_0->material_0->color_0.w;
 
-#line 1207
+#line 1214
         float a_2;
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
             float3 _S26 = float3(raw_0, 1.0f);
 
-#line 1211
+#line 1218
             a_2 = a_1 * ((kernelContext_0->colorMap_texture_0).sample((kernelContext_0->colorMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[0U].xyz, _S26), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[1U].xyz, _S26))), level((0.0f)))).w;
 
-#line 1208
+#line 1215
         }
         else
         {
 
-#line 1208
+#line 1215
             a_2 = a_1;
 
-#line 1208
+#line 1215
         }
 
-#line 1214
+#line 1221
         if(((kernelContext_0->material_0->flags_0) & 16384U) != 0U)
         {
 
             float3 _S27 = float3(raw_0, 1.0f);
 
-#line 1217
+#line 1224
             a_2 = a_2 * ((kernelContext_0->shadowAlphaMap_texture_0).sample((kernelContext_0->shadowAlphaMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[12U].xyz, _S27), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[13U].xyz, _S27))), level((0.0f)))).y;
 
-#line 1214
+#line 1221
         }
 
-#line 1220
+#line 1227
         if(a_2 < (kernelContext_0->material_0->alpha_cutoff_0))
         {
 
-#line 1221
+#line 1228
             discard_fragment();
 
-#line 1220
+#line 1227
         }
 
-#line 1202
+#line 1209
     }
 
-#line 1224
+#line 1231
     return;
 }
 
 
-#line 1344
+#line 1351
 float2 pixel_motion_0(float2 c_3, float3 o_0, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 1345
+#line 1352
     float _S28 = o_0.z;
 
-#line 1345
+#line 1352
     if(!(_S28 > 9.99999997475242708e-07f))
     {
 
-#line 1346
+#line 1353
         return float2(int2(int(0)) );
     }
     float2 ndc_0 = o_0.xy / float2(_S28) ;
@@ -609,7 +609,7 @@ float2 pixel_motion_0(float2 c_3, float3 o_0, KernelContext_0 thread* kernelCont
 }
 
 
-#line 1336
+#line 1343
 struct Velocity_Out_0
 {
     float depth_0 [[color(0)]];
@@ -618,47 +618,47 @@ struct Velocity_Out_0
 };
 
 
-#line 1352
+#line 1359
 Velocity_Out_0 velocity_out_0(float4 position_0, float3 o_1, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 1353
+#line 1360
     thread Velocity_Out_0 r_0;
     float _S29 = position_0.z;
 
-#line 1354
+#line 1361
     (&r_0)->depth_0 = _S29;
 
-#line 1354
+#line 1361
     float2 _S30 = pixel_motion_0(position_0.xy, o_1, kernelContext_2);
     (&r_0)->velocity_0 = _S30;
     float near_0 = kernelContext_2->velocityFrame_0->frame_0.z;
     float far_0 = kernelContext_2->velocityFrame_0->frame_0.w;
 
-#line 1357
+#line 1364
     float d_1;
     if((kernelContext_2->velocityFrame_0->flags_1.x) != 0U)
     {
 
-#line 1358
+#line 1365
         d_1 = far_0 - _S29 * (far_0 - near_0);
 
-#line 1358
+#line 1365
     }
     else
     {
 
-#line 1358
+#line 1365
         d_1 = near_0 * far_0 / (near_0 + _S29 * (far_0 - near_0));
 
-#line 1358
+#line 1365
     }
     (&r_0)->nearness_0 = - log(d_1);
     return r_0;
 }
 
 
-#line 1360
+#line 1367
 struct pixelInput_0
 {
     float2 uv_1 [[user(TEXCOORD)]];
@@ -672,43 +672,43 @@ struct pixelInput_0
 [[fragment]] Velocity_Out_0 fs_velocity_curves(pixelInput_0 _S31 [[stage_in]], float4 position_1 [[position]], Material_0 constant* material_1 [[buffer(0)]], uint device* velocityCurveWords_1 [[buffer(2)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> shadowAlphaMap_texture_1 [[texture(1)]], sampler shadowAlphaMap_sampler_1 [[sampler(1)]], Velocity_FS_natural_0 constant* velocityFrame_1 [[buffer(1)]])
 {
 
-#line 1370
+#line 1377
     thread KernelContext_0 kernelContext_3;
 
-#line 1370
+#line 1377
     (&kernelContext_3)->material_0 = material_1;
 
-#line 1370
+#line 1377
     (&kernelContext_3)->velocityCurveWords_0 = velocityCurveWords_1;
 
-#line 1370
+#line 1377
     (&kernelContext_3)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 1370
+#line 1377
     (&kernelContext_3)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 1370
+#line 1377
     (&kernelContext_3)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
 
-#line 1370
+#line 1377
     (&kernelContext_3)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
 
-#line 1370
+#line 1377
     (&kernelContext_3)->velocityFrame_0 = velocityFrame_1;
     uint entry_1 = velocityCurveWords_1[material_1->curve_table_0 + _S31.quad_0];
     if(!curves_fill_inside_0(curves_winding_0(velocityCurveWords_1, entry_1 & 2147483647U, _S31.uv1_1), curve_entry_rule_0(entry_1)))
     {
 
-#line 1373
+#line 1380
         discard_fragment();
 
-#line 1372
+#line 1379
     }
 
-#line 1372
+#line 1379
     depth_mask_0(_S31.uv_1, _S31.uv1_1, &kernelContext_3);
 
-#line 1372
+#line 1379
     Velocity_Out_0 _S32 = velocity_out_0(position_1, _S31.opened_0, &kernelContext_3);
 
 

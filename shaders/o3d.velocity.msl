@@ -30,14 +30,14 @@ struct Material_0
 };
 
 
-#line 1331
+#line 1338
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 1331
+#line 1338
 struct Velocity_FS_natural_0
 {
     float4 frame_0;
@@ -46,7 +46,7 @@ struct Velocity_FS_natural_0
 };
 
 
-#line 1331
+#line 1338
 struct KernelContext_0
 {
     Material_0 constant* material_0;
@@ -58,118 +58,118 @@ struct KernelContext_0
 };
 
 
-#line 1201
+#line 1208
 void depth_mask_0(float2 uv_0, float2 uv1_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1202
+#line 1209
     if(((kernelContext_0->material_0->flags_0) & 2048U) != 0U)
     {
 
-#line 1202
+#line 1209
         uint mask_slot_0;
 
 
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
-#line 1205
+#line 1212
             mask_slot_0 = 0U;
 
-#line 1205
+#line 1212
         }
         else
         {
 
-#line 1205
+#line 1212
             mask_slot_0 = 6U;
 
-#line 1205
+#line 1212
         }
 
-#line 1205
+#line 1212
         float2 raw_0;
         if((((kernelContext_0->material_0->uv_sets_0) >> mask_slot_0) & 1U) != 0U)
         {
 
-#line 1206
+#line 1213
             raw_0 = uv1_0;
 
-#line 1206
+#line 1213
         }
         else
         {
 
-#line 1206
+#line 1213
             raw_0 = uv_0;
 
-#line 1206
+#line 1213
         }
         float a_0 = kernelContext_0->material_0->color_0.w;
 
-#line 1207
+#line 1214
         float a_1;
         if(((kernelContext_0->material_0->flags_0) & 32U) != 0U)
         {
 
             float3 _S1 = float3(raw_0, 1.0f);
 
-#line 1211
+#line 1218
             a_1 = a_0 * ((kernelContext_0->colorMap_texture_0).sample((kernelContext_0->colorMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[0U].xyz, _S1), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[1U].xyz, _S1))), level((0.0f)))).w;
 
-#line 1208
+#line 1215
         }
         else
         {
 
-#line 1208
+#line 1215
             a_1 = a_0;
 
-#line 1208
+#line 1215
         }
 
-#line 1214
+#line 1221
         if(((kernelContext_0->material_0->flags_0) & 16384U) != 0U)
         {
 
             float3 _S2 = float3(raw_0, 1.0f);
 
-#line 1217
+#line 1224
             a_1 = a_1 * ((kernelContext_0->shadowAlphaMap_texture_0).sample((kernelContext_0->shadowAlphaMap_sampler_0), (float2(dot(kernelContext_0->material_0->uv_transforms_0[12U].xyz, _S2), 1.0f - dot(kernelContext_0->material_0->uv_transforms_0[13U].xyz, _S2))), level((0.0f)))).y;
 
-#line 1214
+#line 1221
         }
 
-#line 1220
+#line 1227
         if(a_1 < (kernelContext_0->material_0->alpha_cutoff_0))
         {
 
-#line 1221
+#line 1228
             discard_fragment();
 
-#line 1220
+#line 1227
         }
 
-#line 1202
+#line 1209
     }
 
-#line 1224
+#line 1231
     return;
 }
 
 
-#line 1344
+#line 1351
 float2 pixel_motion_0(float2 c_0, float3 o_0, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 1345
+#line 1352
     float _S3 = o_0.z;
 
-#line 1345
+#line 1352
     if(!(_S3 > 9.99999997475242708e-07f))
     {
 
-#line 1346
+#line 1353
         return float2(int2(int(0)) );
     }
     float2 ndc_0 = o_0.xy / float2(_S3) ;
@@ -177,7 +177,7 @@ float2 pixel_motion_0(float2 c_0, float3 o_0, KernelContext_0 thread* kernelCont
 }
 
 
-#line 1336
+#line 1343
 struct Velocity_Out_0
 {
     float depth_0 [[color(0)]];
@@ -186,47 +186,47 @@ struct Velocity_Out_0
 };
 
 
-#line 1352
+#line 1359
 Velocity_Out_0 velocity_out_0(float4 position_0, float3 o_1, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 1353
+#line 1360
     thread Velocity_Out_0 r_0;
     float _S4 = position_0.z;
 
-#line 1354
+#line 1361
     (&r_0)->depth_0 = _S4;
 
-#line 1354
+#line 1361
     float2 _S5 = pixel_motion_0(position_0.xy, o_1, kernelContext_2);
     (&r_0)->velocity_0 = _S5;
     float near_0 = kernelContext_2->velocityFrame_0->frame_0.z;
     float far_0 = kernelContext_2->velocityFrame_0->frame_0.w;
 
-#line 1357
+#line 1364
     float d_0;
     if((kernelContext_2->velocityFrame_0->flags_1.x) != 0U)
     {
 
-#line 1358
+#line 1365
         d_0 = far_0 - _S4 * (far_0 - near_0);
 
-#line 1358
+#line 1365
     }
     else
     {
 
-#line 1358
+#line 1365
         d_0 = near_0 * far_0 / (near_0 + _S4 * (far_0 - near_0));
 
-#line 1358
+#line 1365
     }
     (&r_0)->nearness_0 = - log(d_0);
     return r_0;
 }
 
 
-#line 1360
+#line 1367
 struct pixelInput_0
 {
     float2 uv_1 [[user(TEXCOORD)]];
@@ -236,35 +236,35 @@ struct pixelInput_0
 };
 
 
-#line 1364
+#line 1371
 [[fragment]] Velocity_Out_0 fs_velocity(pixelInput_0 _S6 [[stage_in]], float4 position_1 [[position]], Material_0 constant* material_1 [[buffer(0)]], texture2d<float, access::sample> colorMap_texture_1 [[texture(0)]], sampler colorMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> shadowAlphaMap_texture_1 [[texture(1)]], sampler shadowAlphaMap_sampler_1 [[sampler(1)]], Velocity_FS_natural_0 constant* velocityFrame_1 [[buffer(1)]])
 {
 
-#line 1364
+#line 1371
     thread KernelContext_0 kernelContext_3;
 
-#line 1364
+#line 1371
     (&kernelContext_3)->material_0 = material_1;
 
-#line 1364
+#line 1371
     (&kernelContext_3)->colorMap_texture_0 = colorMap_texture_1;
 
-#line 1364
+#line 1371
     (&kernelContext_3)->colorMap_sampler_0 = colorMap_sampler_1;
 
-#line 1364
+#line 1371
     (&kernelContext_3)->shadowAlphaMap_texture_0 = shadowAlphaMap_texture_1;
 
-#line 1364
+#line 1371
     (&kernelContext_3)->shadowAlphaMap_sampler_0 = shadowAlphaMap_sampler_1;
 
-#line 1364
+#line 1371
     (&kernelContext_3)->velocityFrame_0 = velocityFrame_1;
 
-#line 1364
+#line 1371
     depth_mask_0(_S6.uv_1, _S6.uv1_1, &kernelContext_3);
 
-#line 1364
+#line 1371
     Velocity_Out_0 _S7 = velocity_out_0(position_1, _S6.opened_0, &kernelContext_3);
 
     return _S7;

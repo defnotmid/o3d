@@ -37,7 +37,7 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	refs := s.band_tris[s.band_start[band]:s.band_start[band + 1]]
 	for r := 0; r < len(refs); {
 		t := s.chunks[refs[r].chunk].tris[refs[r].tri] // gathered from the columns once
-		if !bg_filled && blend_of(&s.materials[t.draw]) != .Opaque {
+		if !bg_filled && !replaces(blend_of(&s.materials[t.draw])) {
 			fill_band_bg(job, s, width, y0, y1)
 			bg_filled = true
 		}
@@ -1075,7 +1075,7 @@ flush_custom_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 			// when blended, as the GPU's SRC_ALPHA blend multiplies it.
 			c := q.colours[qi * 4 + l]
 			a := clamp(c.a, 0, 1)
-			k: f32 = a if blend != .Opaque else 1
+			k: f32 = 1 if replaces(blend) else a
 			write_samples(s, width, dz, x, y, q.covered[qi][l], {c.r * k, c.g * k, c.b * k, a}, blend, nil, 0, false)
 		}
 	}
@@ -1212,7 +1212,7 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz:
 			continue
 		}
 		switch blend {
-		case .Opaque:
+		case .Opaque, .Cut:
 			s.light[i] = px
 			s.depth[i] = z
 		case .Over:
@@ -1223,7 +1223,7 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz:
 		}
 		when RUNS {
 			r := [2]f32{run * light.a, light.a}
-			if blend != .Opaque {
+			if !replaces(blend) {
 				r += [2]f32{from_half(runs[i].x), from_half(runs[i].y)} * (1 - light.a)
 			}
 			runs[i] = {to_half(r.x), to_half(r.y)}

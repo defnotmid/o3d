@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 1325 "o3d.slang"
+#line 1332 "o3d.slang"
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 1325
+#line 1332
 struct Velocity_FS_natural_0
 {
     float4 frame_0;
@@ -26,18 +26,18 @@ struct KernelContext_0
 };
 
 
-#line 1344 "o3d.slang"
+#line 1351 "o3d.slang"
 float2 pixel_motion_0(float2 c_0, float3 o_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 1345
+#line 1352
     float _S1 = o_0.z;
 
-#line 1345
+#line 1352
     if(!(_S1 > 9.99999997475242708e-07f))
     {
 
-#line 1346
+#line 1353
         return float2(int2(int(0)) );
     }
     float2 ndc_0 = o_0.xy / float2(_S1) ;
@@ -45,7 +45,7 @@ float2 pixel_motion_0(float2 c_0, float3 o_0, KernelContext_0 thread* kernelCont
 }
 
 
-#line 1336
+#line 1343
 struct Velocity_Out_0
 {
     float depth_0 [[color(0)]];
@@ -54,20 +54,20 @@ struct Velocity_Out_0
 };
 
 
-#line 1382
+#line 1389
 [[fragment]] Velocity_Out_0 fs_velocity_far(float4 position_0 [[position]], Velocity_FS_natural_0 constant* velocityFrame_1 [[buffer(1)]])
 {
 
-#line 1382
+#line 1389
     thread KernelContext_0 kernelContext_1;
 
-#line 1382
+#line 1389
     (&kernelContext_1)->velocityFrame_0 = velocityFrame_1;
     float2 ndc_1 = float2(position_0.x / velocityFrame_1->frame_0.x * 2.0f - 1.0f, 1.0f - position_0.y / velocityFrame_1->frame_0.y * 2.0f);
     thread Velocity_Out_0 r_0;
     (&r_0)->depth_0 = 0.0f;
 
-#line 1385
+#line 1392
     float2 _S2 = pixel_motion_0(position_0.xy, (((float4(ndc_1, 0.0f, 1.0f)) * (matrix<float,int(4),int(4)> (velocityFrame_1->openedFar_0.data_0[int(0)][int(0)], velocityFrame_1->openedFar_0.data_0[int(1)][int(0)], velocityFrame_1->openedFar_0.data_0[int(2)][int(0)], velocityFrame_1->openedFar_0.data_0[int(3)][int(0)], velocityFrame_1->openedFar_0.data_0[int(0)][int(1)], velocityFrame_1->openedFar_0.data_0[int(1)][int(1)], velocityFrame_1->openedFar_0.data_0[int(2)][int(1)], velocityFrame_1->openedFar_0.data_0[int(3)][int(1)], velocityFrame_1->openedFar_0.data_0[int(0)][int(2)], velocityFrame_1->openedFar_0.data_0[int(1)][int(2)], velocityFrame_1->openedFar_0.data_0[int(2)][int(2)], velocityFrame_1->openedFar_0.data_0[int(3)][int(2)], velocityFrame_1->openedFar_0.data_0[int(0)][int(3)], velocityFrame_1->openedFar_0.data_0[int(1)][int(3)], velocityFrame_1->openedFar_0.data_0[int(2)][int(3)], velocityFrame_1->openedFar_0.data_0[int(3)][int(3)])))).xyw, &kernelContext_1);
     (&r_0)->velocity_0 = _S2;
     (&r_0)->nearness_0 = -10000.0f;
