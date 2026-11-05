@@ -54,10 +54,11 @@ POST_VERT_SPV :: #load("../shaders/post.vert.spv")
 OUTPUT_FRAG_SPV :: #load("../shaders/post.output.spv")
 POST_VERT_MSL :: #load("../shaders/post.vert.msl")
 OUTPUT_FRAG_MSL :: #load("../shaders/post.output.msl")
-// Depth of field: the tiles' largest blur, near them, the half-size copy,
-// the gather.
+// Depth of field: the tiles' rows' largest blur, the tiles', near them, the
+// half-size copy, the gather.
 @(private = "file", rodata)
 FOCUS_FRAGS_SPV := [Focus_Pass][]u8 {
+	.Rows   = #load("../shaders/post.focus_rows.spv"),
 	.Tiles  = #load("../shaders/post.focus_tiles.spv"),
 	.Near   = #load("../shaders/post.focus_near.spv"),
 	.Half   = #load("../shaders/post.focus_half.spv"),
@@ -65,6 +66,7 @@ FOCUS_FRAGS_SPV := [Focus_Pass][]u8 {
 }
 @(private = "file", rodata)
 FOCUS_FRAGS_MSL := [Focus_Pass][]u8 {
+	.Rows   = #load("../shaders/post.focus_rows.msl"),
 	.Tiles  = #load("../shaders/post.focus_tiles.msl"),
 	.Near   = #load("../shaders/post.focus_near.msl"),
 	.Half   = #load("../shaders/post.focus_half.msl"),
@@ -72,6 +74,7 @@ FOCUS_FRAGS_MSL := [Focus_Pass][]u8 {
 }
 @(private = "file", rodata)
 FOCUS_ENTRIES := [Focus_Pass]cstring {
+	.Rows   = "fs_focus_rows",
 	.Tiles  = "fs_focus_tiles",
 	.Near   = "fs_focus_near",
 	.Half   = "fs_focus_half",
@@ -79,6 +82,7 @@ FOCUS_ENTRIES := [Focus_Pass]cstring {
 }
 
 Focus_Pass :: enum u8 {
+	Rows,
 	Tiles,
 	Near,
 	Half,
@@ -582,6 +586,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.bg_pipeline = make_background_pipeline(g)
 	g.depth_pipeline = make_fullscreen_pipeline(g, g.depth_vert, g.depth_frag, DEPTH_IMAGE_FORMAT)
 	g.output_pipeline = make_fullscreen_pipeline(g, g.post_vert, g.output_frag, COLOR_FORMAT)
+	g.focus_pipelines[.Rows] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Rows], SHADOW_FORMAT)
 	g.focus_pipelines[.Tiles] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Tiles], SHADOW_FORMAT)
 	g.focus_pipelines[.Near] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Near], SHADOW_FORMAT)
 	g.focus_pipelines[.Half] = make_fullscreen_pipeline(g, g.post_vert, g.focus_frags[.Half], LIGHT_FORMAT, SHADOW_FORMAT)
@@ -1359,8 +1364,8 @@ ensure_focus :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
 	release_focus(g, job)
 	tiles := [2]u32{(width + o3d.FOCUS_TILE - 1) / o3d.FOCUS_TILE, (height + o3d.FOCUS_TILE - 1) / o3d.FOCUS_TILE}
 	half := [2]u32{(width + 1) / 2, (height + 1) / 2}
-	sizes := [4][2]u32{tiles, tiles, half, half}
-	formats := [4]sdl.GPUTextureFormat{SHADOW_FORMAT, SHADOW_FORMAT, LIGHT_FORMAT, SHADOW_FORMAT}
+	sizes := [5][2]u32{{tiles.x, height}, tiles, tiles, half, half}
+	formats := [5]sdl.GPUTextureFormat{SHADOW_FORMAT, SHADOW_FORMAT, SHADOW_FORMAT, LIGHT_FORMAT, SHADOW_FORMAT}
 	for &t, i in job.focus_tables {
 		t = sdl.CreateGPUTexture(g.device, {type = .D2, format = formats[i], usage = {.SAMPLER, .COLOR_TARGET}, width = sizes[i].x, height = sizes[i].y, layer_count_or_depth = 1, num_levels = 1})
 		if t == nil {

@@ -85,16 +85,24 @@ float4 fs_output(float4 position : SV_Position) : SV_Target {
     return output(light_at(int2(position.xy)));
 }
 
-// A tile's largest blur.
+// A tile's row's largest blur (the tiles across by the frame's rows), then a
+// tile's: the largest of its rows'. As fs_motion_rows and fs_motion_tiles.
+[shader("fragment")]
+float fs_focus_rows(float4 position : SV_Position) : SV_Target {
+    int2 t = int2(position.xy);
+    float m = 0;
+    for (int x = t.x * FOCUS_TILE; x < min((t.x + 1) * FOCUS_TILE, int(post.frame.x)); x++) {
+        m = max(m, focus_blur(key_at(int2(x, t.y))));
+    }
+    return m;
+}
+
 [shader("fragment")]
 float fs_focus_tiles(float4 position : SV_Position) : SV_Target {
     int2 t = int2(position.xy);
-    int2 size = int2(post.frame.xy);
     float m = 0;
-    for (int y = t.y * FOCUS_TILE; y < min((t.y + 1) * FOCUS_TILE, size.y); y++) {
-        for (int x = t.x * FOCUS_TILE; x < min((t.x + 1) * FOCUS_TILE, size.x); x++) {
-            m = max(m, focus_blur(key_at(int2(x, y))));
-        }
+    for (int y = t.y * FOCUS_TILE; y < min((t.y + 1) * FOCUS_TILE, int(post.frame.y)); y++) {
+        m = max(m, tileMap.SampleLevel((float2(t.x, y) + 0.5) / float2(post.frame.z, post.frame.y), 0));
     }
     return m;
 }

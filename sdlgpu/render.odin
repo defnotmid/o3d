@@ -107,11 +107,11 @@ Job :: struct {
 	runs_resolved:        ^sdl.GPUTexture,
 	reflection_size:      [3]u32,
 	// The depth of field (`o3d.focus_of`) when the frame has one: its
-	// post passes' uniforms and its tables (tiles, near, half light, half
-	// keys) at `focus_size`.
+	// post passes' uniforms and its tables (tiles' rows, tiles, near, half
+	// light, half keys) at `focus_size`.
 	focus:                bool,
 	post:                 Post_Uniforms,
-	focus_tables:         [4]^sdl.GPUTexture,
+	focus_tables:         [5]^sdl.GPUTexture,
 	focus_size:           [2]u32,
 	// Motion blur (`o3d.motion_of`) when the frame has it: its depth pass
 	// also writes each pixel's velocity and nearness (at `depth_size`), the
@@ -1007,10 +1007,11 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		job.post.tone.zw = {f32(job.blurred_size.x), f32(job.blurred_size.y)}
 	}
 	if job.focus {
-		tiles, near, half, half_keys := job.focus_tables[0], job.focus_tables[1], job.focus_tables[2], job.focus_tables[3]
+		rows, tiles, near, half, half_keys := job.focus_tables[0], job.focus_tables[1], job.focus_tables[2], job.focus_tables[3], job.focus_tables[4]
 		tile_size := [2]u32{u32(job.post.frame.z), u32(job.post.frame.w)}
 		half_size := [2]u32{(width + 1) / 2, (height + 1) / 2}
-		post_draw(g, cmd, g.focus_pipelines[.Tiles], {tiles}, tile_size, #partial Post_Bindings{.Depth = job.depth_map}, &job.post)
+		post_draw(g, cmd, g.focus_pipelines[.Rows], {rows}, {tile_size.x, height}, #partial Post_Bindings{.Depth = job.depth_map}, &job.post)
+		post_draw(g, cmd, g.focus_pipelines[.Tiles], {tiles}, tile_size, #partial Post_Bindings{.Tiles = rows}, &job.post)
 		post_draw(g, cmd, g.focus_pipelines[.Near], {near}, tile_size, #partial Post_Bindings{.Tiles = tiles}, &job.post)
 		post_draw(g, cmd, g.focus_pipelines[.Half], {half, half_keys}, half_size, #partial Post_Bindings{.Light = light, .Depth = job.depth_map}, &job.post)
 		post_draw(g, cmd, g.focus_pipelines[.Gather], {g.output}, {width, height}, #partial Post_Bindings{.Light = light, .Depth = job.depth_map, .Tiles = near, .Half = half, .Half_Keys = half_keys}, &job.post)

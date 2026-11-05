@@ -39,6 +39,7 @@ UNITS=(
 	depth:frag:fs_main
 	post:vert:vs_main
 	post:output:fs_output
+	post:focus_rows:fs_focus_rows
 	post:focus_tiles:fs_focus_tiles
 	post:focus_near:fs_focus_near
 	post:focus_half:fs_focus_half
