@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 17 "post.slang"
+#line 20 "post.slang"
 struct Post_FS_0
 {
     float4 tone_0;
@@ -12,6 +12,8 @@ struct Post_FS_0
     float4 frame_0;
     float4 motion_0;
     float4 motion_size_0;
+    float4 bloom_0;
+    float4 bloom_size_0;
 };
 
 
@@ -21,15 +23,33 @@ struct KernelContext_0
     Post_FS_0 constant* post_0;
     texture2d<float, access::sample> lightMap_texture_0;
     sampler lightMap_sampler_0;
+    texture2d<float, access::sample> bloomMap_texture_0;
+    sampler bloomMap_sampler_0;
 };
 
 
-#line 63 "post.slang"
+#line 70 "post.slang"
 float4 light_at_0(int2 p_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 64
+#line 71
     return ((kernelContext_0->lightMap_texture_0).sample((kernelContext_0->lightMap_sampler_0), ((float2(p_0) + float2(0.5f) ) / kernelContext_0->post_0->tone_0.zw), level((0.0f))));
+}
+
+
+#line 92
+float4 bloomed_0(float4 light_0, int2 p_1, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 93
+    if((kernelContext_1->post_0->bloom_0.z) <= 0.0f)
+    {
+
+#line 94
+        return light_0;
+    }
+    float3 s_0 = ((kernelContext_1->bloomMap_texture_0).sample((kernelContext_1->bloomMap_sampler_0), ((float2(p_1) + float2(0.5f) ) / kernelContext_1->post_0->frame_0.xy), level((0.0f)))).xyz * float3(kernelContext_1->post_0->bloom_0.z) ;
+    return float4(light_0.xyz + s_0, max(light_0.w, min(max(s_0.x, max(s_0.y, s_0.z)), 1.0f)));
 }
 
 
@@ -202,19 +222,19 @@ float3 tone_map_0(float3 c_0, uint mode_0, float exposure_0)
 
 #line 104
         }
-        float3 p_1 = v_0 - float3(offset_0) ;
-        float _S25 = max(p_1.x, max(p_1.y, p_1.z));
+        float3 p_2 = v_0 - float3(offset_0) ;
+        float _S25 = max(p_2.x, max(p_2.y, p_2.z));
         if(_S25 < 0.75999999046325684f)
         {
 
 #line 108
-            return saturate(p_1);
+            return saturate(p_2);
         }
 
         float new_peak_0 = 1.0f - 0.0576000027358532f / (_S25 + 0.24000000953674316f - 0.75999999046325684f);
 
 
-        return saturate(mix(p_1 * float3((new_peak_0 / _S25)) , float3(new_peak_0) , float3((1.0f - 1.0f / (0.15000000596046448f * (_S25 - new_peak_0) + 1.0f))) ));
+        return saturate(mix(p_2 * float3((new_peak_0 / _S25)) , float3(new_peak_0) , float3((1.0f - 1.0f / (0.15000000596046448f * (_S25 - new_peak_0) + 1.0f))) ));
     }
     return c_0;
 }
@@ -251,19 +271,19 @@ float linear_to_srgb_0(float c_1)
 }
 
 
-#line 51 "post.slang"
-float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_1)
+#line 58 "post.slang"
+float4 output_0(float4 light_1, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 52
-    float a_0 = saturate(light_0.w);
+#line 59
+    float a_0 = saturate(light_1.w);
     if(a_0 <= 0.0f)
     {
 
-#line 54
+#line 61
         return float4(int4(int(0)) );
     }
-    float3 c_2 = tone_map_0(light_0.xyz / float3(a_0) , uint(kernelContext_1->post_0->tone_0.x), kernelContext_1->post_0->tone_0.y);
+    float3 c_2 = tone_map_0(light_1.xyz / float3(a_0) , uint(kernelContext_2->post_0->tone_0.x), kernelContext_2->post_0->tone_0.y);
     float k_0 = clamp(max(c_2.x, max(c_2.y, c_2.z)), 1.0f, 1.0f / a_0);
     float3 c_3 = c_2 / float3(k_0) ;
     float m_0 = a_0 * k_0;
@@ -271,37 +291,47 @@ float4 output_0(float4 light_0, KernelContext_0 thread* kernelContext_1)
 }
 
 
-#line 60
+#line 67
 struct pixelOutput_0
 {
     float4 output_1 [[color(0)]];
 };
 
 
-#line 84
-[[fragment]] pixelOutput_0 fs_output(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]])
+#line 101
+[[fragment]] pixelOutput_0 fs_output(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> lightMap_texture_1 [[texture(0)]], sampler lightMap_sampler_1 [[sampler(0)]], texture2d<float, access::sample> bloomMap_texture_1 [[texture(1)]], sampler bloomMap_sampler_1 [[sampler(1)]])
 {
 
-#line 84
-    thread KernelContext_0 kernelContext_2;
+#line 101
+    thread KernelContext_0 kernelContext_3;
 
-#line 84
-    (&kernelContext_2)->post_0 = post_1;
+#line 101
+    (&kernelContext_3)->post_0 = post_1;
 
-#line 84
-    (&kernelContext_2)->lightMap_texture_0 = lightMap_texture_1;
+#line 101
+    (&kernelContext_3)->lightMap_texture_0 = lightMap_texture_1;
 
-#line 84
-    (&kernelContext_2)->lightMap_sampler_0 = lightMap_sampler_1;
+#line 101
+    (&kernelContext_3)->lightMap_sampler_0 = lightMap_sampler_1;
 
-#line 84
-    float4 _S28 = light_at_0(int2(position_0.xy), &kernelContext_2);
+#line 101
+    (&kernelContext_3)->bloomMap_texture_0 = bloomMap_texture_1;
 
-#line 84
-    float4 _S29 = output_0(_S28, &kernelContext_2);
+#line 101
+    (&kernelContext_3)->bloomMap_sampler_0 = bloomMap_sampler_1;
+    int2 _S28 = int2(position_0.xy);
 
-#line 84
-    pixelOutput_0 _S30 = { _S29 };
-    return _S30;
+#line 102
+    float4 _S29 = light_at_0(_S28, &kernelContext_3);
+
+#line 102
+    float4 _S30 = bloomed_0(_S29, _S28, &kernelContext_3);
+
+#line 102
+    float4 _S31 = output_0(_S30, &kernelContext_3);
+
+#line 102
+    pixelOutput_0 _S32 = { _S31 };
+    return _S32;
 }
 

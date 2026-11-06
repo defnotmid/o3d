@@ -39,6 +39,7 @@ Focus_Job :: struct {
 	half_w, half_h:   int,
 	tone_mapping:     Tone_Mapping,
 	tone_exposure:    f32,
+	bloom:            Bloom_Output,
 }
 
 // What the phases read and write of the renderer.
@@ -54,7 +55,7 @@ Software_View :: struct {
 // along its motion) and depth (`s.depth_map`), blurred by `f`, tone mapped
 // and encoded.
 @(private)
-depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, tone_mapping: Tone_Mapping, tone_exposure: f32, pool: ^thread.Pool) {
+depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, tone_mapping: Tone_Mapping, tone_exposure: f32, bloom: Bloom_Output, pool: ^thread.Pool) {
 	w, h := s.width, s.height
 	job := Focus_Job {
 		s             = {frame[:w * h], s.depth_map[:w * h], s.pixels, &s.focus},
@@ -69,6 +70,7 @@ depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, 
 		half_h        = (h + 1) / 2,
 		tone_mapping  = tone_mapping,
 		tone_exposure = tone_exposure,
+		bloom         = bloom,
 	}
 	t := &s.focus
 	table_grow_non_zero(&t.keys, w * h)
@@ -191,7 +193,7 @@ focus_gather :: proc(data: rawptr, y, _: int) {
 			}
 			sum /= count
 		}
-		out := output(sum, job.tone_mapping, job.tone_exposure)
+		out := output(bloom_light(sum, job.bloom, x, y, w, job.height), job.tone_mapping, job.tone_exposure)
 		copy(job.s.pixels[i * 4:][:4], out[:])
 	}
 }

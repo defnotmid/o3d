@@ -121,6 +121,7 @@ Software :: struct {
 	// resolved by the bands, and the gather's tables (depth_of_field.odin).
 	frame:         [dynamic][4]f32,
 	focus:         Focus_Tables,
+	bloom:         Bloom_Tables,
 	// With motion blur: each pixel's velocity and nearness from the depth
 	// pass, the light blurred along them, and the filter's tables
 	// (motion_blur.odin).
@@ -151,6 +152,7 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.mirror_runs)
 	delete(s.frame)
 	focus_tables_destroy(&s.focus)
+	bloom_tables_destroy(&s.bloom)
 	delete(s.velocity)
 	delete(s.nearness)
 	delete(s.blurred)
@@ -438,34 +440,41 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.keep = true
 	}
 	focus, blurred := focus_of(active.camera, height)
-	if blurred || moving {
+	chain, bloomed := bloom_of(active.bloom, width, height)
+	if blurred || moving || bloomed {
 		table_grow_non_zero(&s.frame, width * height)
 		job.light_into = s.frame[:width * height]
 	}
 	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))
-	// The frame's light blurred along its motion, then through its depth
-	// of field, tone mapped and encoded.
-	frame := s.frame[:width * height] if blurred || moving else nil
+	// The frame's light blurred along its motion, its bloom over that, then
+	// through its depth of field, tone mapped and encoded.
+	frame := s.frame[:width * height] if blurred || moving || bloomed else nil
 	if moving {
 		table_grow_non_zero(&s.blurred, width * height)
 		motion_blur(&s.motion, frame, s.velocity[:], s.nearness[:], width, height, motion_params(active.camera, height), s.blurred[:width * height], pool)
 		frame = s.blurred[:width * height]
 	}
+	bloom: Bloom_Output
+	if bloomed {
+		bloom = bloom_run(&s.bloom, chain, frame, width, height, pool)
+	}
 	if blurred {
-		depth_of_field(s, frame, focus, active.camera, active.tone_mapping, active.tone_mapping_exposure, pool)
-	} else if moving {
+		depth_of_field(s, frame, focus, active.camera, active.tone_mapping, active.tone_mapping_exposure, bloom, pool)
+	} else if moving || bloomed {
 		Output_Job :: struct {
 			frame:         [][4]f32,
 			pixels:        []u8,
-			width:         int,
+			width, height: int,
 			tone_mapping:  Tone_Mapping,
 			tone_exposure: f32,
+			bloom:         Bloom_Output,
 		}
-		out := Output_Job{frame, s.pixels, width, active.tone_mapping, active.tone_mapping_exposure}
+		out := Output_Job{frame, s.pixels, width, height, active.tone_mapping, active.tone_mapping_exposure, bloom}
 		parallel(pool, height, &out, proc(data: rawptr, y, _: int) {
 			o := (^Output_Job)(data)
-			for i in y * o.width ..< (y + 1) * o.width {
-				px := output(o.frame[i], o.tone_mapping, o.tone_exposure)
+			for x in 0 ..< o.width {
+				i := y * o.width + x
+				px := output(bloom_light(o.frame[i], o.bloom, x, y, o.width, o.height), o.tone_mapping, o.tone_exposure)
 				copy(o.pixels[i * 4:][:4], px[:])
 			}
 		})

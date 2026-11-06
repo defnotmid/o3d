@@ -49,6 +49,9 @@ UNITS=(
 	post:motion_tiles:fs_motion_tiles
 	post:motion_around:fs_motion_around
 	post:motion:fs_motion
+	post:bloom_bright:fs_bloom_bright
+	post:bloom_down:fs_bloom_down
+	post:bloom_blur:fs_bloom_blur
 )
 for unit in "${UNITS[@]}"; do
 	IFS=: read -r mod suffix entry <<<"$unit"

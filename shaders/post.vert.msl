@@ -10,54 +10,54 @@ struct vertexOutput_0
 };
 
 
-#line 45 "post.slang"
+#line 52 "post.slang"
 [[vertex]] vertexOutput_0 vs_main(uint vid_0 [[vertex_id]])
 {
 
-#line 45
+#line 52
     float _S1;
     if(vid_0 == 1U)
     {
 
-#line 46
+#line 53
         _S1 = 3.0f;
 
-#line 46
+#line 53
     }
     else
     {
 
-#line 46
+#line 53
         _S1 = -1.0f;
 
-#line 46
+#line 53
     }
 
-#line 46
+#line 53
     float _S2;
 
-#line 46
+#line 53
     if(vid_0 == 2U)
     {
 
-#line 46
+#line 53
         _S2 = 3.0f;
 
-#line 46
+#line 53
     }
     else
     {
 
-#line 46
+#line 53
         _S2 = -1.0f;
 
-#line 46
+#line 53
     }
 
-#line 46
+#line 53
     vertexOutput_0 _S3 = { float4(_S1, _S2, 0.0f, 1.0f) };
 
-#line 46
+#line 53
     return _S3;
 }
 

@@ -173,6 +173,34 @@ MOTION_ENTRIES := [Motion_Pass]cstring {
 	.Gather = "fs_motion",
 }
 
+// Bloom: its chain (post.slang's fs_bloom_*).
+Bloom_Pass :: enum u8 {
+	Bright,
+	Down,
+	Blur,
+}
+
+@(private = "file", rodata)
+BLOOM_FRAGS_SPV := [Bloom_Pass][]u8 {
+	.Bright = #load("../shaders/post.bloom_bright.spv"),
+	.Down   = #load("../shaders/post.bloom_down.spv"),
+	.Blur   = #load("../shaders/post.bloom_blur.spv"),
+}
+
+@(private = "file", rodata)
+BLOOM_FRAGS_MSL := [Bloom_Pass][]u8 {
+	.Bright = #load("../shaders/post.bloom_bright.msl"),
+	.Down   = #load("../shaders/post.bloom_down.msl"),
+	.Blur   = #load("../shaders/post.bloom_blur.msl"),
+}
+
+@(private = "file", rodata)
+BLOOM_ENTRIES := [Bloom_Pass]cstring {
+	.Bright = "fs_bloom_bright",
+	.Down   = "fs_bloom_down",
+	.Blur   = "fs_bloom_blur",
+}
+
 // The frame as the caller gets it, and textures: sRGB-encoded bytes,
 // premultiplied.
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
@@ -257,7 +285,9 @@ GPU :: struct {
 	velocity_pipelines:       [3][o3d.Side]^sdl.GPUGraphicsPipeline,
 	velocity_far_pipeline:    ^sdl.GPUGraphicsPipeline,
 	motion_frags:             [Motion_Pass]^sdl.GPUShader,
+	bloom_frags:              [Bloom_Pass]^sdl.GPUShader,
 	motion_pipelines:         [Motion_Pass]^sdl.GPUGraphicsPipeline,
+	bloom_pipelines:          [Bloom_Pass]^sdl.GPUGraphicsPipeline,
 	// The frame's depth as distance into the host's image.
 	depth_vert, depth_frag:   ^sdl.GPUShader,
 	depth_pipeline:           ^sdl.GPUGraphicsPipeline,
@@ -386,11 +416,13 @@ Material_Uniforms :: struct {
 Post_Uniforms :: struct {
 	tone, lens, camera, frame: [4]f32,
 	motion, motion_size:       [4]f32,
+	bloom, bloom_size:         [4]f32,
 }
 
 // The post passes' maps, in their slots (post.slang's).
 Post_Maps :: enum u8 {
 	Light,
+	Bloom,
 	Depth,
 	Tiles,
 	Half,
@@ -527,7 +559,7 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	g.depth_vert = sdl.CreateGPUShader(g.device, {code_size = len(depth_vert_code), code = raw_data(depth_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX})
 	g.depth_frag = sdl.CreateGPUShader(g.device, {code_size = len(depth_frag_code), code = raw_data(depth_frag_code), entrypoint = fs_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
 	g.post_vert = sdl.CreateGPUShader(g.device, {code_size = len(post_vert_code), code = raw_data(post_vert_code), entrypoint = vs_entry, format = format, stage = .VERTEX})
-	g.output_frag = sdl.CreateGPUShader(g.device, {code_size = len(output_code), code = raw_data(output_code), entrypoint = output_entry, format = format, stage = .FRAGMENT, num_samplers = 1, num_uniform_buffers = 1})
+	g.output_frag = sdl.CreateGPUShader(g.device, {code_size = len(output_code), code = raw_data(output_code), entrypoint = output_entry, format = format, stage = .FRAGMENT, num_samplers = 2, num_uniform_buffers = 1})
 	for sh in Velocity_Shader {
 		code := VELOCITY_SPV[sh] if format == {.SPIRV} else VELOCITY_MSL[sh]
 		entry := cstring("main") if format == {.SPIRV} else VELOCITY_ENTRIES[sh]
@@ -542,6 +574,14 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 		entry := cstring("main") if format == {.SPIRV} else MOTION_ENTRIES[pass]
 		g.motion_frags[pass] = sdl.CreateGPUShader(g.device, {code_size = len(code), code = raw_data(code), entrypoint = entry, format = format, stage = .FRAGMENT, num_samplers = len(Post_Maps), num_uniform_buffers = 1})
 		if g.motion_frags[pass] == nil {
+			return .Shader
+		}
+	}
+	for pass in Bloom_Pass {
+		code := BLOOM_FRAGS_SPV[pass] if format == {.SPIRV} else BLOOM_FRAGS_MSL[pass]
+		entry := cstring("main") if format == {.SPIRV} else BLOOM_ENTRIES[pass]
+		g.bloom_frags[pass] = sdl.CreateGPUShader(g.device, {code_size = len(code), code = raw_data(code), entrypoint = entry, format = format, stage = .FRAGMENT, num_samplers = len(Post_Maps), num_uniform_buffers = 1})
+		if g.bloom_frags[pass] == nil {
 			return .Shader
 		}
 	}
@@ -614,6 +654,12 @@ init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
 	}
 	if g.bg_pipeline == nil || g.depth_pipeline == nil || g.output_pipeline == nil {
 		return .Shader
+	}
+	for pass in Bloom_Pass {
+		g.bloom_pipelines[pass] = make_fullscreen_pipeline(g, g.post_vert, g.bloom_frags[pass], LIGHT_FORMAT)
+		if g.bloom_pipelines[pass] == nil {
+			return .Shader
+		}
 	}
 	for p in g.focus_pipelines {
 		if p == nil {
@@ -718,6 +764,16 @@ destroy :: proc(g: ^GPU) {
 		}
 	}
 	for sh in g.focus_frags {
+		if sh != nil {
+			sdl.ReleaseGPUShader(g.device, sh)
+		}
+	}
+	for p in g.bloom_pipelines {
+		if p != nil {
+			sdl.ReleaseGPUGraphicsPipeline(g.device, p)
+		}
+	}
+	for sh in g.bloom_frags {
 		if sh != nil {
 			sdl.ReleaseGPUShader(g.device, sh)
 		}
@@ -1258,6 +1314,76 @@ record_motion_blur :: proc(g: ^GPU, t: ^Motion_Tables, cmd: ^sdl.GPUCommandBuffe
 	return nil
 }
 
+// A job's bloom levels for a `width x height` frame, remade when it changes,
+// and the Gaussian's first axis at the last level's size; a chain of fewer levels
+// leaves the rest for one of more.
+@(private)
+ensure_bloom :: proc(g: ^GPU, job: ^Job, width, height: u32, levels: int) -> bool {
+	if job.bloom_size != {width, height} {
+		release_bloom(g, job)
+		job.bloom_size = {width, height}
+	}
+	make_level :: proc(g: ^GPU, width, height: u32, k: int) -> ^sdl.GPUTexture {
+		w, h := o3d.bloom_level_size(int(width), int(height), k)
+		return sdl.CreateGPUTexture(g.device, {type = .D2, format = LIGHT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = u32(w), height = u32(h), layer_count_or_depth = 1, num_levels = 1, sample_count = ._1})
+	}
+	for k in 0 ..< levels {
+		if job.bloom_levels[k] == nil {
+			job.bloom_levels[k] = make_level(g, width, height, k)
+		}
+		if job.bloom_levels[k] == nil {
+			return false
+		}
+	}
+	if job.bloom_across == nil || job.bloom_across_level != levels - 1 {
+		if job.bloom_across != nil {
+			sdl.ReleaseGPUTexture(g.device, job.bloom_across)
+		}
+		job.bloom_across = make_level(g, width, height, levels - 1)
+		job.bloom_across_level = levels - 1
+	}
+	return job.bloom_across != nil
+}
+
+@(private)
+release_bloom :: proc(g: ^GPU, job: ^Job) {
+	for t in job.bloom_levels {
+		if t != nil {
+			sdl.ReleaseGPUTexture(g.device, t)
+		}
+	}
+	if job.bloom_across != nil {
+		sdl.ReleaseGPUTexture(g.device, job.bloom_across)
+	}
+	job.bloom_levels, job.bloom_across, job.bloom_size = {}, nil, {}
+}
+
+// The chain over the frame's light; the level the output adds.
+@(private)
+record_bloom :: proc(g: ^GPU, job: ^Job, cmd: ^sdl.GPUCommandBuffer, light: ^sdl.GPUTexture, width, height: u32) -> ^sdl.GPUTexture {
+	c := job.bloom
+	u := job.post
+	u.frame.xy = {f32(width), f32(height)}
+	u.bloom = {c.threshold, c.sigma, 0, 0}
+	size :: proc(width, height: u32, k: int) -> [2]u32 {
+		w, h := o3d.bloom_level_size(int(width), int(height), k)
+		return {u32(w), u32(h)}
+	}
+	post_draw(g, cmd, g.bloom_pipelines[.Bright], {job.bloom_levels[0]}, size(width, height, 0), #partial Post_Bindings{.Light = light}, &u)
+	for k in 1 ..< c.levels {
+		to := size(width, height, k)
+		u.bloom_size = {0, 0, f32(to.x), f32(to.y)}
+		post_draw(g, cmd, g.bloom_pipelines[.Down], {job.bloom_levels[k]}, to, #partial Post_Bindings{.Bloom = job.bloom_levels[k - 1]}, &u)
+	}
+	last := job.bloom_levels[c.levels - 1]
+	to := size(width, height, c.levels - 1)
+	u.bloom_size = {1, 0, f32(to.x), f32(to.y)}
+	post_draw(g, cmd, g.bloom_pipelines[.Blur], {job.bloom_across}, to, #partial Post_Bindings{.Bloom = last}, &u)
+	u.bloom_size = {0, 1, f32(to.x), f32(to.y)}
+	post_draw(g, cmd, g.bloom_pipelines[.Blur], {last}, to, #partial Post_Bindings{.Bloom = job.bloom_across}, &u)
+	return last
+}
+
 // A full-screen pass of `pipeline` (post.slang's) into `targets` at `size`
 // from the top left, reading `maps` (a placeholder for those unread).
 @(private)
@@ -1273,9 +1399,9 @@ post_draw :: proc(g: ^GPU, cmd: ^sdl.GPUCommandBuffer, pipeline: ^sdl.GPUGraphic
 	sdl.BindGPUGraphicsPipeline(pass, pipeline)
 	bindings: [Post_Maps]sdl.GPUTextureSamplerBinding
 	for m, k in maps {
-		bindings[k] = {texture = m if m != nil else (g.dummy_texture if k == .Light || k == .Half else g.dummy_shadow), sampler = g.shadow_sampler}
+		bindings[k] = {texture = m if m != nil else (g.dummy_texture if k == .Light || k == .Half || k == .Bloom else g.dummy_shadow), sampler = g.frame_sampler if k == .Bloom else g.shadow_sampler}
 	}
-	sdl.BindGPUFragmentSamplers(pass, 0, &bindings[.Light], 1 if pipeline == g.output_pipeline else len(Post_Maps))
+	sdl.BindGPUFragmentSamplers(pass, 0, &bindings[.Light], 2 if pipeline == g.output_pipeline else len(Post_Maps))
 	sdl.PushGPUFragmentUniformData(cmd, 0, uniforms, size_of(uniforms^))
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 }

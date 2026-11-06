@@ -655,6 +655,15 @@ garbage.
   a mesh and bakes it with PMREMGenerator).
   Changing one means changing the other; the tests compare the two
   renderers.
+- **Bloom (`bloom.odin`, post.slang's `fs_bloom_*`):** `scene.bloom` (`threshold`,
+  `strength`, `radius`, as ovg's `.Bloom` filter's, so the same numbers give the
+  same glow on a 2D layer and a 3D frame) works on the frame's linear light, after
+  its motion blur and before its depth of field and tone mapping: each pixel's
+  light above the threshold, per channel, a pixel counting for no more than
+  `BLOOM_MOST_LIGHT` so that one highlight doesn't flood it; halved level by level;
+  a Gaussian with `radius` as its sigma on the level where that is a few texels.
+  It joins the light where that is tone mapped, so no pass at the frame's size is
+  added; light over nothing gives the pixel coverage. Both renderers alike.
 - **Motion blur (`motion_blur.odin`, post.slang's `fs_motion*`):** the
   frame's depth pass writes, beside its depth, each pixel's velocity (its
   place now less where its surface was at the shutter's opening, in

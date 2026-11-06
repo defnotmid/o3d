@@ -1,0 +1,56 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 20 "post.slang"
+struct Post_FS_0
+{
+    float4 tone_0;
+    float4 lens_0;
+    float4 camera_0;
+    float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
+    float4 bloom_0;
+    float4 bloom_size_0;
+};
+
+
+#line 31
+struct KernelContext_0
+{
+    Post_FS_0 constant* post_0;
+    texture2d<float, access::sample> bloomMap_texture_0;
+    sampler bloomMap_sampler_0;
+};
+
+
+#line 125
+[[fragment]] pixelOutput_0 fs_bloom_down(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> bloomMap_texture_1 [[texture(1)]], sampler bloomMap_sampler_1 [[sampler(1)]])
+{
+
+#line 125
+    thread KernelContext_0 kernelContext_0;
+
+#line 125
+    (&kernelContext_0)->post_0 = post_1;
+
+#line 125
+    (&kernelContext_0)->bloomMap_texture_0 = bloomMap_texture_1;
+
+#line 125
+    (&kernelContext_0)->bloomMap_sampler_0 = bloomMap_sampler_1;
+
+#line 125
+    pixelOutput_0 _S1 = { ((bloomMap_texture_1).sample((bloomMap_sampler_1), (position_0.xy / post_1->bloom_size_0.zw), level((0.0f)))) };
+    return _S1;
+}
+

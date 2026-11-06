@@ -498,6 +498,8 @@ Scene :: struct {
 	// Tone mapping (default .None) and exposure (0 means 1), plus scene fog.
 	tone_mapping:          Tone_Mapping,
 	tone_mapping_exposure: f32,
+	// Bloom on its light, before tone mapping (bloom.odin; none by default).
+	bloom:                 Bloom,
 	fog:                   Fog,
 	// The plane mirroring the scene for materials' `reflection` (none with
 	// a zero normal).
@@ -558,6 +560,7 @@ scene_clear :: proc(s: ^Scene) {
 	s.background_color = {}
 	s.tone_mapping = .None
 	s.tone_mapping_exposure = 0
+	s.bloom = {}
 	s.fog = {}
 	s.reflector = {}
 	s.depth = false
@@ -1272,6 +1275,7 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	out.background_color = scene.background_color
 	out.tone_mapping = scene.tone_mapping
 	out.tone_mapping_exposure = scene.tone_mapping_exposure
+	out.bloom = scene.bloom
 	out.fog = scene.fog
 	out.reflector = scene.reflector
 	out.depth = scene.depth

@@ -59,6 +59,17 @@ expect_parity :: proc(t: ^testing.T, name: string) {
 @(test)
 test_gpu_matches_software :: proc(t: ^testing.T) {expect_parity(t, "standard")}
 
+// Bloom: over a lit scene and over nothing, and after motion blur and through
+// depth of field.
+@(test)
+test_bloom_matches_software :: proc(t: ^testing.T) {expect_parity(t, "bloom")}
+
+@(test)
+test_bloom_clear_matches_software :: proc(t: ^testing.T) {expect_parity(t, "bloom_clear")}
+
+@(test)
+test_bloom_motion_focus_matches_software :: proc(t: ^testing.T) {expect_parity(t, "bloom_motion_focus")}
+
 // ShaderMaterials: oksl's SPIR-V / MSL against its programs over the
 // software renderer's triangles and quads.
 @(test)

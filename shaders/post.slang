@@ -3,9 +3,10 @@
 // SV_VertexID: its output (its light, premultiplied, tone mapped and
 // sRGB-encoded once a pixel, as raster.odin's `output`), its motion blur
 // (motion_blur.odin's phases: the longest velocity per tile and about it,
-// then the gather, written as light) and its depth of field
-// (depth_of_field.odin's phases: the largest blur per tile and near it, a
-// half-size copy, then the gather, written as the output).
+// then the gather, written as light), its bloom (bloom.odin's chain, which the
+// output adds) and its depth of field (depth_of_field.odin's phases: the
+// largest blur per tile and near it, a half-size copy, then the gather,
+// written as the output).
 import common;
 
 // tone: the tone mapping, exposure, the light texture's size; lens: the
@@ -13,7 +14,9 @@ import common;
 // near, far, orthographic; frame: its size, its tiles across and down;
 // motion: the longest half streak (pixels), nearness's scale, the tiles'
 // size (pixels); motion_size: the velocity and nearness maps' size, the
-// motion tiles across and down.
+// motion tiles across and down; bloom: the threshold, the Gaussian's sigma on
+// the chain's last level, the share of it the output adds; bloom_size: the
+// Gaussian's axis, the size of the level drawn.
 struct Post_FS {
     float4 tone;
     float4 lens;
@@ -21,6 +24,8 @@ struct Post_FS {
     float4 frame;
     float4 motion;
     float4 motion_size;
+    float4 bloom;
+    float4 bloom_size;
 };
 
 [[vk::binding(0, 3)]] ConstantBuffer<Post_FS> post : register(b0, space3);
@@ -28,15 +33,17 @@ struct Post_FS {
 // nothing is drawn); a tile table (the tiles' largest blurs, or the largest
 // near them); the half-size copy's light and keys.
 [[vk::binding(0, 2)]] Sampler2D<float4> lightMap : register(t0, space2);
-[[vk::binding(1, 2)]] Sampler2D<float> depthMap : register(t1, space2);
-[[vk::binding(2, 2)]] Sampler2D<float> tileMap : register(t2, space2);
-[[vk::binding(3, 2)]] Sampler2D<float4> halfMap : register(t3, space2);
-[[vk::binding(4, 2)]] Sampler2D<float> halfKeyMap : register(t4, space2);
+// Bloom, read linearly: the level a pass reads (the output's, the chain's last).
+[[vk::binding(1, 2)]] Sampler2D<float4> bloomMap : register(t1, space2);
+[[vk::binding(2, 2)]] Sampler2D<float> depthMap : register(t2, space2);
+[[vk::binding(3, 2)]] Sampler2D<float> tileMap : register(t3, space2);
+[[vk::binding(4, 2)]] Sampler2D<float4> halfMap : register(t4, space2);
+[[vk::binding(5, 2)]] Sampler2D<float> halfKeyMap : register(t5, space2);
 // Motion blur: each pixel's velocity and nearness; a motion tile table (the
 // tiles' longest velocity, or the longest about them).
-[[vk::binding(5, 2)]] Sampler2D<float2> velocityMap : register(t5, space2);
-[[vk::binding(6, 2)]] Sampler2D<float> nearnessMap : register(t6, space2);
-[[vk::binding(7, 2)]] Sampler2D<float2> motionMap : register(t7, space2);
+[[vk::binding(6, 2)]] Sampler2D<float2> velocityMap : register(t6, space2);
+[[vk::binding(7, 2)]] Sampler2D<float> nearnessMap : register(t7, space2);
+[[vk::binding(8, 2)]] Sampler2D<float2> motionMap : register(t8, space2);
 
 static const int FOCUS_TILE = 16;
 static const float FOCUS_INNER = 6;
@@ -80,9 +87,73 @@ float focus_blur(float key) {
     return min(post.lens.y * abs(1 - post.lens.x * key), post.lens.z);
 }
 
+// A pixel's light with the bloom added (bloom.odin's bloom_light); light over
+// nothing gives the pixel as much coverage.
+float4 bloomed(float4 light, int2 p) {
+    if (post.bloom.z <= 0) {
+        return light;
+    }
+    float3 s = bloomMap.SampleLevel((float2(p) + 0.5) / post.frame.xy, 0).rgb * post.bloom.z;
+    return float4(light.rgb + s, max(light.a, min(max(s.r, max(s.g, s.b)), 1)));
+}
+
 [shader("fragment")]
 float4 fs_output(float4 position : SV_Position) : SV_Target {
-    return output(light_at(int2(position.xy)));
+    int2 p = int2(position.xy);
+    return output(bloomed(light_at(p), p));
+}
+
+// The chain (bloom.odin's): the light above the threshold of the four pixels
+// under each of the first level's.
+static const float BLOOM_MOST_LIGHT = 16;
+
+float3 bloom_above(float3 l) {
+    l *= min(1, BLOOM_MOST_LIGHT / max(max(l.r, max(l.g, l.b)), 1e-4));
+    return max(l - post.bloom.x, float3(0));
+}
+
+[shader("fragment")]
+float4 fs_bloom_bright(float4 position : SV_Position) : SV_Target {
+    int2 p = int2(position.xy) * 2;
+    int2 q = min(p + 1, int2(post.frame.xy) - 1);
+    float3 c = bloom_above(light_at(p).rgb) + bloom_above(light_at(int2(q.x, p.y)).rgb) + bloom_above(light_at(int2(p.x, q.y)).rgb) + bloom_above(light_at(q).rgb);
+    return float4(c * 0.25, 1);
+}
+
+// A level at half the size of the one before.
+[shader("fragment")]
+float4 fs_bloom_down(float4 position : SV_Position) : SV_Target {
+    return bloomMap.SampleLevel(position.xy / post.bloom_size.zw, 0);
+}
+
+// The Gaussian along one axis (post.bloom_size.xy) of the last level; past its
+// edge there is nothing, as in ovg's.
+[shader("fragment")]
+float4 fs_bloom_blur(float4 position : SV_Position) : SV_Target {
+    int2 p = int2(position.xy);
+    int2 size = int2(post.bloom_size.zw);
+    int2 dir = int2(post.bloom_size.xy);
+    float sigma = post.bloom.y;
+    int reach = int(ceil(3 * sigma));
+    float g1 = exp(-0.5 / (sigma * sigma));
+    float g2 = g1 * g1;
+    float g0 = 1 / (sqrt(2 * 3.14159265358979) * sigma);
+    float3 sum = bloomMap.SampleLevel((float2(p) + 0.5) / float2(size), 0).rgb * g0;
+    float g = g0 * g1;
+    float step = g1 * g2;
+    for (int i = 1; i <= reach; i++) {
+        int2 a = p - dir * i;
+        int2 b = p + dir * i;
+        if (a.x >= 0 && a.y >= 0) {
+            sum += bloomMap.SampleLevel((float2(a) + 0.5) / float2(size), 0).rgb * g;
+        }
+        if (b.x < size.x && b.y < size.y) {
+            sum += bloomMap.SampleLevel((float2(b) + 0.5) / float2(size), 0).rgb * g;
+        }
+        g *= step;
+        step *= g2;
+    }
+    return float4(sum, 1);
 }
 
 // A tile's row's largest blur (the tiles across by the frame's rows), then a
@@ -190,7 +261,7 @@ float4 fs_focus(float4 position : SV_Position) : SV_Target {
         }
         sum /= count;
     }
-    return output(sum);
+    return output(bloomed(sum, p));
 }
 
 // Motion blur (motion_blur.odin's, which says how).

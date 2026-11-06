@@ -79,6 +79,9 @@ PARITY_CASES := [?]Parity_Case {
 	{"motion_focus", 271, 171, build_motion_focus},
 	{"motion_skinned", 160, 120, build_motion_skinned},
 	{"motion_custom", 240, 180, build_motion_custom},
+	{"bloom", 240, 180, build_bloom},
+	{"bloom_clear", 240, 180, build_bloom_clear},
+	{"bloom_motion_focus", 271, 171, build_bloom_motion_focus},
 	{"two_sided", 240, 180, build_two_sided},
 }
 
@@ -2502,6 +2505,45 @@ build_motion :: proc(a: ^Parity_Assets) -> string {
 	c.opened = o3d.Camera_Pose{position = c.position + {-0.25, 0.15, 0}, target = c.target + {-0.1, 0.05, 0}, fov = c.fov}
 	o3d.scene_set_draw_opened(&a.scene, 1, o3d.compose({-1.3, 0.45, -0.4}, {0, 0.2, 0}))
 	o3d.scene_set_draw_opened(&a.scene, 2, o3d.compose({-0.1, 0.25, 0.1}))
+	return ""
+}
+
+// Light past white, a narrow and a wide lamp over an unlit floor, with bloom.
+bloom_lamps :: proc(a: ^Parity_Assets) {
+	lamp := o3d.MATERIAL_DEFAULT
+	lamp.color = {0, 0, 0}
+	lamp.emissive, lamp.emissive_intensity = {1, 0.45, 0.1}, 6
+	append(&a.scene.draws, o3d.Draw{o3d.box(&a.geos, 0.5, 0.5, 0.5), o3d.compose({-0.5, 0.4, 0.3}), lamp})
+	lamp.emissive, lamp.emissive_intensity = {0.2, 0.5, 1}, 3
+	append(&a.scene.draws, o3d.Draw{o3d.sphere(&a.geos, 0.2), o3d.compose({0.6, 0.2, 0.2}), lamp})
+	a.scene.bloom = {threshold = 1, strength = 0.8, radius = 24}
+}
+
+build_bloom :: proc(a: ^Parity_Assets) -> string {
+	if e := build_standard(a); e != "" {
+		return e
+	}
+	bloom_lamps(a)
+	return ""
+}
+
+// Over nothing: the glow gives the frame coverage, for what it is drawn over.
+build_bloom_clear :: proc(a: ^Parity_Assets) -> string {
+	if e := build_bloom(a); e != "" {
+		return e
+	}
+	a.scene.background_color = {}
+	a.scene.background = 0
+	a.scene.bloom.radius = 9
+	return ""
+}
+
+// Blurred along its motion, its bloom, then through its depth of field.
+build_bloom_motion_focus :: proc(a: ^Parity_Assets) -> string {
+	if e := build_motion_focus(a); e != "" {
+		return e
+	}
+	bloom_lamps(a)
 	return ""
 }
 

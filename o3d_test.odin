@@ -729,6 +729,74 @@ test_generations :: proc(t: ^testing.T) {
 	testing.expect(t, g.generation != 0 && g.generation != first, "a new table, a new generation")
 }
 
+// A chain halves until the Gaussian is a few texels, a small frame stopping it
+// early, and the frame gets the strength it asks for.
+@(test)
+test_bloom_chain :: proc(t: ^testing.T) {
+	_, none := bloom_of({threshold = 1, strength = 0, radius = 24}, 1920, 1080)
+	testing.expect(t, !none)
+	_, none = bloom_of({threshold = 1, strength = 1, radius = 0}, 1920, 1080)
+	testing.expect(t, !none)
+	c, ok := bloom_of({threshold = 1, strength = 0.5, radius = 24}, 1920, 1080)
+	testing.expect(t, ok)
+	testing.expect_value(t, c.levels, 3)
+	testing.expect_value(t, c.sigma, 3)
+	testing.expect_value(t, c.gain, 0.5)
+	tiny, _ := bloom_of({threshold = 1, strength = 1, radius = 2}, 1920, 1080)
+	testing.expect_value(t, tiny.levels, 1)
+	testing.expect_value(t, tiny.sigma, 1)
+	small, _ := bloom_of({threshold = 1, strength = 1, radius = 1e6}, 8, 8)
+	testing.expect_value(t, small.levels, 2)
+	testing.expect_value(t, small.sigma, BLOOM_MOST_SIGMA)
+	w, h := bloom_level_size(1921, 1081, 0)
+	testing.expect(t, w == 961 && h == 541)
+	w, h = bloom_level_size(3, 3, 7)
+	testing.expect(t, w == 1 && h == 1)
+}
+
+// Bloom adds only light past its threshold, and spreads it; a frame with none
+// past it is the frame without bloom. Over nothing, the glow is drawn over
+// what is behind it.
+@(test)
+test_bloom_software :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	textures: Textures
+	defer textures_destroy(&textures)
+	shaders: Shaders
+	defer shaders_destroy(&shaders)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene.camera = {position = {0, 0, 4}, target = {0, 0, 0}, up = {0, 1, 0}, fov = 45, near = 0.1, far = 20}
+	lamp := MATERIAL_DEFAULT
+	lamp.color = {0, 0, 0}
+	lamp.emissive, lamp.emissive_intensity = {1, 1, 1}, 0.5
+	append(&scene.draws, Draw{plane(&g, 1, 1), compose({0, 0, 0}), lamp})
+	W, H :: 64, 64
+	render :: proc(scene: ^Scene, g: ^Geometries, textures: ^Textures, shaders: ^Shaders, out: []u8) {
+		s: Software
+		defer software_destroy(&s)
+		copy(out, software_render(&s, scene, g, shaders, W, H, nil, textures))
+	}
+	plain := make([]u8, W * H * 4)
+	defer delete(plain)
+	render(&scene, &g, &textures, &shaders, plain)
+	scene.bloom = {threshold = 1, strength = 1, radius = 8}
+	dim := make([]u8, W * H * 4)
+	defer delete(dim)
+	render(&scene, &g, &textures, &shaders, dim)
+	testing.expect(t, slice.equal(plain, dim), "nothing past the threshold: the frame as it was")
+	scene.draws[0].material.emissive_intensity = 8
+	bright := make([]u8, W * H * 4)
+	defer delete(bright)
+	render(&scene, &g, &textures, &shaders, bright)
+	corner := bright[(4 * W + 4) * 4:][:4]
+	testing.expect_value(t, plain[(4 * W + 4) * 4 + 3], 0)
+	near := bright[(H / 2 * W + W / 2 - 15) * 4:][:4]
+	testing.expect(t, near[3] > 0 && near[0] > 0, "the glow reaches past the lamp over nothing, with coverage")
+	testing.expect(t, near[3] >= corner[3])
+}
+
 @(test)
 test_blend_of :: proc(t: ^testing.T) {
 	blend :: proc(flags: Shading_Flags) -> Blend {

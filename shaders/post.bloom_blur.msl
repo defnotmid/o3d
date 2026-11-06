@@ -1,0 +1,202 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 20 "post.slang"
+struct Post_FS_0
+{
+    float4 tone_0;
+    float4 lens_0;
+    float4 camera_0;
+    float4 frame_0;
+    float4 motion_0;
+    float4 motion_size_0;
+    float4 bloom_0;
+    float4 bloom_size_0;
+};
+
+
+#line 31
+struct KernelContext_0
+{
+    Post_FS_0 constant* post_0;
+    texture2d<float, access::sample> bloomMap_texture_0;
+    sampler bloomMap_sampler_0;
+};
+
+
+#line 132
+[[fragment]] pixelOutput_0 fs_bloom_blur(float4 position_0 [[position]], Post_FS_0 constant* post_1 [[buffer(0)]], texture2d<float, access::sample> bloomMap_texture_1 [[texture(1)]], sampler bloomMap_sampler_1 [[sampler(1)]])
+{
+
+#line 132
+    thread KernelContext_0 kernelContext_0;
+
+#line 132
+    (&kernelContext_0)->post_0 = post_1;
+
+#line 132
+    (&kernelContext_0)->bloomMap_texture_0 = bloomMap_texture_1;
+
+#line 132
+    (&kernelContext_0)->bloomMap_sampler_0 = bloomMap_sampler_1;
+    int2 _S1 = int2(position_0.xy);
+    int2 _S2 = int2(post_1->bloom_size_0.zw);
+    int2 _S3 = int2(post_1->bloom_size_0.xy);
+    float sigma_0 = post_1->bloom_0.y;
+    int _S4 = int(ceil(3.0f * sigma_0));
+    float g1_0 = exp(-0.5f / (sigma_0 * sigma_0));
+    float g2_0 = g1_0 * g1_0;
+    float g0_0 = 1.0f / (sqrt(6.28318548202514648f) * sigma_0);
+
+#line 140
+    float2 _S5 = float2(0.5f) ;
+    float2 _S6 = float2(_S2);
+
+#line 141
+    float3 _S7 = ((bloomMap_texture_1).sample((bloomMap_sampler_1), ((float2(_S1) + _S5) / _S6), level((0.0f)))).xyz * float3(g0_0) ;
+    float _S8 = g0_0 * g1_0;
+    float _S9 = g1_0 * g2_0;
+
+#line 143
+    int i_0 = int(1);
+
+#line 143
+    float g_0 = _S8;
+
+#line 143
+    float3 sum_0 = _S7;
+
+#line 143
+    float step_0 = _S9;
+    for(;;)
+    {
+
+#line 144
+        if(i_0 <= _S4)
+        {
+        }
+        else
+        {
+
+#line 144
+            break;
+        }
+
+#line 145
+        int2 _S10 = _S3 * int2(i_0) ;
+
+#line 145
+        int2 a_0 = _S1 - _S10;
+        int2 b_0 = _S1 + _S10;
+
+#line 146
+        bool _S11;
+        if((a_0.x) >= int(0))
+        {
+
+#line 147
+            _S11 = (a_0.y) >= int(0);
+
+#line 147
+        }
+        else
+        {
+
+#line 147
+            _S11 = false;
+
+#line 147
+        }
+
+#line 147
+        float3 sum_1;
+
+#line 147
+        if(_S11)
+        {
+
+#line 147
+            sum_1 = sum_0 + (((&kernelContext_0)->bloomMap_texture_0).sample(((&kernelContext_0)->bloomMap_sampler_0), ((float2(a_0) + _S5) / _S6), level((0.0f)))).xyz * float3(g_0) ;
+
+#line 147
+        }
+        else
+        {
+
+#line 147
+            sum_1 = sum_0;
+
+#line 147
+        }
+
+#line 147
+        bool _S12;
+
+
+        if((b_0.x) < (_S2.x))
+        {
+
+#line 150
+            _S12 = (b_0.y) < (_S2.y);
+
+#line 150
+        }
+        else
+        {
+
+#line 150
+            _S12 = false;
+
+#line 150
+        }
+
+#line 150
+        if(_S12)
+        {
+
+#line 150
+            sum_0 = sum_1 + (((&kernelContext_0)->bloomMap_texture_0).sample(((&kernelContext_0)->bloomMap_sampler_0), ((float2(b_0) + _S5) / _S6), level((0.0f)))).xyz * float3(g_0) ;
+
+#line 150
+        }
+        else
+        {
+
+#line 150
+            sum_0 = sum_1;
+
+#line 150
+        }
+
+
+        float g_1 = g_0 * step_0;
+        float step_1 = step_0 * g2_0;
+
+#line 144
+        i_0 = i_0 + int(1);
+
+#line 144
+        g_0 = g_1;
+
+#line 144
+        step_0 = step_1;
+
+#line 144
+    }
+
+#line 144
+    pixelOutput_0 _S13 = { float4(sum_0, 1.0f) };
+
+#line 156
+    return _S13;
+}
+

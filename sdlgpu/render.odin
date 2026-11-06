@@ -128,6 +128,15 @@ Job :: struct {
 	blurred:              ^sdl.GPUTexture,
 	blurred_size:         [2]u32,
 	motion_tables:        Motion_Tables,
+	// Bloom (`o3d.bloom_of`) when the frame has it, on its light before the
+	// depth of field and the output: the chain's levels at `bloom_size`'s, from
+	// half of it, and the Gaussian's first axis at the last's size.
+	bloom_on:             bool,
+	bloom:                o3d.Bloom_Chain,
+	bloom_levels:         [o3d.BLOOM_MAX_LEVELS]^sdl.GPUTexture,
+	bloom_across:         ^sdl.GPUTexture,
+	bloom_across_level:   int,
+	bloom_size:           [2]u32,
 	materials:            [dynamic]o3d.Shading_Material, // per draw
 	// ShaderMaterials' uniform blocks, through the camera and the mirror.
 	blocks:               o3d.Shader_Blocks,
@@ -158,6 +167,7 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	release_reflection(g, job)
 	release_focus(g, job)
 	release_motion(g, job)
+	release_bloom(g, job)
 	delete(job.depth_draws)
 	delete(job.mirror_order)
 	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned, &job.sprite_rows}) {
@@ -820,6 +830,10 @@ prepare :: proc(g: ^GPU, job: ^Job, scene: ^o3d.Scene, geos: ^o3d.Geometries, sh
 	near := active.camera.near if active.camera.near > 0 else 0.1
 	far := active.camera.far if active.camera.far > near else near * 1e4
 	lu.frame_params = {f32(width), f32(height), near, far}
+	job.bloom, job.bloom_on = o3d.bloom_of(active.bloom, int(width), int(height))
+	if job.bloom_on && !ensure_bloom(g, job, width, height, job.bloom.levels) {
+		return .Out_Of_Memory
+	}
 	focus: o3d.Focus
 	focus, job.focus = o3d.focus_of(active.camera, int(height))
 	if job.focus {
@@ -1006,6 +1020,13 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		light = job.blurred
 		job.post.tone.zw = {f32(job.blurred_size.x), f32(job.blurred_size.y)}
 	}
+	bloom: ^sdl.GPUTexture
+	job.post.bloom = {}
+	if job.bloom_on {
+		bloom = record_bloom(g, job, cmd, light, width, height)
+		job.post.frame.xy = {f32(width), f32(height)}
+		job.post.bloom.z = job.bloom.gain
+	}
 	if job.focus {
 		rows, tiles, near, half, half_keys := job.focus_tables[0], job.focus_tables[1], job.focus_tables[2], job.focus_tables[3], job.focus_tables[4]
 		tile_size := [2]u32{u32(job.post.frame.z), u32(job.post.frame.w)}
@@ -1014,9 +1035,9 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		post_draw(g, cmd, g.focus_pipelines[.Tiles], {tiles}, tile_size, #partial Post_Bindings{.Tiles = rows}, &job.post)
 		post_draw(g, cmd, g.focus_pipelines[.Near], {near}, tile_size, #partial Post_Bindings{.Tiles = tiles}, &job.post)
 		post_draw(g, cmd, g.focus_pipelines[.Half], {half, half_keys}, half_size, #partial Post_Bindings{.Light = light, .Depth = job.depth_map}, &job.post)
-		post_draw(g, cmd, g.focus_pipelines[.Gather], {g.output}, {width, height}, #partial Post_Bindings{.Light = light, .Depth = job.depth_map, .Tiles = near, .Half = half, .Half_Keys = half_keys}, &job.post)
+		post_draw(g, cmd, g.focus_pipelines[.Gather], {g.output}, {width, height}, #partial Post_Bindings{.Light = light, .Bloom = bloom, .Depth = job.depth_map, .Tiles = near, .Half = half, .Half_Keys = half_keys}, &job.post)
 	} else {
-		post_draw(g, cmd, g.output_pipeline, {g.output}, {width, height}, #partial Post_Bindings{.Light = light}, &job.post)
+		post_draw(g, cmd, g.output_pipeline, {g.output}, {width, height}, #partial Post_Bindings{.Light = light, .Bloom = bloom}, &job.post)
 	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
 	sdl.CopyGPUTextureToTexture(copy_pass, {texture = g.output}, {texture = out}, width, height, 1, false)
