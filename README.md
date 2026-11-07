@@ -399,6 +399,14 @@ job: o3d_sdlgpu.Job                         // kept per view, reused every frame
 o3d_sdlgpu.prepare(&g, &job, &scene, &geos, &shaders, 1920, 1080, &textures)   // makes and uploads (submits its own copies)
 o3d_sdlgpu.record(&g, &job, out, cmd)      // later, in the host's command buffer: passes only
 
+// A device one thread presents on and others use: what is released waits in a table of yours
+retired: o3d_sdlgpu.Retired
+o3d_sdlgpu.init(&g, device, &retired)
+o3d_sdlgpu.retired_release(device, &retired)   // on the presenting thread, between its presents
+o3d_sdlgpu.destroy(&g)                         // pushes what it held into the table
+o3d_sdlgpu.retired_release(device, &retired)
+o3d_sdlgpu.retired_destroy(&retired)
+
 // CPU: the same pixels, rows banded on the caller's thread pool
 sw: o3d.Software
 pixels := o3d.software_render(&sw, &scene, &geos, &shaders, 1920, 1080, pool, &textures)
@@ -812,6 +820,22 @@ garbage.
   tables starts the mirrors over, and an earlier job then records
   `.Not_Prepared`) and its frame targets (grown to the largest job); each
   job has its own shadow maps and per-frame buffers.
+- **A device shared across threads:** SDL's release of a texture or buffer
+  frees its container at once, while a presenting submit on another thread
+  may be writing into that container (Vulkan's defragmenter), which corrupts
+  the heap. So a host that presents on one thread and prepares on another
+  gives `init` a `Retired` table of its own: every texture and buffer the
+  GPU gives up waits there, and the presenting thread
+  calls `retired_release` between its presents (on a device with no window
+  every submit defragments, so there it must not overlap any thread's
+  submit). What waits keeps its memory, so a table must be released
+  regularly, including after the GPU's `destroy`; a GPU that made its own
+  device empties the table before destroying it.
+  Pipelines, samplers and shaders are released at once, having no memory for
+  the defragmenter to move, and so are transfer buffers: SDL gives each its
+  own allocation, which the defragmenter never picks, so holding them would
+  only keep a read's memory. With no table (the default) everything is
+  released at once, as is right for a device one thread uses.
 - **GPU targets:** the light (RGBA16F, multisampled), its resolve, the
   depth and the output (RGBA8) targets only grow, to the largest frame
   drawn; every pass of a frame (the mirror's, the transmission snapshot's,

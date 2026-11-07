@@ -1,5 +1,6 @@
 package o3d_sdlgpu
 
+import "base:runtime"
 import "core:log"
 import "core:os"
 import "core:strings"
@@ -11,8 +12,8 @@ import sdl "vendor:sdl3"
 // silently left unchecked, unless O3D_NO_GPU is set (CI without a GPU, or
 // macOS, whose Metal driver needs the main thread the test runner does not
 // give: tools/gpu_check runs the same cases there), which skips it.
-test_gpu :: proc(t: ^testing.T, g: ^GPU) -> bool {
-	if init(g) == nil {
+test_gpu :: proc(t: ^testing.T, g: ^GPU, retired: ^Retired = nil) -> bool {
+	if init(g, nil, retired) == nil {
 		return true
 	}
 	buf: [16]u8
@@ -278,4 +279,97 @@ test_targets_grow_only :: proc(t: ^testing.T) {
 		differ += 1 if got[i] != want[i] else 0
 	}
 	testing.expectf(t, differ == 0, "%d bytes differ from a fresh GPU's frame", differ)
+}
+
+// SDL refuses a nil device with an error on the calling thread, so with no GPU
+// the error says whether a release reached SDL: with a table none does until
+// `retired_release`, with none it does at once, for a nil object never.
+@(test)
+test_retired_holds_releases :: proc(t: ^testing.T) {
+	reached :: proc() -> bool {
+		was := sdl.GetError() != ""
+		sdl.ClearError()
+		return was
+	}
+	sdl.ClearError()
+	texture := (^sdl.GPUTexture)(uintptr(16))
+	buffer := (^sdl.GPUBuffer)(uintptr(16))
+	r: Retired
+	defer retired_destroy(&r)
+
+	retire_texture(nil, &r, nil)
+	retire_buffer(nil, &r, nil)
+	retire_texture(nil, nil, nil)
+	retire_buffer(nil, nil, nil)
+	testing.expect(t, !reached() && len(r.textures) == 0 && len(r.buffers) == 0, "a nil object is nothing")
+
+	retire_texture(nil, &r, texture)
+	testing.expect(t, !reached() && len(r.textures) == 1, "a table holds a texture")
+	retired_release(nil, &r)
+	testing.expect(t, reached() && len(r.textures) == 0 && cap(r.textures) > 0, "retired_release gives a texture back, keeping capacity")
+	retire_texture(nil, nil, texture)
+	testing.expect(t, reached(), "no table releases a texture at once")
+
+	retire_buffer(nil, &r, buffer)
+	testing.expect(t, !reached() && len(r.buffers) == 1, "a table holds a buffer")
+	retired_release(nil, &r)
+	testing.expect(t, reached() && len(r.buffers) == 0 && cap(r.buffers) > 0, "retired_release gives a buffer back, keeping capacity")
+	retire_buffer(nil, nil, buffer)
+	testing.expect(t, reached(), "no table releases a buffer at once")
+
+	// A fresh table grows on the heap, from the first push on: this allocator
+	// panics if a push asks it.
+	fresh: Retired
+	defer retired_destroy(&fresh)
+	{
+		context.allocator = runtime.panic_allocator()
+		for _ in 0 ..< 1000 {
+			retire_texture(nil, &fresh, texture)
+			retire_buffer(nil, &fresh, buffer)
+		}
+	}
+	testing.expect(t, len(fresh.textures) == 1000 && len(fresh.buffers) == 1000)
+}
+
+// A GPU given a table sends its memory there: targets it grows out of, and when
+// it goes what it held on a device it borrowed. One that made its device gives
+// the table back before destroying it.
+@(test)
+test_retired_takes_a_gpus_memory :: proc(t: ^testing.T) {
+	r: Retired
+	defer retired_destroy(&r)
+	g: GPU
+	if !test_gpu(t, &g, &r) {
+		return
+	}
+	defer destroy(&g)
+	a: Parity_Assets
+	defer parity_assets_destroy(&a)
+	test_scene(&a.scene, &a.geos)
+	out := target(&g, 320, 240)
+	defer sdl.ReleaseGPUTexture(g.device, out)
+
+	testing.expect(t, render(&g, &a.scene, &a.geos, nil, out, 160, 120) == nil)
+	testing.expect(t, render(&g, &a.scene, &a.geos, nil, out, 320, 240) == nil)
+	testing.expect(t, len(r.textures) >= 3, "grown targets wait in the table")
+	retired_release(g.device, &r)
+	testing.expect(t, len(r.textures) == 0)
+	testing.expect(t, render(&g, &a.scene, &a.geos, nil, out, 320, 240) == nil, "the GPU goes on after a release")
+
+	borrower: GPU
+	testing.expect(t, init(&borrower, g.device, &r) == nil)
+	testing.expect(t, render(&borrower, &a.scene, &a.geos, nil, out, 320, 240) == nil)
+	destroy(&borrower)
+	testing.expect(t, len(r.textures) > 0 && len(r.buffers) > 0, "a destroyed GPU's memory waits in the table")
+	retired_release(g.device, &r)
+	testing.expect(t, render(&g, &a.scene, &a.geos, nil, out, 320, 240) == nil, "the device goes on after the borrower")
+
+	own: Retired
+	defer retired_destroy(&own)
+	owner: GPU
+	if !test_gpu(t, &owner, &own) {
+		return
+	}
+	destroy(&owner)
+	testing.expect(t, len(own.textures) == 0 && len(own.buffers) == 0, "a device's owner empties the table before destroying it")
 }

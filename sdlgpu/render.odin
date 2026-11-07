@@ -21,9 +21,7 @@ sync_mirrors :: proc(g: ^GPU, geos: ^o3d.Geometries, shaders: ^o3d.Shaders, text
 	}
 	if textures != nil && textures.generation != g.mirrored.textures {
 		for tex in g.textures {
-			if tex != nil {
-				sdl.ReleaseGPUTexture(g.device, tex)
-			}
+			retire_texture(g.device, g.retired, tex)
 		}
 		clear(&g.textures)
 		g.mirrored.textures = textures.generation
@@ -171,9 +169,7 @@ job_destroy :: proc(g: ^GPU, job: ^Job) {
 	delete(job.depth_draws)
 	delete(job.mirror_order)
 	for b in ([]^Pool_Buffer{&job.dynamic_vertices, &job.dynamic_indices, &job.custom_skinned, &job.sprite_rows}) {
-		if b.buffer != nil {
-			sdl.ReleaseGPUBuffer(g.device, b.buffer)
-		}
+		retire_buffer(g.device, g.retired, b.buffer)
 	}
 	delete(job.order)
 	delete(job.materials)
@@ -361,9 +357,7 @@ upload_pools :: proc(g: ^GPU, uploads: []Upload, pass: ^sdl.GPUCopyPass) -> o3d.
 	for u in uploads {
 		size, b := u32(len(u.data)), u.pool
 		if size > b.capacity || b.buffer == nil {
-			if b.buffer != nil {
-				sdl.ReleaseGPUBuffer(g.device, b.buffer)
-			}
+			retire_buffer(g.device, g.retired, b.buffer)
 			b.capacity = max(size, b.capacity * 2, 64 << 10)
 			b.uploaded = 0
 			b.buffer = sdl.CreateGPUBuffer(g.device, {usage = u.usage, size = b.capacity})
@@ -676,13 +670,13 @@ upload_textures :: proc(g: ^GPU, textures: ^o3d.Textures, pass: ^sdl.GPUCopyPass
 		byte_size := tex.texel_count * texel_size
 		transfer := sdl.CreateGPUTransferBuffer(g.device, {usage = .UPLOAD, size = byte_size})
 		if transfer == nil {
-			sdl.ReleaseGPUTexture(g.device, gpu_tex)
+			retire_texture(g.device, g.retired, gpu_tex)
 			return .Out_Of_Memory
 		}
 		mapped := sdl.MapGPUTransferBuffer(g.device, transfer, false)
 		if mapped == nil {
 			sdl.ReleaseGPUTransferBuffer(g.device, transfer)
-			sdl.ReleaseGPUTexture(g.device, gpu_tex)
+			retire_texture(g.device, g.retired, gpu_tex)
 			return .Device
 		}
 		if tex.hdr {

@@ -10,6 +10,7 @@
 // `Geometries`' shared arrays: what is new uploads at the start of a frame.
 package o3d_sdlgpu
 
+import "base:runtime"
 import "core:math"
 import "core:slice"
 import "core:sync"
@@ -245,9 +246,79 @@ Pool_Buffer :: struct {
 	capacity, uploaded: u32,
 }
 
+// GPU memory given up and not yet given back to SDL. Releasing a texture or
+// buffer frees its container at once, while a presenting submit may be writing
+// into that container (Vulkan's defragmenter moves what it holds), so on a
+// device that one thread presents on and others use, only the presenting
+// thread releases, outside its submits, and everything else pushes here. The
+// caller's, one per device, zero to start with, kept until the GPUs given it
+// are destroyed (their destroy pushes what they held) and what it holds is
+// released. Only what the defragmenter can move comes here: pipelines, samplers
+// and shaders have no memory, and a transfer buffer has its own allocation,
+// which it never picks.
+Retired :: struct {
+	mutex:    sync.Mutex,
+	textures: [dynamic]^sdl.GPUTexture,
+	buffers:  [dynamic]^sdl.GPUBuffer,
+}
+
+// Gives up a texture (nil: nothing): into `r`, from any thread, or with no
+// table to SDL at once. The arrays grow on the heap whatever the caller's
+// allocator, since they outlive the frame and the thread that pushed.
+retire_texture :: proc(device: ^sdl.GPUDevice, r: ^Retired, t: ^sdl.GPUTexture) {
+	if t == nil {
+		return
+	}
+	if r == nil {
+		sdl.ReleaseGPUTexture(device, t)
+		return
+	}
+	context.allocator = runtime.heap_allocator()
+	sync.guard(&r.mutex)
+	append(&r.textures, t)
+}
+
+// `retire_texture`, for a buffer.
+retire_buffer :: proc(device: ^sdl.GPUDevice, r: ^Retired, b: ^sdl.GPUBuffer) {
+	if b == nil {
+		return
+	}
+	if r == nil {
+		sdl.ReleaseGPUBuffer(device, b)
+		return
+	}
+	context.allocator = runtime.heap_allocator()
+	sync.guard(&r.mutex)
+	append(&r.buffers, b)
+}
+
+// Gives everything in `r` back to SDL, keeping the arrays' capacity: on the
+// presenting thread, outside its submits. Until then what is in it holds its
+// memory, so a table that is never released only grows.
+retired_release :: proc(device: ^sdl.GPUDevice, r: ^Retired) {
+	sync.guard(&r.mutex)
+	for t in r.textures {
+		sdl.ReleaseGPUTexture(device, t)
+	}
+	for b in r.buffers {
+		sdl.ReleaseGPUBuffer(device, b)
+	}
+	clear(&r.textures)
+	clear(&r.buffers)
+}
+
+// Frees the arrays, after a last `retired_release`.
+retired_destroy :: proc(r: ^Retired) {
+	delete(r.textures)
+	delete(r.buffers)
+	r^ = {}
+}
+
 GPU :: struct {
 	device:                   ^sdl.GPUDevice,
 	owns_device:              bool,
+	// Where memory given up goes (`init`'s); nil: to SDL at once.
+	retired:                  ^Retired,
 	vert, skinned_vert, frag: ^sdl.GPUShader,
 	// `frag` with its discards, for every blend but `.Opaque` (`o3d.Cut`).
 	frag_cut:                 ^sdl.GPUShader,
@@ -488,8 +559,8 @@ Lighting_Uniforms :: struct {
 @(private = "file")
 device_mutex: sync.Mutex
 
-init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil) -> (err: o3d.Error) {
-	g^ = {device = device}
+init :: proc(g: ^GPU, device: ^sdl.GPUDevice = nil, retired: ^Retired = nil) -> (err: o3d.Error) {
+	g^ = {device = device, retired = retired}
 	// What was made goes with a failure (the host's device stays).
 	defer if err != nil {
 		destroy(g)
@@ -709,26 +780,18 @@ destroy :: proc(g: ^GPU) {
 	}
 	job_destroy(g, &g.job)
 	for b in ([]^Pool_Buffer{&g.vertices, &g.skin_vertices, &g.morph_deltas, &g.indices, &g.curve_words}) {
-		if b.buffer != nil {
-			sdl.ReleaseGPUBuffer(g.device, b.buffer)
-		}
+		retire_buffer(g.device, g.retired, b.buffer)
 	}
 	if g.stream != nil {
 		sdl.ReleaseGPUTransferBuffer(g.device, g.stream)
 	}
 	for tex in g.textures {
-		if tex != nil {
-			sdl.ReleaseGPUTexture(g.device, tex)
-		}
+		retire_texture(g.device, g.retired, tex)
 	}
 	delete(g.textures)
 	delete(g.externals)
-	if g.dummy_texture != nil {
-		sdl.ReleaseGPUTexture(g.device, g.dummy_texture)
-	}
-	if g.clear_texture != nil {
-		sdl.ReleaseGPUTexture(g.device, g.clear_texture)
-	}
+	retire_texture(g.device, g.retired, g.dummy_texture)
+	retire_texture(g.device, g.retired, g.clear_texture)
 	if g.linear_sampler != nil {
 		sdl.ReleaseGPUSampler(g.device, g.linear_sampler)
 	}
@@ -822,9 +885,7 @@ destroy :: proc(g: ^GPU) {
 	if g.shadow_sampler != nil {
 		sdl.ReleaseGPUSampler(g.device, g.shadow_sampler)
 	}
-	if g.dummy_shadow != nil {
-		sdl.ReleaseGPUTexture(g.device, g.dummy_shadow)
-	}
+	retire_texture(g.device, g.retired, g.dummy_shadow)
 	for sh in ([]^sdl.GPUShader{g.shadow_frag, g.curves_vert, g.curves_frag, g.frag_cut, g.frag_mirror, g.curves_frag_mirror, g.sprite_frag, g.shadow_curves_frag, g.depth_vert, g.depth_frag, g.post_vert, g.output_frag}) {
 		if sh != nil {
 			sdl.ReleaseGPUShader(g.device, sh)
@@ -846,6 +907,10 @@ destroy :: proc(g: ^GPU) {
 		sdl.ReleaseGPUShader(g.device, g.frag)
 	}
 	if g.owns_device {
+		// Nothing can be released into its device after this.
+		if g.retired != nil {
+			retired_release(g.device, g.retired)
+		}
 		sync.guard(&device_mutex)
 		sdl.DestroyGPUDevice(g.device)
 	}
@@ -1274,9 +1339,7 @@ Motion_Tables :: struct {
 
 motion_tables_destroy :: proc(g: ^GPU, t: ^Motion_Tables) {
 	for tex in ([]^sdl.GPUTexture{t.rows, t.tiles, t.around}) {
-		if tex != nil {
-			sdl.ReleaseGPUTexture(g.device, tex)
-		}
+		retire_texture(g.device, g.retired, tex)
 	}
 	t^ = {}
 }
@@ -1336,9 +1399,7 @@ ensure_bloom :: proc(g: ^GPU, job: ^Job, width, height: u32, levels: int) -> boo
 		}
 	}
 	if job.bloom_across == nil || job.bloom_across_level != levels - 1 {
-		if job.bloom_across != nil {
-			sdl.ReleaseGPUTexture(g.device, job.bloom_across)
-		}
+		retire_texture(g.device, g.retired, job.bloom_across)
 		job.bloom_across = make_level(g, width, height, levels - 1)
 		job.bloom_across_level = levels - 1
 	}
@@ -1348,13 +1409,9 @@ ensure_bloom :: proc(g: ^GPU, job: ^Job, width, height: u32, levels: int) -> boo
 @(private)
 release_bloom :: proc(g: ^GPU, job: ^Job) {
 	for t in job.bloom_levels {
-		if t != nil {
-			sdl.ReleaseGPUTexture(g.device, t)
-		}
+		retire_texture(g.device, g.retired, t)
 	}
-	if job.bloom_across != nil {
-		sdl.ReleaseGPUTexture(g.device, job.bloom_across)
-	}
+	retire_texture(g.device, g.retired, job.bloom_across)
 	job.bloom_levels, job.bloom_across, job.bloom_size = {}, nil, {}
 }
 
@@ -1435,12 +1492,8 @@ ensure_depth :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
 
 @(private)
 release_depth :: proc(g: ^GPU, job: ^Job) {
-	if job.depth_map != nil {
-		sdl.ReleaseGPUTexture(g.device, job.depth_map)
-	}
-	if job.depth_buffer != nil {
-		sdl.ReleaseGPUTexture(g.device, job.depth_buffer)
-	}
+	retire_texture(g.device, g.retired, job.depth_map)
+	retire_texture(g.device, g.retired, job.depth_buffer)
 	job.depth_map, job.depth_buffer, job.depth_size = nil, nil, {}
 }
 
@@ -1463,9 +1516,7 @@ ensure_snapshot :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
 
 @(private)
 release_snapshot :: proc(g: ^GPU, job: ^Job) {
-	if job.snapshot_tex != nil {
-		sdl.ReleaseGPUTexture(g.device, job.snapshot_tex)
-	}
+	retire_texture(g.device, g.retired, job.snapshot_tex)
 	job.snapshot_tex, job.snapshot_size = nil, {}
 }
 
@@ -1513,9 +1564,7 @@ ensure_focus :: proc(g: ^GPU, job: ^Job, width, height: u32) -> bool {
 @(private)
 release_focus :: proc(g: ^GPU, job: ^Job) {
 	for &t in job.focus_tables {
-		if t != nil {
-			sdl.ReleaseGPUTexture(g.device, t)
-		}
+		retire_texture(g.device, g.retired, t)
 		t = nil
 	}
 	job.focus_size = {}
@@ -1528,18 +1577,14 @@ release_focus :: proc(g: ^GPU, job: ^Job) {
 ensure_motion :: proc(g: ^GPU, job: ^Job, width, height: u32, blurred: bool) -> bool {
 	if job.velocity_size != {width, height} || job.velocity_map == nil {
 		for t in ([]^sdl.GPUTexture{job.velocity_map, job.nearness_map}) {
-			if t != nil {
-				sdl.ReleaseGPUTexture(g.device, t)
-			}
+			retire_texture(g.device, g.retired, t)
 		}
 		job.velocity_map = sdl.CreateGPUTexture(g.device, {type = .D2, format = VELOCITY_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1})
 		job.nearness_map = sdl.CreateGPUTexture(g.device, {type = .D2, format = NEARNESS_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = width, height = height, layer_count_or_depth = 1, num_levels = 1})
 		job.velocity_size = {width, height}
 	}
 	if blurred && (job.blurred_size != g.capacity || job.blurred == nil) {
-		if job.blurred != nil {
-			sdl.ReleaseGPUTexture(g.device, job.blurred)
-		}
+		retire_texture(g.device, g.retired, job.blurred)
 		job.blurred = sdl.CreateGPUTexture(g.device, {type = .D2, format = LIGHT_FORMAT, usage = {.SAMPLER, .COLOR_TARGET}, width = g.capacity.x, height = g.capacity.y, layer_count_or_depth = 1, num_levels = 1})
 		job.blurred_size = g.capacity
 	}
@@ -1549,9 +1594,7 @@ ensure_motion :: proc(g: ^GPU, job: ^Job, width, height: u32, blurred: bool) -> 
 @(private)
 release_motion :: proc(g: ^GPU, job: ^Job) {
 	for t in ([]^sdl.GPUTexture{job.velocity_map, job.nearness_map, job.blurred}) {
-		if t != nil {
-			sdl.ReleaseGPUTexture(g.device, t)
-		}
+		retire_texture(g.device, g.retired, t)
 	}
 	job.velocity_map, job.nearness_map, job.blurred, job.velocity_size, job.blurred_size = nil, nil, nil, {}, {}
 	motion_tables_destroy(g, &job.motion_tables)
@@ -1560,30 +1603,22 @@ release_motion :: proc(g: ^GPU, job: ^Job) {
 @(private)
 release_reflection :: proc(g: ^GPU, job: ^Job) {
 	for t in ([]^sdl.GPUTexture{job.reflection_tex, job.runs_target, job.runs_resolved}) {
-		if t != nil {
-			sdl.ReleaseGPUTexture(g.device, t)
-		}
+		retire_texture(g.device, g.retired, t)
 	}
 	job.reflection_tex, job.runs_target, job.runs_resolved, job.reflection_size = nil, nil, nil, {}
 }
 
 @(private)
 release_shadow_slot :: proc(g: ^GPU, job: ^Job, idx: int) {
-	if job.shadow_maps[idx] != nil {
-		sdl.ReleaseGPUTexture(g.device, job.shadow_maps[idx])
-	}
-	if job.shadow_depths[idx] != nil {
-		sdl.ReleaseGPUTexture(g.device, job.shadow_depths[idx])
-	}
+	retire_texture(g.device, g.retired, job.shadow_maps[idx])
+	retire_texture(g.device, g.retired, job.shadow_depths[idx])
 	job.shadow_maps[idx], job.shadow_depths[idx], job.shadow_sizes[idx] = nil, nil, 0
 }
 
 @(private = "file")
 release_targets :: proc(g: ^GPU) {
 	for t in ([]^sdl.GPUTexture{g.color, g.depth, g.resolved, g.output}) {
-		if t != nil {
-			sdl.ReleaseGPUTexture(g.device, t)
-		}
+		retire_texture(g.device, g.retired, t)
 	}
 	g.color, g.depth, g.resolved, g.output, g.capacity = nil, nil, nil, nil, {}
 }
