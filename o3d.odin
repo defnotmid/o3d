@@ -318,17 +318,19 @@ tone_map :: proc "contextless" (c: Vec3, mode: Tone_Mapping, exposure: f32 = 1) 
 // ---- tables -----------------------------------------------------------------------------
 
 // Grows a dynamic array with geometric reserve so arena allocators do not
-// strand O(N^2) backing memory across incremental resizes.
+// strand O(N^2) backing memory across incremental resizes. The new capacity
+// is never zeroed: table_grow zeroes the new elements, table_grow_non_zero
+// leaves them for the caller to write.
 table_grow :: #force_inline proc(table: ^[dynamic]$T, length: int) {
 	if length > cap(table^) {
-		reserve(table, max(length, 2 * cap(table^), 64))
+		non_zero_reserve(table, max(length, 2 * cap(table^), 64))
 	}
 	resize(table, length)
 }
 
 table_grow_non_zero :: #force_inline proc(table: ^[dynamic]$T, length: int) {
 	if length > cap(table^) {
-		reserve(table, max(length, 2 * cap(table^), 64))
+		non_zero_reserve(table, max(length, 2 * cap(table^), 64))
 	}
 	non_zero_resize(table, length)
 }

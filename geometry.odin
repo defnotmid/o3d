@@ -273,59 +273,56 @@ geometry_skin :: proc "contextless" (g: ^Geometries, id: Geometry_Id) -> []Skin_
 	return g.skin_vertices[geo.first_skin:][:geo.vertex_count]
 }
 
-// Adds geometry made by the caller (copied; indices count from 0).
 // How many geometries have been made (each kept): a host compares it across
 // frames to find a scene that makes geometry every frame.
 geometries_made :: proc "contextless" (g: ^Geometries) -> int {
 	return len(g.list)
 }
 
+// Adds geometry made by the caller (copied; indices count from 0).
 geometry_add :: proc(g: ^Geometries, vertices: []Vertex, indices: []u32, skin: []Skin_Vertex = nil, morph_deltas: []Morph_Delta = nil, mode: Draw_Mode = .Triangles) -> Geometry_Id {
+	geo := Geometry {
+		first_vertex = u32(len(g.vertices)),
+		vertex_count = u32(len(vertices)),
+		first_index  = u32(len(g.indices)),
+		index_count  = u32(len(indices)),
+		mode         = mode,
+	}
+	table_grow_non_zero(&g.vertices, len(g.vertices) + len(vertices))
+	copy(g.vertices[geo.first_vertex:], vertices)
+	table_grow_non_zero(&g.indices, len(g.indices) + len(indices))
+	copy(g.indices[geo.first_index:], indices)
+	if len(skin) == len(vertices) && len(skin) > 0 {
+		geo.skinned, geo.first_skin = true, u32(len(g.skin_vertices))
+		table_grow_non_zero(&g.skin_vertices, len(g.skin_vertices) + len(skin))
+		copy(g.skin_vertices[geo.first_skin:], skin)
+	}
+	if len(vertices) > 0 && len(morph_deltas) > 0 && len(morph_deltas) % len(vertices) == 0 {
+		geo.morph_targets, geo.first_morph = u32(len(morph_deltas) / len(vertices)), u32(len(g.morph_deltas))
+		for d in morph_deltas {
+			geo.morph_radius = max(geo.morph_radius, linalg.length(d.position.xyz))
+		}
+		table_grow_non_zero(&g.morph_deltas, len(g.morph_deltas) + len(morph_deltas))
+		copy(g.morph_deltas[geo.first_morph:], morph_deltas)
+	}
+	return geometry_list(g, geo)
+}
+
+// Lists `geo`, whose vertices and indices are in place in `g`'s tables,
+// with its radius and box from its vertices.
+@(private)
+geometry_list :: proc(g: ^Geometries, geo: Geometry) -> Geometry_Id {
 	generation_take(&g.generation)
-	r: f32
-	box_min, box_max: Vec3
+	geo := geo
+	vertices := g.vertices[geo.first_vertex:][:geo.vertex_count]
 	if len(vertices) > 0 {
-		box_min, box_max = vertices[0].position, vertices[0].position
+		geo.box_min, geo.box_max = vertices[0].position, vertices[0].position
 	}
 	for v in vertices {
-		r = max(r, linalg.length(v.position))
-		box_min, box_max = linalg.min(box_min, v.position), linalg.max(box_max, v.position)
+		geo.radius = max(geo.radius, linalg.length(v.position))
+		geo.box_min, geo.box_max = linalg.min(geo.box_min, v.position), linalg.max(geo.box_max, v.position)
 	}
-	skinned := len(skin) == len(vertices) && len(skin) > 0
-	first_skin := u32(len(g.skin_vertices)) if skinned else 0
-	morph_targets: u32
-	first_morph: u32
-	morph_r: f32
-	if len(vertices) > 0 && len(morph_deltas) > 0 && len(morph_deltas) % len(vertices) == 0 {
-		morph_targets = u32(len(morph_deltas) / len(vertices))
-		first_morph = u32(len(g.morph_deltas))
-		for d in morph_deltas {
-			morph_r = max(morph_r, linalg.length(Vec3{d.position.x, d.position.y, d.position.z}))
-		}
-	}
-	append(&g.list, Geometry{
-		first_vertex  = u32(len(g.vertices)),
-		vertex_count  = u32(len(vertices)),
-		first_index   = u32(len(g.indices)),
-		index_count   = u32(len(indices)),
-		first_skin    = first_skin,
-		first_morph   = first_morph,
-		morph_targets = morph_targets,
-		skinned       = skinned,
-		mode          = mode,
-		radius        = r,
-		morph_radius  = morph_r,
-		box_min       = box_min,
-		box_max       = box_max,
-	})
-	append(&g.vertices, ..vertices)
-	if skinned {
-		append(&g.skin_vertices, ..skin)
-	}
-	if morph_targets > 0 {
-		append(&g.morph_deltas, ..morph_deltas)
-	}
-	append(&g.indices, ..indices)
+	append(&g.list, geo)
 	return Geometry_Id(len(g.list))
 }
 
