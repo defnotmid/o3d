@@ -133,6 +133,9 @@ Usd_Layer :: struct {
 	names:      [Usd_Name]i32,
 	budget:     Budget,
 	arena:      ^virtual.Arena,
+	// Compressed integers unpacked, kept warm from one array to the next
+	// (in the caller's allocator, not the arena).
+	unpacked:   [dynamic]u8,
 }
 
 // The field and property names o3d reads, found once as tokens.
@@ -174,6 +177,7 @@ usd_layer_destroy :: proc(l: ^Usd_Layer) {
 		virtual.arena_destroy(l.arena)
 		free(l.arena)
 	}
+	delete(l.unpacked)
 	l^ = {}
 }
 
@@ -199,6 +203,7 @@ usd_read_layer :: proc(bytes: []u8, limits: ^Limits = nil) -> (l: Usd_Layer, err
 		l.arena = nil
 		return l, .Out_Of_Memory
 	}
+	l.unpacked = make([dynamic]u8, context.allocator)
 	context.allocator = virtual.arena_allocator(l.arena)
 	toc := Usd_Cursor{l = &l, pos = 16}
 	toc.pos = int(min(take_u64(&toc), u64(len(bytes))))
@@ -918,13 +923,15 @@ vector_shape :: proc "contextless" (t: Usd_Type) -> (components, size: int) {
 	return 0, 0
 }
 
-// Resizes `out` to `n` if the budget allows.
+// Resizes `out` to `n` if the budget allows, for the caller to write all
+// `n`.
 @(private = "file")
 grow :: proc(c: ^Usd_Cursor, out: ^[dynamic]$T, n: int) -> bool {
 	if !budget_take(&c.l.budget, .Gltf_Values, n) {
 		return false
 	}
-	return resize(out, n) == nil
+	table_grow_non_zero(out, n)
+	return len(out) == n
 }
 
 // ---- structural sections ----------------------------------------------------------------
@@ -1179,7 +1186,14 @@ take_compressed_ints :: proc(c: ^Usd_Cursor, out: []i64, size: int) {
 		return
 	}
 	codes := (n * 2 + 7) / 8
-	raw := make([]u8, size + codes + n * size, context.temp_allocator)
+	need := size + codes + n * size
+	if need > len(c.l.unpacked) {
+		// Nothing in it is kept: a new one, not a copy.
+		allocator, grown := c.l.unpacked.allocator, max(need, 2 * len(c.l.unpacked))
+		delete(c.l.unpacked)
+		c.l.unpacked = make([dynamic]u8, grown, allocator)
+	}
+	raw := c.l.unpacked[:need]
 	got := lz4_frames(packed, raw)
 	if got < size + codes {
 		fail(c)

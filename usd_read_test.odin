@@ -115,10 +115,13 @@ test_usd_parse :: proc(t: ^testing.T) {
 	p = (model_node_world(&m, Model_Node_Id(pb + 1)) * Vec4{0, 0, 0, 1}).xyz
 	testing.expect(t, linalg.length(p - Vec3{0, 0, -0.5}) < 1e-6, "the first time sample")
 
-	// Face-varying indexed st: the quad's corners (0,0) (1,0) (1,1) (0,1).
+	// Face-varying indexed st: the quad's corners (0,0) (1,0) (1,1) (0,1),
+	// a vertex each, shared by its two triangles.
 	g, _ := geometry_get(&geos, prim_a[0].geometry)
 	quad := geos.vertices[g.first_vertex:][:g.vertex_count]
-	testing.expect(t, len(quad) == 6 && quad[0].uv == {0, 0} && quad[1].uv == {1, 0} && quad[2].uv == {1, 1} && quad[5].uv == {0, 1}, "uvs by their indices")
+	qi := geos.indices[g.first_index:][:g.index_count]
+	testing.expect(t, len(quad) == 4 && len(qi) == 6, "a vertex a corner")
+	testing.expect(t, quad[qi[0]].uv == {0, 0} && quad[qi[1]].uv == {1, 0} && quad[qi[2]].uv == {1, 1} && quad[qi[5]].uv == {0, 1}, "uvs by their indices")
 	testing.expect(t, linalg.length(quad[0].normal - Vec3{0, 0, 1}) < 1e-6, "smooth normals without authored ones")
 
 	// Net: the colour texture, and the mask's red channel as the alpha map's

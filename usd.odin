@@ -21,7 +21,8 @@ import "core:strings"
 //     orient; `!invert!`, `!resetXformStack!`) as the node's local matrix;
 //   - Mesh: polygons fanned into triangles, `normals` / `primvars:normals`
 //     and `primvars:st` by their interpolation (and `:indices`), smooth
-//     normals where it has none, `orientation`, `doubleSided`; its
+//     normals where it has none, `orientation`, `doubleSided`; a vertex
+//     for each point's distinct normal and texture coordinates; its
 //     `materialBind` GeomSubsets split it into a primitive per subset;
 //   - `material:binding` (inherited down the hierarchy) to a Material whose
 //     `outputs:surface` is a UsdPreviewSurface: diffuseColor, metallic,
@@ -136,11 +137,38 @@ Usd_Builder :: struct {
 	floats:     [dynamic]f32,
 	tokens:     [dynamic]u32,
 	paths:      [dynamic]u32,
+	mesh:       Usd_Mesh_Scratch,
 	names:      [Usd_Prop]i32,
 	token_of:   map[string]i32,
 	// By primitive: the mesh part it is (a subset's index, or the subset
 	// count for the faces in none), for instances to bind their own.
 	prim_part:  [dynamic]i32,
+}
+
+// A mesh's columns as read, and what it is built with: kept warm from one
+// mesh to the next.
+@(private = "file")
+Usd_Mesh_Scratch :: struct {
+	points:         [dynamic]f32,
+	counts:         [dynamic]i64,
+	corners:        [dynamic]i64,
+	normals:        [dynamic]f32,
+	normal_indices: [dynamic]i64,
+	st:             [dynamic]f32,
+	st_indices:     [dynamic]i64,
+	smooth:         [dynamic]Vec3,
+	// Each face's first corner (and one past the last face's), and its
+	// part (-1: left out).
+	face_first:     [dynamic]int,
+	face_part:      [dynamic]i32,
+	// The faces part by part, each part's in order.
+	part_faces:     [dynamic]i32,
+	// The vertices of a face's corners, for its triangles.
+	face_vertices:  [dynamic]u32,
+	// Each point's vertices in the part being built, newest first: its
+	// newest in `point_vertex`, each one's next in `vertex_next`.
+	point_vertex:   [dynamic]i32,
+	vertex_next:    [dynamic]i32,
 }
 
 // The properties o3d reads, by name.
@@ -250,6 +278,22 @@ usd_build :: proc(b: ^Usd_Builder) {
 	b.floats = make([dynamic]f32, context.temp_allocator)
 	b.tokens = make([dynamic]u32, context.temp_allocator)
 	b.paths = make([dynamic]u32, context.temp_allocator)
+	b.mesh = {
+		points         = make([dynamic]f32, context.temp_allocator),
+		counts         = make([dynamic]i64, context.temp_allocator),
+		corners        = make([dynamic]i64, context.temp_allocator),
+		normals        = make([dynamic]f32, context.temp_allocator),
+		normal_indices = make([dynamic]i64, context.temp_allocator),
+		st             = make([dynamic]f32, context.temp_allocator),
+		st_indices     = make([dynamic]i64, context.temp_allocator),
+		smooth         = make([dynamic]Vec3, context.temp_allocator),
+		face_first     = make([dynamic]int, context.temp_allocator),
+		face_part      = make([dynamic]i32, context.temp_allocator),
+		part_faces     = make([dynamic]i32, context.temp_allocator),
+		face_vertices  = make([dynamic]u32, context.temp_allocator),
+		point_vertex   = make([dynamic]i32, context.temp_allocator),
+		vertex_next    = make([dynamic]i32, context.temp_allocator),
+	}
 	b.meshes = make(map[u64]i32, 64, context.temp_allocator)
 	b.materials = make(map[i32]i32, 64, context.temp_allocator)
 	b.images = make(map[string]Texture_Id, 16, context.temp_allocator)
@@ -625,29 +669,41 @@ Usd_Interpolation :: enum u8 {
 	Face_Varying,
 }
 
-// A primvar: its values (`components` each), indices, and interpolation.
+// A primvar: its values (`components` each), indices, and interpolation,
+// and the multiples of a corner's face, corner and point index that pick
+// its element (`USD_PICK`'s for its interpolation).
 @(private = "file")
 Usd_Primvar :: struct {
 	values:        []f32,
 	components:    int,
 	indices:       []i64,
 	interpolation: Usd_Interpolation,
+	pick:          [3]int,
 	ok:            bool,
 }
 
+@(private = "file", rodata)
+USD_PICK := [Usd_Interpolation][3]int {
+	.Constant     = {0, 0, 0},
+	.Uniform      = {1, 0, 0},
+	.Face_Varying = {0, 1, 0},
+	.Vertex       = {0, 0, 1},
+}
+
+// A primvar read into `values` and `indices`, which it refers to.
 @(private = "file")
-primvar :: proc(b: ^Usd_Builder, p: Usd_Prim, name: string, default_interpolation: Usd_Interpolation) -> (pv: Usd_Primvar) {
+primvar :: proc(b: ^Usd_Builder, p: Usd_Prim, name: string, default_interpolation: Usd_Interpolation, values: ^[dynamic]f32, indices: ^[dynamic]i64) -> (pv: Usd_Primvar) {
 	l := b.l
 	token := find_token(b, name)
 	rep, ok := value_token(b, p, token)
 	if !ok {
 		return
 	}
-	comps, fok := usd_floats(l, rep, &b.floats)
+	comps, fok := usd_floats(l, rep, values)
 	if !fok {
 		return
 	}
-	pv.values = slice.clone(b.floats[:], context.temp_allocator)
+	pv.values = values[:]
 	pv.components = comps
 	pv.interpolation = default_interpolation
 	// The interpolation is the strongest opinion among the property's specs.
@@ -671,9 +727,10 @@ primvar :: proc(b: ^Usd_Builder, p: Usd_Prim, name: string, default_interpolatio
 			break
 		}
 	}
-	if irep, has := value_token(b, p, find_token(b, strings.concatenate({name, ":indices"}, context.temp_allocator))); has && usd_ints(l, irep, &b.ints) {
-		pv.indices = slice.clone(b.ints[:], context.temp_allocator)
+	if irep, has := value_token(b, p, find_token(b, strings.concatenate({name, ":indices"}, context.temp_allocator))); has && usd_ints(l, irep, indices) {
+		pv.indices = indices[:]
 	}
+	pv.pick = USD_PICK[pv.interpolation]
 	pv.ok = true
 	return
 }
@@ -706,7 +763,7 @@ fit_interpolation :: proc(b: ^Usd_Builder, pv: ^Usd_Primvar, what: string, faces
 	for interp in ([]Usd_Interpolation{.Face_Varying, .Vertex, .Uniform, .Constant}) {
 		if n == want[interp] {
 			warn(b, fmt.tprintf("a USD mesh's %s say %s but their count is %s's: read as %s", what, names[pv.interpolation], names[interp], names[interp]))
-			pv.interpolation = interp
+			pv.interpolation, pv.pick = interp, USD_PICK[interp]
 			return
 		}
 	}
@@ -715,33 +772,23 @@ fit_interpolation :: proc(b: ^Usd_Builder, pv: ^Usd_Primvar, what: string, faces
 }
 
 // A primvar's value for face `face`, corner `corner` (index `corner` of
-// all corners), point `point`.
+// all corners), point `point`; zero where it has none.
 @(private = "file")
-primvar_at :: #force_inline proc "contextless" (pv: ^Usd_Primvar, face, corner, point: int) -> (v: [4]f32, ok: bool) {
-	i: int
-	switch pv.interpolation {
-	case .Constant:
-		i = 0
-	case .Uniform:
-		i = face
-	case .Vertex:
-		i = point
-	case .Face_Varying:
-		i = corner
-	}
+primvar_at :: #force_inline proc "contextless" (pv: ^Usd_Primvar, face, corner, point: int) -> (v: [4]f32) {
+	i := face * pv.pick[0] + corner * pv.pick[1] + point * pv.pick[2]
 	if len(pv.indices) > 0 {
 		if i >= len(pv.indices) {
 			return
 		}
 		i = int(pv.indices[i])
 	}
-	if i < 0 || (i + 1) * pv.components > len(pv.values) {
+	if i < 0 || i >= len(pv.values) / pv.components {
 		return
 	}
 	for c in 0 ..< min(pv.components, 4) {
 		v[c] = pv.values[i * pv.components + c]
 	}
-	return v, true
+	return
 }
 
 // A Mesh prim's `Model_Mesh` (a primitive per bound subset): its geometry
@@ -826,6 +873,8 @@ build_mesh :: proc(b: ^Usd_Builder, p: Usd_Prim, binding: i32) -> i32 {
 	if cached, ok := b.meshes[key]; ok {
 		// The same geometry; this instance's own materials.
 		src := b.m.meshes[cached]
+		table_grow_non_zero(&b.m.primitives, int(first_prim + src.primitive_count))
+		table_grow_non_zero(&b.prim_part, int(first_prim + src.primitive_count))
 		for i in 0 ..< src.primitive_count {
 			prim := b.m.primitives[src.first_primitive + i]
 			part := b.prim_part[src.first_primitive + i]
@@ -833,73 +882,109 @@ build_mesh :: proc(b: ^Usd_Builder, p: Usd_Prim, binding: i32) -> i32 {
 			if double_sided {
 				prim.material.side = .Double
 			}
-			append(&b.m.primitives, prim)
-			append(&b.prim_part, part)
+			b.m.primitives[first_prim + i], b.prim_part[first_prim + i] = prim, part
 		}
 		append(&b.m.meshes, Model_Mesh{first_primitive = first_prim, primitive_count = src.primitive_count})
 		return i32(len(b.m.meshes) - 1)
 	}
 
+	ms := &b.mesh
 	rep, ok := value(b, p, .Points)
 	if !ok {
 		return -1
 	}
-	if _, pok := usd_floats(l, rep, &b.floats); !pok || len(b.floats) % 3 != 0 {
+	if _, pok := usd_floats(l, rep, &ms.points); !pok || len(ms.points) % 3 != 0 {
 		return -1
 	}
-	points := slice.reinterpret([]Vec3, slice.clone(b.floats[:], context.temp_allocator))
+	points := slice.reinterpret([]Vec3, ms.points[:])
 	counts, corners: []i64
-	if rep, ok = value(b, p, .Face_Vertex_Counts); ok && usd_ints(l, rep, &b.ints) {
-		counts = slice.clone(b.ints[:], context.temp_allocator)
+	if rep, ok = value(b, p, .Face_Vertex_Counts); ok && usd_ints(l, rep, &ms.counts) {
+		counts = ms.counts[:]
 	}
-	if rep, ok = value(b, p, .Face_Vertex_Indices); ok && usd_ints(l, rep, &b.ints) {
-		corners = slice.clone(b.ints[:], context.temp_allocator)
+	if rep, ok = value(b, p, .Face_Vertex_Indices); ok && usd_ints(l, rep, &ms.corners) {
+		corners = ms.corners[:]
 	}
 	left_handed := false
 	if rep, ok = value(b, p, .Orientation); ok {
 		left_handed = (usd_string(l, rep) or_else "") == "leftHanded"
 	}
-	normals := primvar(b, p, "primvars:normals", .Vertex)
+	normals := primvar(b, p, "primvars:normals", .Vertex, &ms.normals, &ms.normal_indices)
 	if !normals.ok {
-		normals = primvar(b, p, "normals", .Vertex)
+		normals = primvar(b, p, "normals", .Vertex, &ms.normals, &ms.normal_indices)
 	}
-	st := primvar(b, p, st_name, .Face_Varying)
+	st := primvar(b, p, st_name, .Face_Varying, &ms.st, &ms.st_indices)
 	fit_interpolation(b, &normals, "normals", len(counts), len(points), len(corners))
 	fit_interpolation(b, &st, "texture coordinates", len(counts), len(points), len(corners))
 
-	// Faces: each its first corner; a face whose corners run past the
-	// indices, or name a point that is not there, is left out.
-	face_first := make([]int, len(counts) + 1, context.temp_allocator)
-	tris: i128
+	// Faces: each its first corner, and its part: its subset's, or the
+	// last part (the faces in no subset). A face with fewer than three
+	// corners, corners past the indices, or one naming a point that is not
+	// there is left out (part -1).
+	parts := len(subsets) + 1
+	table_grow_non_zero(&ms.face_first, len(counts) + 1)
+	table_grow_non_zero(&ms.face_part, len(counts))
+	face_first, face_part := ms.face_first[:], ms.face_part[:]
+	slice.fill(face_part, i32(len(subsets)))
+	for s, si in subsets {
+		for f in s.faces {
+			if in_range(f, len(counts)) {
+				face_part[f] = i32(si)
+			}
+		}
+	}
+	face_first[0] = 0
+	tris: int
+	most := 0
 	for c, f in counts {
 		step := int(clamp(c, 0, i64(len(corners) + 1 - face_first[f])))
 		face_first[f + 1] = face_first[f] + step
-		if c >= 3 {
-			tris += min(i128(c - 2), i128(max(int)))
+		if step < 3 || face_first[f + 1] > len(corners) {
+			face_part[f] = -1
+			continue
+		}
+		for point in corners[face_first[f]:face_first[f + 1]] {
+			if !in_range(point, len(points)) {
+				face_part[f] = -1
+				break
+			}
+		}
+		if face_part[f] >= 0 {
+			tris += step - 2
+			most = max(most, step)
 		}
 	}
 	if face_first[len(counts)] > len(corners) {
 		warn(b, "a USD mesh has fewer face vertex indices than its counts ask for; the rest is left out")
 	}
-	if !budget_take_wide(&l.budget, .Gltf_Values, tris * 3 * 10) {
+	if !budget_take_wide(&l.budget, .Gltf_Values, i128(tris) * 3 * 10) {
 		return -1
 	}
 
-	// Smooth normals where the mesh has none: area-weighted by point.
-	smooth: []Vec3
-	if !normals.ok {
-		smooth = make([]Vec3, len(points), context.temp_allocator)
+	// Normals unit length, once a value; smooth ones where the mesh has
+	// none (area-weighted by point). Without texture coordinates, one of 0.
+	if normals.ok {
+		c := normals.components
+		for i := 0; i + c <= len(normals.values); i += c {
+			n: Vec3
+			for k in 0 ..< min(c, 3) {
+				n[k] = normals.values[i + k]
+			}
+			n = linalg.normalize0(n)
+			for k in 0 ..< min(c, 3) {
+				normals.values[i + k] = n[k]
+			}
+		}
+	} else {
+		clear(&ms.smooth)
+		table_grow(&ms.smooth, len(points))
+		smooth := ms.smooth[:]
 		for f in 0 ..< len(counts) {
-			c0 := face_first[f]
-			n := face_first[f + 1] - c0
-			if n < 3 || face_first[f + 1] > len(corners) {
+			if face_part[f] < 0 {
 				continue
 			}
+			c0, n := face_first[f], face_first[f + 1] - face_first[f]
 			for k in 1 ..< n - 1 {
 				i0, i1, i2 := corners[c0], corners[c0 + k], corners[c0 + k + 1]
-				if !in_range(i0, len(points)) || !in_range(i1, len(points)) || !in_range(i2, len(points)) {
-					continue
-				}
 				fn := linalg.cross(points[i1] - points[i0], points[i2] - points[i0])
 				if left_handed {
 					fn = -fn
@@ -912,85 +997,98 @@ build_mesh :: proc(b: ^Usd_Builder, p: Usd_Prim, binding: i32) -> i32 {
 		for &n in smooth {
 			n = linalg.normalize(n) if linalg.length2(n) > 1e-30 else Vec3{0, 1, 0}
 		}
+		normals = {values = slice.reinterpret([]f32, smooth), components = 3, interpolation = .Vertex, pick = USD_PICK[.Vertex], ok = true}
+	}
+	if !st.ok {
+		@(static, rodata) none := [2]f32{}
+		st = {values = none[:], components = 2, interpolation = .Constant, ok = true}
 	}
 
-	// Which part each face goes to: its subset's, or the last part (the
-	// faces in no subset).
-	parts := len(subsets) + 1
-	face_part := make([]i32, len(counts), context.temp_allocator)
-	slice.fill(face_part, i32(len(subsets)))
-	for s, si in subsets {
-		for f in s.faces {
-			if in_range(f, len(counts)) {
-				face_part[f] = i32(si)
-			}
-		}
-	}
-	// Count, then fill each part's triangles: one vertex per corner.
-	part_tris := make([]int, parts, context.temp_allocator)
+	// The faces part by part, each part's in order; the vertices are at
+	// most the kept faces' corners.
+	part_first := make([]int, parts + 1, context.temp_allocator)
+	used := 0
 	for f in 0 ..< len(counts) {
-		if n := face_first[f + 1] - face_first[f]; n >= 3 && face_first[f + 1] <= len(corners) {
-			part_tris[face_part[f]] += n - 2
+		if pi := face_part[f]; pi >= 0 {
+			part_first[pi + 1] += 1
+			used += face_first[f + 1] - face_first[f]
 		}
 	}
 	for pi in 0 ..< parts {
-		if part_tris[pi] == 0 {
+		part_first[pi + 1] += part_first[pi]
+	}
+	next := slice.clone(part_first[:parts], context.temp_allocator)
+	table_grow_non_zero(&ms.part_faces, part_first[parts])
+	for f in 0 ..< len(counts) {
+		if pi := face_part[f]; pi >= 0 {
+			ms.part_faces[next[pi]] = i32(f)
+			next[pi] += 1
+		}
+	}
+
+	// Each part's vertices and indices straight into the shared tables, a
+	// vertex per point with its normal and texture coordinates (a point's
+	// corners alike share one), its triangles fanned from its faces.
+	geos := b.geos
+	mesh_vertex, mesh_index := len(geos.vertices), len(geos.indices)
+	table_grow_non_zero(&geos.vertices, mesh_vertex + used)
+	table_grow_non_zero(&geos.indices, mesh_index + 3 * tris)
+	vertices := geos.vertices[mesh_vertex:]
+	indices := geos.indices[mesh_index:]
+	table_grow_non_zero(&ms.point_vertex, len(points))
+	table_grow_non_zero(&ms.vertex_next, used)
+	table_grow_non_zero(&ms.face_vertices, most)
+	point_vertex, vertex_next, face_vertices := ms.point_vertex[:], ms.vertex_next[:], ms.face_vertices[:]
+	slice.fill(point_vertex, -1)
+	at, ii := 0, 0
+	for pi in 0 ..< parts {
+		if part_first[pi] == part_first[pi + 1] {
 			continue
 		}
-		verts := make([dynamic]Vertex, 0, part_tris[pi] * 3, context.temp_allocator)
-		for f in 0 ..< len(counts) {
-			if face_part[f] != i32(pi) {
-				continue
-			}
-			c0 := face_first[f]
-			n := face_first[f + 1] - c0
-			if n < 3 || face_first[f + 1] > len(corners) {
-				continue
+		base, base_index := at, ii
+		for f in ms.part_faces[part_first[pi]:part_first[pi + 1]] {
+			f := int(f)
+			c0, n := face_first[f], face_first[f + 1] - face_first[f]
+			for corner, k in c0 ..< c0 + n {
+				point := int(corners[corner])
+				v := Vertex {
+					position = points[point],
+					normal   = primvar_at(&normals, f, corner, point).xyz,
+					uv       = primvar_at(&st, f, corner, point).xy,
+				}
+				id := int(point_vertex[point])
+				for id >= base && (vertices[id].normal != v.normal || vertices[id].uv != v.uv) {
+					id = int(vertex_next[id])
+				}
+				if id < base {
+					id = at
+					vertices[at] = v
+					vertex_next[at], point_vertex[point] = point_vertex[point], i32(at)
+					at += 1
+				}
+				face_vertices[k] = u32(id - base)
 			}
 			for k in 1 ..< n - 1 {
-				tri := [3]int{0, k, k + 1}
+				a, c := face_vertices[k], face_vertices[k + 1]
 				if left_handed {
-					tri = {0, k + 1, k}
+					a, c = c, a
 				}
-				ok_tri := true
-				vs: [3]Vertex
-				for cj, j in tri {
-					corner := c0 + cj
-					point := corners[corner]
-					if !in_range(point, len(points)) {
-						ok_tri = false
-						break
-					}
-					v := Vertex{position = points[point]}
-					if normals.ok {
-						nv, _ := primvar_at(&normals, f, corner, int(point))
-						v.normal = linalg.normalize0(nv.xyz)
-					} else {
-						v.normal = smooth[point]
-					}
-					if st.ok {
-						uv, _ := primvar_at(&st, f, corner, int(point))
-						v.uv = uv.xy
-					}
-					vs[j] = v
-				}
-				if ok_tri {
-					append(&verts, ..vs[:])
-				}
+				indices[ii], indices[ii + 1], indices[ii + 2] = face_vertices[0], a, c
+				ii += 3
 			}
 		}
-		indices := make([]u32, len(verts), context.temp_allocator)
-		for &x, i in indices {
-			x = u32(i)
-		}
+		geometry := geometry_list(geos, {first_vertex = u32(mesh_vertex + base), vertex_count = u32(at - base), first_index = u32(mesh_index + base_index), index_count = u32(ii - base_index), mode = .Triangles})
 		mat := subsets[pi].material if pi < len(subsets) else binding
 		material, material_id := material_of(b, p, mat)
 		if double_sided {
 			material.side = .Double
 		}
-		append(&b.m.primitives, Model_Primitive{geometry = geometry_add(b.geos, verts[:], indices), material = material, material_id = material_id})
+		at_prim := len(b.m.primitives)
+		table_grow_non_zero(&b.m.primitives, at_prim + 1)
+		b.m.primitives[at_prim] = {geometry = geometry, material = material, material_id = material_id}
 		append(&b.prim_part, i32(pi))
 	}
+	non_zero_resize(&geos.vertices, mesh_vertex + at)
 	append(&b.m.meshes, Model_Mesh{first_primitive = first_prim, primitive_count = u32(len(b.m.primitives)) - first_prim})
 	b.meshes[key] = i32(len(b.m.meshes) - 1)
 	return i32(len(b.m.meshes) - 1)
@@ -1260,17 +1358,19 @@ channel_texture :: proc(b: ^Usd_Builder, id: Texture_Id, channel: string, reads:
 	if derived, ok := b.channels[key]; ok {
 		return derived
 	}
-	tex, _ := texture_get(b.textures, id)
-	if tex.hdr {
+	src, _ := texture_get(b.textures, id)
+	if src.hdr {
 		return id
 	}
-	n := int(tex.width * tex.height)
-	grey := make([]u8, n * 4, context.temp_allocator)
-	for texel, i in b.textures.texels[tex.mips[0]:][:n] {
+	// Straight into the copy's level 0, read after the table grows.
+	grey := texture_grow(&b.textures.texels, int(src.width), int(src.height))
+	n := int(src.width * src.height)
+	to := b.textures.texels[grey.first_texel:][:n]
+	for texel, i in b.textures.texels[src.mips[0]:][:n] {
 		v := texel[c]
-		grey[i * 4], grey[i * 4 + 1], grey[i * 4 + 2], grey[i * 4 + 3] = v, v, v, 255
+		to[i] = {v, v, v, 255}
 	}
-	derived := texture_add(b.textures, grey, int(tex.width), int(tex.height))
+	derived := texture_finish(b.textures, &grey)
 	b.channels[key] = derived
 	return derived
 }
