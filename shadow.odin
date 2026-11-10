@@ -77,7 +77,7 @@ make_light_shadow :: proc "contextless" (l: Light, index: int) -> (sh: Shadow) {
 	} else {
 		far := s.far if s.far > near else max(SHADOW_FAR, near * 2)
 		vp = orthographic(s.height if s.height > 0 else SHADOW_HEIGHT, 1, near, far) * view
-		from = {view[2, 0], view[2, 1], view[2, 2], 0}
+		from.xyz, from.w = Row_Mat4(view)[2].xyz, 0
 	}
 	return {
 		light       = index,

@@ -24,6 +24,8 @@ Vec3 :: [3]f32
 Vec4 :: [4]f32
 Mat4 :: matrix[4, 4]f32
 Mat3 :: matrix[3, 3]f32
+// A Mat4 laid out by rows: `Row_Mat4(m)[i]` is m's row i (`m[i]`, its column).
+Row_Mat4 :: #row_major matrix[4, 4]f32
 
 Error :: enum u8 {
 	None,

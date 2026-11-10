@@ -1185,10 +1185,10 @@ draw_list :: proc(g: ^GPU, job: ^Job, pass: ^sdl.GPURenderPass, cmd: ^sdl.GPUCom
 		if .Triplanar in m.flags {
 			f := o3d.projection_frame(d.material.projection, d.model)
 			mu.triplanar = {m.projection_scale, m.projection_sharpness, 0, 0}
-			for r in 0 ..< 3 {
-				mu.to_local[r] = {f.to_local[r, 0], f.to_local[r, 1], f.to_local[r, 2], f.to_local[r, 3]}
-				mu.normal_to_local[r] = {f.normal_to_local[r, 0], f.normal_to_local[r, 1], f.normal_to_local[r, 2], 0}
-			}
+			// Their rows, the normals' with w 0.
+			to_local, normal_to_local := o3d.Row_Mat4(f.to_local), o3d.Row_Mat4(o3d.Mat4(f.normal_to_local))
+			mu.to_local = {to_local[0], to_local[1], to_local[2]}
+			mu.normal_to_local = {normal_to_local[0], normal_to_local[1], normal_to_local[2]}
 		}
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mu, size_of(mu))
 		if skinned {

@@ -1286,9 +1286,9 @@ expand_draws :: proc(exp: ^Expanded_Draws, scene: ^Scene, geos: ^Geometries, vie
 	append(&out.morph_weights, ..scene.morph_weights[:])
 
 	view_proj := proj * view
-	cam_right := Vec3{view[0, 0], view[0, 1], view[0, 2]}
-	cam_up := Vec3{view[1, 0], view[1, 1], view[1, 2]}
-	cam_back := Vec3{view[2, 0], view[2, 1], view[2, 2]} // points toward camera in view space
+	view_rows := Row_Mat4(view)
+	cam_right, cam_up := view_rows[0].xyz, view_rows[1].xyz
+	cam_back := view_rows[2].xyz // points toward camera in view space
 	scale_px := 2.0 / (f32(max(height, 1)) * max(proj[1, 1], 1e-6))
 
 	for di in 0 ..< len(scene.draws) {
@@ -2110,10 +2110,8 @@ cubic_weights :: #force_inline proc "contextless" (a: Vec2) -> (g0, g1, h0, h1: 
 // view volume of `view_proj` (-w <= x, y <= w, 0 <= z <= w), tested against
 // its six planes.
 sphere_visible :: proc "contextless" (view_proj: Mat4, centre: Vec3, radius: f32) -> bool {
-	row :: #force_inline proc "contextless" (m: Mat4, r: int) -> Vec4 {
-		return {m[r, 0], m[r, 1], m[r, 2], m[r, 3]}
-	}
-	x, y, z, w := row(view_proj, 0), row(view_proj, 1), row(view_proj, 2), row(view_proj, 3)
+	rows := Row_Mat4(view_proj)
+	x, y, z, w := rows[0], rows[1], rows[2], rows[3]
 	for plane in ([6]Vec4{w + x, w - x, w + y, w - y, z, w - z}) {
 		if linalg.dot(plane.xyz, centre) + plane.w < -radius * linalg.length(plane.xyz) {
 			return false
