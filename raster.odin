@@ -900,8 +900,8 @@ read_layers :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^T
 // The area of the pixel at shape coordinate `rc` the shape covers, the
 // pixel's footprint the parallelogram its screen derivatives span
 // (shaders/o3d.slang's `fs_curves` likewise): exact under rotation, skew
-// and grazing views, so never faded to the shape's mean (`curves.fade`),
-// which it reaches by itself once the footprint holds the whole shape.
+// and grazing views, and the shape's mean coverage by itself once the
+// footprint holds the whole shape.
 @(private = "file")
 curve_coverage :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, rule: curves.Fill_Rule) -> f32 {
 	if len(words) == 0 {
