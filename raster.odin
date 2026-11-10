@@ -289,8 +289,8 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 					}
 					if masked {
 						raw := (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) / iw
-						at :: #force_inline proc "contextless" (xf: [2]Vec3, raw: Vec2) -> Vec2 {
-							return {xf[0].x * raw.x + xf[0].y * raw.y + xf[0].z, xf[1].x * raw.x + xf[1].y * raw.y + xf[1].z}
+						at :: #force_inline proc "contextless" (xf: Uv_Transform, raw: Vec2) -> Vec2 {
+							return xf.linear * raw + xf.offset
 						}
 						a := m.opacity
 						if .Color_Map in m.flags {
@@ -340,20 +340,8 @@ slot_uv :: #force_inline proc "contextless" (m: ^Shading_Material, slot: Texture
 
 // A uv and its derivatives through a slot's transform.
 @(private = "file")
-transform_uv :: #force_inline proc "contextless" (xf: [2]Vec3, raw, dx, dy: Vec2) -> (uv, ddx, ddy: Vec2) {
-	uv = {
-		xf[0].x * raw.x + xf[0].y * raw.y + xf[0].z,
-		xf[1].x * raw.x + xf[1].y * raw.y + xf[1].z,
-	}
-	ddx = {
-		xf[0].x * dx.x + xf[0].y * dx.y,
-		xf[1].x * dx.x + xf[1].y * dx.y,
-	}
-	ddy = {
-		xf[0].x * dy.x + xf[0].y * dy.y,
-		xf[1].x * dy.x + xf[1].y * dy.y,
-	}
-	return
+transform_uv :: #force_inline proc "contextless" (xf: Uv_Transform, raw, dx, dy: Vec2) -> (uv, ddx, ddy: Vec2) {
+	return xf.linear * raw + xf.offset, xf.linear * dx, xf.linear * dy
 }
 
 // A standard-material triangle's rows in the band: per pixel when untextured,

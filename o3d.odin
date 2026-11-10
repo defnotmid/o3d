@@ -52,7 +52,7 @@ compose :: proc "contextless" (position: Vec3 = {}, rotation: Vec3 = {}, scale: 
 		0, 0, 0, 1,
 	}
 	m := r * Mat4{scale.x, 0, 0, 0, 0, scale.y, 0, 0, 0, 0, scale.z, 0, 0, 0, 0, 1}
-	m[0, 3], m[1, 3], m[2, 3] = position.x, position.y, position.z
+	m[3] = {position.x, position.y, position.z, 1}
 	return m
 }
 
@@ -108,18 +108,7 @@ orthographic :: proc "contextless" (height, aspect, near, far: f32) -> Mat4 {
 
 // The matrix for normals: the inverse transpose of the model's upper 3x3.
 normal_matrix :: proc "contextless" (model: Mat4) -> Mat4 {
-	m3 := matrix[3, 3]f32{
-		model[0, 0], model[0, 1], model[0, 2],
-		model[1, 0], model[1, 1], model[1, 2],
-		model[2, 0], model[2, 1], model[2, 2],
-	}
-	n := linalg.transpose(linalg.inverse(m3))
-	return Mat4 {
-		n[0, 0], n[0, 1], n[0, 2], 0,
-		n[1, 0], n[1, 1], n[1, 2], 0,
-		n[2, 0], n[2, 1], n[2, 2], 0,
-		0, 0, 0, 1,
-	}
+	return Mat4(linalg.transpose(linalg.inverse(Mat3(model))))
 }
 
 // ---- colour -----------------------------------------------------------------------------

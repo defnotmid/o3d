@@ -323,11 +323,7 @@ shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: 
 
 @(private)
 mat_scale :: #force_inline proc "contextless" (m: Mat4) -> f32 {
-	return max(
-		linalg.length(Vec3{m[0, 0], m[1, 0], m[2, 0]}),
-		linalg.length(Vec3{m[0, 1], m[1, 1], m[2, 1]}),
-		linalg.length(Vec3{m[0, 2], m[1, 2], m[2, 2]}),
-	)
+	return max(linalg.length(m[0].xyz), linalg.length(m[1].xyz), linalg.length(m[2].xyz))
 }
 
 // Whether a draw can be seen through `view_proj`: it has geometry and its
@@ -357,10 +353,10 @@ draw_sphere :: proc(geos: ^Geometries, id: Geometry_Id, model: Mat4, joints: []M
 	if len(joints) > 0 {
 		posed: f32
 		for j in joints {
-			posed = max(posed, linalg.length(Vec3{j[0, 3], j[1, 3], j[2, 3]}) + mat_scale(j) * r)
+			posed = max(posed, linalg.length(j[3].xyz) + mat_scale(j) * r)
 		}
 		r = posed
 	}
-	return {model[0, 3], model[1, 3], model[2, 3]}, r * mat_scale(model), true
+	return model[3].xyz, r * mat_scale(model), true
 }
 

@@ -341,8 +341,8 @@ make_material_uniforms :: #force_inline proc "contextless" (m: ^o3d.Shading_Mate
 	}
 	for s, i in o3d.Texture_Slot {
 		t := m.uv_transforms[s]
-		mu.uv_transforms[i * 2] = {t[0].x, t[0].y, t[0].z, 0}
-		mu.uv_transforms[i * 2 + 1] = {t[1].x, t[1].y, t[1].z, 0}
+		mu.uv_transforms[i * 2] = {t.linear[0, 0], t.linear[0, 1], t.offset.x, 0}
+		mu.uv_transforms[i * 2 + 1] = {t.linear[1, 0], t.linear[1, 1], t.offset.y, 0}
 	}
 	return
 }

@@ -1843,9 +1843,9 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	if snapshot == first {
 		snapshot = len(order)
 	}
-	// The view z of the model's origin: view's row 2 by its translation.
+	// The view z of the model's origin.
 	depth :: #force_inline proc "contextless" (model, view: Mat4) -> f32 {
-		return view[2, 0] * model[0, 3] + view[2, 1] * model[1, 3] + view[2, 2] * model[2, 3] + view[2, 3]
+		return (view * model[3]).z
 	}
 	// A depth's bits as an unsigned integer, in the floats' order (-0 as 0).
 	depth_key :: #force_inline proc "contextless" (z: f32) -> u64 {
@@ -1881,11 +1881,7 @@ transmission_scale :: proc "contextless" (materials: []Shading_Material, models:
 	for &m, i in materials {
 		if .Transmission in m.flags {
 			md := models[i]
-			m.layers.scale = {
-				linalg.length(Vec3{md[0, 0], md[1, 0], md[2, 0]}),
-				linalg.length(Vec3{md[0, 1], md[1, 1], md[2, 1]}),
-				linalg.length(Vec3{md[0, 2], md[1, 2], md[2, 2]}),
-			}
+			m.layers.scale = {linalg.length(md[0].xyz), linalg.length(md[1].xyz), linalg.length(md[2].xyz)}
 		}
 	}
 }
@@ -2282,7 +2278,7 @@ Shading_Material :: struct {
 	ao_intensity:  f32,
 	flags:         Shading_Flags,
 	uv_sets:       u32, // bit per Texture_Slot: 1 when reading uv1
-	uv_transforms: [Texture_Slot][2]Vec3,
+	uv_transforms: [Texture_Slot]Uv_Transform,
 	color_map:     Texture_Id,
 	normal_map:    Texture_Id,
 	roughness_map: Texture_Id,
@@ -2408,9 +2404,16 @@ layer_slot :: #force_inline proc "contextless" (r: Layer_Map) -> Texture_Slot {
 
 TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissive_Map, .Metalness_Map, .Ao_Map, .Alpha_Map, .Layer_Maps, .Clearcoat_Normal_Map}
 
-// 2x3 affine matrix in o3d's UV space (v = 1 at top) for KHR_texture_transform
-// (defined in glTF's top-left UV space, v_gltf = 1 - v_o3d).
-uv_transform :: proc "contextless" (t: Texture_Transform) -> [2]Vec3 {
+// A texture slot's UVs moved in o3d's UV space (v = 1 at top): `linear` times
+// them plus `offset` (its derivatives by `linear` alone).
+Uv_Transform :: struct {
+	linear: matrix[2, 2]f32,
+	offset: Vec2,
+}
+
+// KHR_texture_transform (defined in glTF's top-left UV space, v_gltf =
+// 1 - v_o3d) in o3d's.
+uv_transform :: proc "contextless" (t: Texture_Transform) -> Uv_Transform {
 	sx := t.scale.x if t.scale != {} else 1
 	sy := t.scale.y if t.scale != {} else 1
 	c, s: f32 = 1, 0
@@ -2418,8 +2421,11 @@ uv_transform :: proc "contextless" (t: Texture_Transform) -> [2]Vec3 {
 		c, s = math.cos(t.rotation), math.sin(t.rotation)
 	}
 	return {
-		{c * sx, -s * sy, t.offset.x + s * sy},
-		{s * sx,  c * sy, 1 - t.offset.y - c * sy},
+		linear = {
+			c * sx, -s * sy,
+			s * sx, c * sy,
+		},
+		offset = {t.offset.x + s * sy, 1 - t.offset.y - c * sy},
 	}
 }
 
@@ -2503,7 +2509,7 @@ shading_materials :: proc(materials: []Material, out: ^[dynamic]Shading_Material
 			.Thickness           = m.thickness_transform,
 		}
 		uv_sets: u32
-		uv_xforms: [Texture_Slot][2]Vec3
+		uv_xforms: [Texture_Slot]Uv_Transform
 		for slot in Texture_Slot {
 			tf := tforms[slot]
 			if tf.tex_coord != 0 {

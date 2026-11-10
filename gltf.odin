@@ -532,9 +532,9 @@ gltf_draw :: proc(scene: ^Scene, m: ^Model, transform: Mat4 = linalg.MATRIX4F32_
 		if li := lights[i]; li >= 0 && int(li) < len(m.lights) {
 			l := m.lights[li]
 			w := world[i]
-			pos := Vec3{w[0, 3], w[1, 3], w[2, 3]}
+			pos := w[3].xyz
 			// KHR_lights_punctual directional and spot lights shine along local -Z.
-			fwd := Vec3{-w[0, 2], -w[1, 2], -w[2, 2]}
+			fwd := -w[2].xyz
 			dir := linalg.normalize(fwd) if linalg.length(fwd) > 1e-9 else Vec3{0, 0, -1}
 			l.position = pos
 			l.target = pos + dir
@@ -760,16 +760,15 @@ node_weights :: proc(scene: ^Scene, m: ^Model, p: ^Model_Pose, mesh: Model_Mesh,
 // takes a negative x scale).
 @(private = "file")
 trs_of :: proc "contextless" (mt: Mat4) -> (t: Vec3, r: linalg.Quaternionf32, s: Vec3) {
-	t = {mt[0, 3], mt[1, 3], mt[2, 3]}
-	cols := [3]Vec3{{mt[0, 0], mt[1, 0], mt[2, 0]}, {mt[0, 1], mt[1, 1], mt[2, 1]}, {mt[0, 2], mt[1, 2], mt[2, 2]}}
+	t = mt[3].xyz
+	cols := [3]Vec3{mt[0].xyz, mt[1].xyz, mt[2].xyz}
 	s = {linalg.length(cols[0]), linalg.length(cols[1]), linalg.length(cols[2])}
 	if linalg.dot(linalg.cross(cols[0], cols[1]), cols[2]) < 0 {
 		s.x = -s.x
 	}
 	rot: linalg.Matrix3f32
 	for c in 0 ..< 3 {
-		axis := cols[c] / s[c] if s[c] != 0 else Vec3{}
-		rot[0, c], rot[1, c], rot[2, c] = axis.x, axis.y, axis.z
+		rot[c] = cols[c] / s[c] if s[c] != 0 else Vec3{}
 	}
 	r = linalg.quaternion_from_matrix3_f32(rot)
 	return
@@ -1319,13 +1318,7 @@ emit_node :: proc(doc: ^Gltf_Document, ni: i32, parent_idx: i32, m: ^Model, node
 	s := Vec3(gn.scale) if gn.has_scale else Vec3{1, 1, 1}
 	local: Mat4
 	if gn.has_matrix {
-		cm := gn.matrix_
-		local = Mat4{
-			cm[0], cm[4], cm[8],  cm[12],
-			cm[1], cm[5], cm[9],  cm[13],
-			cm[2], cm[6], cm[10], cm[14],
-			cm[3], cm[7], cm[11], cm[15],
-		}
+		local = transmute(Mat4)gn.matrix_ // both column-major
 	} else {
 		local = linalg.matrix4_from_trs_f32(t, r, s)
 	}

@@ -215,8 +215,7 @@ curves_inside :: #force_inline proc "contextless" (words: []u32, rc: Vec2, rule:
 @(private)
 dilate_curve_quads :: proc "contextless" (src, dst: []Vertex, mvp: Mat4, width, height: int) {
 	half := Vec2{f32(width), f32(height)} * 0.5
-	col0 := Vec4{mvp[0, 0], mvp[1, 0], mvp[2, 0], mvp[3, 0]}
-	col1 := Vec4{mvp[0, 1], mvp[1, 1], mvp[2, 1], mvp[3, 1]}
+	col0, col1 := mvp[0], mvp[1]
 	for q := 0; q + 4 <= len(src); q += 4 {
 		quad := src[q:][:4]
 		lo, hi := quad[0].position.xy, quad[0].position.xy

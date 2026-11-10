@@ -395,18 +395,20 @@ parse_threemf_transform :: proc(s: string, unit_scale: f32) -> Mat4 {
 	if count < 12 {
 		return linalg.MATRIX4F32_IDENTITY
 	}
-	m00, m01, m02 := m[0], m[1], m[2]
-	m10, m11, m12 := m[3], m[4], m[5]
-	m20, m21, m22 := m[6], m[7], m[8]
-	tx := m[9] * unit_scale
-	ty := m[10] * unit_scale
-	tz := m[11] * unit_scale
-	return Mat4 {
-		m00,  m20, -m10,  tx,
-		m02,  m22, -m12,  tz,
-		-m01, -m21,  m11, -ty,
+	// Its rows as columns (p' = p * M is M transposed times p).
+	cm := Mat4 {
+		m[0], m[3], m[6], m[9] * unit_scale,
+		m[1], m[4], m[7], m[10] * unit_scale,
+		m[2], m[5], m[8], m[11] * unit_scale,
 		0,    0,    0,    1,
 	}
+	B :: Mat4 {
+		1, 0, 0, 0,
+		0, 0, 1, 0,
+		0, -1, 0, 0,
+		0, 0, 0, 1,
+	}
+	return B * cm * linalg.transpose(B) // B is a rotation: its inverse is its transpose
 }
 
 @(private = "file")
