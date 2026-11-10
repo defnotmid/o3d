@@ -1,6 +1,7 @@
 package o3d
 
 import "base:runtime"
+import "core:container/queue"
 import "core:math"
 import "core:math/linalg"
 import "core:slice"
@@ -1002,10 +1003,12 @@ emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, d
 
 // Runs `work(data, i, worker)` for every i in 0 ..< count: on the caller
 // (worker 0) and up to a pool thread per item (worker 1 + its task), each
-// claiming the next item until none is left; the caller waits for the
-// tasks to finish (they may start after the items ran out), then takes
-// them off the pool's done list, which would otherwise keep every task
-// of every frame (the caller's own done tasks stay).
+// claiming the next item until none is left. The caller then takes the
+// tasks no thread has started off the pool's queue (so it may run in a
+// task on the same pool, even on all its threads at once), waits for the
+// others to finish, and takes them off the pool's done list, which would
+// otherwise keep every task of every frame (the caller's own done tasks
+// stay).
 @(private)
 parallel :: proc(pool: ^thread.Pool, count: int, data: rawptr, work: proc(data: rawptr, i, worker: int)) {
 	Parallel :: struct {
@@ -1046,11 +1049,32 @@ parallel :: proc(pool: ^thread.Pool, count: int, data: rawptr, work: proc(data: 
 		thread.pool_add_task(pool, context.allocator, task, rawptr(&p), i) // waited for below
 	}
 	claim(&p, 0)
+	// Every item is taken: a task not started would find none. Its post
+	// on the pool's semaphore stays, and the thread it wakes finds no task
+	// and waits again.
+	left := helpers
+	if helpers > 0 {
+		sync.guard(&pool.mutex)
+		kept := 0
+		for i in 0 ..< queue.len(pool.tasks) {
+			task := queue.get(&pool.tasks, i)
+			if task.data == rawptr(&p) {
+				sync.atomic_sub(&pool.num_waiting, 1)
+				sync.atomic_sub(&pool.num_outstanding, 1)
+				sync.atomic_sub(&p.running, 1)
+				left -= 1
+				continue
+			}
+			queue.set(&pool.tasks, kept, task)
+			kept += 1
+		}
+		queue.consume_back(&pool.tasks, queue.len(pool.tasks) - kept)
+	}
 	for sync.atomic_load(&p.running) > 0 {
 		thread.yield()
 	}
 	// A task joins the done list just after it returns: the newest are ours.
-	for left := helpers; left > 0; {
+	for left > 0 {
 		sync.lock(&pool.mutex)
 		for i := len(pool.tasks_done) - 1; i >= 0 && left > 0; i -= 1 {
 			if pool.tasks_done[i].data == rawptr(&p) {

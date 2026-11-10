@@ -9,8 +9,9 @@ import "core:mem"
 // pyramid and a cosine-convolved diffuse irradiance texture in `Textures`,
 // made by `environment_prefilter` (heavy: a host calls it at load, with the
 // texture), sampled identically by the software renderer (`shade`) and the
-// SDL_GPU renderer (`shaders/o3d.slang`). A render that meets a texture
-// without them derives them then, in frame time.
+// SDL_GPU renderer (`shaders/o3d.slang`). A render only reads them, so
+// that renders may share the tables: without them, `scene.environment`
+// lights nothing and a blurred `scene.background` shows sharp.
 // `scene.background` is sampled along each pixel's unprojected camera ray,
 // from its sharp mip (blurriness = 0) or the prefiltered radiance pyramid.
 
@@ -32,9 +33,6 @@ Shading_Environment :: struct {
 shading_environment :: proc(scene: ^Scene, textures: ^Textures) -> Shading_Environment {
 	rad, irr, ok := texture_environment(textures, scene.environment)
 	if !ok {
-		rad, irr, ok = environment_prefilter(textures, scene.environment)
-	}
-	if !ok {
 		return {}
 	}
 	rad_tex, _ := texture_get(textures, rad)
@@ -53,11 +51,7 @@ shading_background :: proc(scene: ^Scene, textures: ^Textures) -> (tex: Texture_
 	}
 	intensity = scene.background_intensity if scene.background_intensity > 0 else 1
 	if scene.background_blurriness > 0 {
-		rad, _, ok := texture_environment(textures, scene.background)
-		if !ok {
-			rad, _, ok = environment_prefilter(textures, scene.background)
-		}
-		if ok {
+		if rad, _, ok := texture_environment(textures, scene.background); ok {
 			rad_tex, _ := texture_get(textures, rad)
 			return rad, intensity, clamp(scene.background_blurriness, 0, 1) * f32(max(int(rad_tex.levels) - 1, 0))
 		}
@@ -132,7 +126,8 @@ texture_environment :: proc "contextless" (t: ^Textures, id: Texture_Id) -> (rad
 // (`radiance`, mip 0..levels-1 for roughness 0..1) and a cosine-convolved
 // diffuse irradiance texture (`irradiance`), both stored in `t` so the CPU
 // and GPU sample them identically. Heavy: call it at load for every texture
-// used as `scene.environment` or a blurred `scene.background`.
+// used as `scene.environment` or a blurred `scene.background` (a render
+// never does).
 environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradiance: Texture_Id, ok: bool) {
 	src_tex, found := texture_get(t, id)
 	if !found || src_tex.external {

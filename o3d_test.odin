@@ -5,8 +5,10 @@ import "core:math"
 import "core:math/linalg"
 import "core:slice"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:thread"
+import "core:time"
 
 // Every primitive's triangles wind counter-clockwise seen from outside: the
 // face normal agrees with the vertex normals. They share one vertex and index
@@ -171,6 +173,46 @@ test_software_pool :: proc(t: ^testing.T) {
 	}
 }
 
+// parallel() may run in a task on the pool it is given, on all the pool's
+// threads at once: each takes its tasks no thread is free to start off the
+// queue instead of waiting for them, and the pool is left with only the
+// outer tasks done.
+@(test)
+test_parallel_in_pool_tasks :: proc(t: ^testing.T) {
+	THREADS :: 2
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, THREADS)
+	thread.pool_start(&pool)
+	Outer :: struct {
+		pool:      ^thread.Pool,
+		sum, done: int, // atomic
+	}
+	o := Outer{pool = &pool}
+	outer :: proc(task: thread.Task) {
+		o := (^Outer)(task.data)
+		parallel(o.pool, 64, o, proc(data: rawptr, i, _: int) {
+			sync.atomic_add(&(^Outer)(data).sum, i)
+		})
+		sync.atomic_add(&o.done, 1)
+	}
+	for i in 0 ..< THREADS {
+		thread.pool_add_task(&pool, context.allocator, outer, &o, i)
+	}
+	start := time.tick_now()
+	for sync.atomic_load(&o.done) < THREADS && time.tick_since(start) < 10 * time.Second {
+		thread.yield()
+	}
+	if !testing.expectf(t, sync.atomic_load(&o.done) == THREADS, "%d of %d outer tasks finished in 10 s", sync.atomic_load(&o.done), THREADS) {
+		return // its threads are stuck: left to the process's exit
+	}
+	testing.expect_value(t, sync.atomic_load(&o.sum), THREADS * (63 * 64 / 2))
+	thread.pool_join(&pool)
+	testing.expect_value(t, thread.pool_num_waiting(&pool), 0)
+	testing.expect_value(t, thread.pool_num_outstanding(&pool), 0)
+	testing.expect_value(t, thread.pool_num_done(&pool), THREADS)
+	thread.pool_destroy(&pool)
+}
+
 // draw_order keeps the draws that can be seen: with geometry, their bounding
 // sphere (scaled with the draw) reaching into the view.
 @(test)
@@ -194,6 +236,62 @@ test_draw_order_culls :: proc(t: ^testing.T) {
 	defer delete(order)
 	draw_order(&scene, &g, nil, view, proj, &order)
 	testing.expectf(t, slice_equal(order[:], []int{0, 4, 5}), "order %v", order)
+}
+
+// draw_order lists the opaque draws, then the transmissive ones, then the
+// blended, each of the last two far to near, draws at one depth in the
+// order the scene lists them: as an insertion sort by depth would.
+@(test)
+test_draw_order_sorts :: proc(t: ^testing.T) {
+	g: Geometries
+	defer geometries_destroy(&g)
+	scene: Scene
+	defer scene_destroy(&scene)
+	scene_clear(&scene) // the camera at +5 Z looking at the origin
+	ball := sphere(&g, 0.1, 8, 4)
+	solid, glass, thin := MATERIAL_DEFAULT, MATERIAL_DEFAULT, MATERIAL_DEFAULT
+	glass.opacity, glass.flags = 0.5, {.Transparent}
+	thin.transmission = 1
+	for i in 0 ..< 600 { // 13 depths, scrambled
+		z := f32(i * 7919 % 13) * 0.25 - 1.5
+		m := glass if i % 3 != 2 else (thin if i % 2 == 0 else solid)
+		append(&scene.draws, Draw{ball, compose({f32(i % 5) * 0.1, 0, z}), m})
+	}
+	view, proj := camera_matrices(scene.camera, 100, 100)
+	order: [dynamic]int
+	defer delete(order)
+	snapshot := draw_order(&scene, &g, nil, view, proj, &order)
+
+	want: [dynamic]int
+	defer delete(want)
+	for kind in 0 ..< 3 {
+		for d, i in scene.draws {
+			if (1 if transmissive(d.material) else (2 if blended(d.material) else 0)) == kind {
+				append(&want, i)
+			}
+		}
+	}
+	depth :: proc(model, view: Mat4) -> f32 {
+		return view[2, 0] * model[0, 3] + view[2, 1] * model[1, 3] + view[2, 2] * model[2, 3] + view[2, 3]
+	}
+	opaque := 0
+	for d in scene.draws {
+		opaque += 0 if transmissive(d.material) || blended(d.material) else 1
+	}
+	first := opaque
+	for d in scene.draws {
+		first += 1 if transmissive(d.material) else 0
+	}
+	for span in ([2][]int{want[opaque:first], want[first:]}) {
+		for i in 1 ..< len(span) {
+			for j := i; j > 0 && depth(scene.draws[span[j]].model, view) < depth(scene.draws[span[j - 1]].model, view); j -= 1 {
+				span[j], span[j - 1] = span[j - 1], span[j]
+			}
+		}
+	}
+	testing.expect_value(t, len(order), len(scene.draws))
+	testing.expect_value(t, snapshot, opaque)
+	testing.expectf(t, slice_equal(order[:], want[:]), "order differs from the insertion sort's")
 }
 
 @(private = "file")
@@ -585,6 +683,7 @@ test_software_environment :: proc(t: ^testing.T) {
 		}
 	}
 	env_id := texture_add(&textures, env_px[:], EW, EH)
+	environment_prefilter(&textures, env_id)
 
 	scene_clear(&scene)
 	scene.camera = {position = {0, 0, 4}, fov = 40, near = 0.1, far = 100}
@@ -695,6 +794,31 @@ test_environment_prefilter :: proc(t: ^testing.T) {
 	testing.expect(t, found && r2 == rad && i2 == irr, "looked up as derived")
 	again, _, _ := environment_prefilter(&textures, env)
 	testing.expect_value(t, again, rad) // once
+
+	// A render only reads them: one of a texture without them leaves the
+	// tables as they were (renders may share them), lit by nothing.
+	plain := texture_add(&textures, pixels[:], W, H)
+	{
+		g: Geometries
+		defer geometries_destroy(&g)
+		scene: Scene
+		defer scene_destroy(&scene)
+		scene_clear(&scene)
+		scene.environment, scene.background, scene.background_blurriness = plain, plain, 0.5
+		metal := MATERIAL_DEFAULT
+		metal.metalness, metal.roughness = 1, 0.2
+		append(&scene.draws, Draw{sphere(&g, 1, 16, 8), compose(), metal})
+		s: Software
+		defer software_destroy(&s)
+		count, texels, generation := len(textures.list), len(textures.texels), textures.generation
+		software_render(&s, &scene, &g, nil, 32, 32, nil, &textures)
+		testing.expect_value(t, len(textures.list), count)
+		testing.expect_value(t, len(textures.texels), texels)
+		testing.expect_value(t, textures.generation, generation)
+		_, _, made := texture_environment(&textures, plain)
+		testing.expect(t, !made, "a render made an environment's maps")
+		testing.expect(t, shading_environment(&scene, &textures).textures == nil, "lit by an environment not prefiltered")
+	}
 
 	g: Geometries
 	defer geometries_destroy(&g)

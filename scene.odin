@@ -1847,11 +1847,23 @@ draw_order :: proc(scene: ^Scene, geos: ^Geometries, shaders: ^Shaders, view, pr
 	depth :: #force_inline proc "contextless" (model, view: Mat4) -> f32 {
 		return view[2, 0] * model[0, 3] + view[2, 1] * model[1, 3] + view[2, 2] * model[2, 3] + view[2, 3]
 	}
+	// A depth's bits as an unsigned integer, in the floats' order (-0 as 0).
+	depth_key :: #force_inline proc "contextless" (z: f32) -> u64 {
+		b := transmute(u32)z if z != 0 else 0
+		return u64(~b if b >> 31 != 0 else b | 0x8000_0000)
+	}
+	// Each span far to near, draws at one depth in the order listed: a
+	// draw's key above its index, sorted. A span lists its draws by
+	// increasing index, so that is the stable sort by depth.
+	#assert(size_of(int) == size_of(u64))
 	for span in ([2][]int{order[min(snapshot, first):first], order[first:]}) {
-		for i in 1 ..< len(span) {
-			for j := i; j > 0 && depth(models[span[j]], view) < depth(models[span[j - 1]], view); j -= 1 {
-				span[j], span[j - 1] = span[j - 1], span[j]
-			}
+		keys := slice.reinterpret([]u64, span)
+		for &k in keys {
+			k |= depth_key(depth(models[k], view)) << 32
+		}
+		slice.sort(keys)
+		for &k in keys {
+			k &= 0xFFFF_FFFF
 		}
 	}
 	return
@@ -2401,7 +2413,10 @@ TEXTURE_FLAGS :: Shading_Flags{.Color_Map, .Normal_Map, .Roughness_Map, .Emissiv
 uv_transform :: proc "contextless" (t: Texture_Transform) -> [2]Vec3 {
 	sx := t.scale.x if t.scale != {} else 1
 	sy := t.scale.y if t.scale != {} else 1
-	c, s := math.cos(t.rotation), math.sin(t.rotation)
+	c, s: f32 = 1, 0
+	if t.rotation != 0 {
+		c, s = math.cos(t.rotation), math.sin(t.rotation)
+	}
 	return {
 		{c * sx, -s * sy, t.offset.x + s * sy},
 		{s * sx,  c * sy, 1 - t.offset.y - c * sy},

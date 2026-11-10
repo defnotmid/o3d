@@ -255,6 +255,7 @@ main :: proc() {
 			}
 		}
 		env_id := o3d.texture_add(&textures, env_px[:], EW, EH)
+		o3d.environment_prefilter(&textures, env_id)
 		scene.environment = env_id
 		scene.background = env_id
 
