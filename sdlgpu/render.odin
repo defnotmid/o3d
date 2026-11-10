@@ -951,7 +951,9 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	light := g.resolved if g.samples != ._1 else g.color
 	// A pass of light into the frame's targets' top-left w x h: cleared to
 	// `clear`, the background under the draws when there is one, resolved.
-	light_pass :: proc(g: ^GPU, job: ^Job, cmd: ^sdl.GPUCommandBuffer, w, h: u32, clear: [4]f32, background: bool, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture, mirrored: bool) {
+	// `store` keeps its samples and depth for a pass that will `load` them
+	// and draw over them (no clear, no background).
+	light_pass :: proc(g: ^GPU, job: ^Job, cmd: ^sdl.GPUCommandBuffer, w, h: u32, clear: [4]f32, background: bool, order: []int, shadow_maps: ^[o3d.MAX_SHADOWS]^sdl.GPUTexture, mirrored: bool, store := false, load := false) {
 		// The mirror's pass draws its runs too (none where nothing is).
 		colors := [2]sdl.GPUColorTargetInfo {
 			{texture = g.color, clear_color = sdl.FColor(clear), load_op = .CLEAR, store_op = .STORE},
@@ -960,13 +962,22 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 		if g.samples != ._1 {
 			colors[0].store_op, colors[0].resolve_texture = .RESOLVE, g.resolved
 			colors[1].store_op, colors[1].resolve_texture = .RESOLVE, job.runs_resolved
+			if store {
+				colors[0].store_op = .RESOLVE_AND_STORE
+			}
 		}
 		depth := sdl.GPUDepthStencilTargetInfo{texture = g.depth, clear_depth = 0, load_op = .CLEAR, store_op = .DONT_CARE, stencil_load_op = .DONT_CARE, stencil_store_op = .DONT_CARE}
+		if store {
+			depth.store_op = .STORE
+		}
+		if load {
+			colors[0].load_op, depth.load_op = .LOAD, .LOAD
+		}
 		pass := sdl.BeginGPURenderPass(cmd, &colors[0], 2 if mirrored else 1, &depth)
 		defer sdl.EndGPURenderPass(pass)
 		sdl.SetGPUViewport(pass, {x = 0, y = 0, w = f32(w), h = f32(h), min_depth = 0, max_depth = 1})
 		sdl.SetGPUScissor(pass, {x = 0, y = 0, w = i32(w), h = i32(h)})
-		if background {
+		if background && !load {
 			sdl.BindGPUGraphicsPipeline(pass, g.bg_pipeline)
 			bg_binding := tex_binding(g, job.background, g.env_sampler)
 			sdl.BindGPUFragmentSamplers(pass, 0, &bg_binding, 1)
@@ -997,14 +1008,21 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	}
 	if job.snapshot < len(job.order) {
 		// The opaque draws before the transmissive ones, copied into the
-		// snapshot and mipmapped (three.js's transmission pass).
-		light_pass(g, job, cmd, width, height, job.clear, job.background != 0, job.order[:job.snapshot], &shadow_maps, false)
+		// snapshot and mipmapped (three.js's transmission pass), and kept:
+		// the rest draw over them, as the software renderer's second part
+		// does. Storing and loading the samples costs a tile GPU about
+		// 0.2 ms at 1080p, less than drawing the opaque scene again in
+		// any but the lightest (an M4: 7.44 to 5.22 ms with 2.2M opaque
+		// triangles, 1.10 to 1.33 ms with four boxes).
+		light_pass(g, job, cmd, width, height, job.clear, job.background != 0, job.order[:job.snapshot], &shadow_maps, false, store = true)
 		copy_pass := sdl.BeginGPUCopyPass(cmd)
 		sdl.CopyGPUTextureToTexture(copy_pass, {texture = light}, {texture = job.snapshot_tex}, width, height, 1, false)
 		sdl.EndGPUCopyPass(copy_pass)
 		sdl.GenerateMipmapsForGPUTexture(cmd, job.snapshot_tex)
+		light_pass(g, job, cmd, width, height, job.clear, false, job.order[job.snapshot:], &shadow_maps, false, load = true)
+	} else {
+		light_pass(g, job, cmd, width, height, job.clear, job.background != 0, job.order[:], &shadow_maps, false)
 	}
-	light_pass(g, job, cmd, width, height, job.clear, job.background != 0, job.order[:], &shadow_maps, false)
 	// The frame's light blurred along its motion, then tone mapped and
 	// encoded (through its depth of field: its tables, then the gather as
 	// the output), then copied out.
