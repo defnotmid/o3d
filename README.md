@@ -342,7 +342,7 @@ trail := o3d.scene_polyline(&scene, positions, colors = colors)      // a gradie
 // The frame's depth, to hide it behind what is nearer and for post effects
 scene.depth = true                                                   // then render as usual
 hidden := o3d.point_hidden(scene.camera, o3d.software_depth(&sw), 1920, 1080, sun_position)   // GPU: read_depth(&g, o3d_sdlgpu.depth(&g), ...)
-o3d.depth_image(scene.camera, o3d.software_depth(&sw), 1920, 1080, far, rgba16f)   // distance (a 1 where drawn); GPU: record_depth_into
+o3d.software_depth_image(&sw, far, rgba16f)                         // distance (a 1 where drawn); GPU: record_depth_into
 
 // Text and logos: a path's filled area as shapes (flattened), extruded once, drawn per frame
 shapes: o3d.Shapes                                          // kept warm for the next path
@@ -418,12 +418,11 @@ o3d imports oksl as `deps:oksl`, ocurves' core-only curves package as
 as `deps:oicut/image`: clone [oksl](https://github.com/defnotmid/oksl),
 [ocurves](https://github.com/defnotmid/ocurves) and
 [oicut](https://github.com/defnotmid/oicut) next to o3d, and builds pass
-`-collection:deps=..` (the directory holding them). `shaders/build.sh`
-includes ocurves' `curves.slang` from there too, and records the curves
-format it reads (`curves.FORMAT`) in `sdlgpu/curves_format.odin`:
-o3d_sdlgpu does not compile against an ocurves of another format (each o3d
-tag names the ocurves it needs), where its curve shaders would draw
-garbage.
+`-collection:deps=..` (the directory holding them). There is no shader
+toolchain: oksl compiles `shaders/` at load, with ocurves' `curves.GLSL`
+for exact shapes. o3d does not compile against an ocurves whose words
+have another layout (`curves.FORMAT`; each o3d tag names the ocurves it
+needs), where its shapes would draw garbage.
 
 - `odin test . -collection:deps=..` and `odin test sdlgpu
   -collection:deps=..`: the CPU and GPU tests. A GPU test fails without a
@@ -511,11 +510,10 @@ garbage.
   transform rows replace a node's translation, rotation or scale (a
   matrix node's decomposed first), and material rows hide, re-flag or
   replace every primitive of their material. Morphs (up to
-  `MAX_MORPH_TARGETS = 8` active non-zero targets per draw) are applied before skinning in the per-chunk
-  vertex stage on the software renderer and in `vs_main` / `vs_skinned`
-  (`shaders/o3d.slang`, reading the `Morph_Delta` storage buffer via
-  `SV_VertexID`) on the GPU, including the shadow pass and before a
-  `ShaderMaterial`'s vertex stage. A failed load returns a `Gltf_Error` with
+  `MAX_MORPH_TARGETS = 8` active non-zero targets per draw) are applied before skinning in
+  `shaders/o3d.vert` (reading the `Morph_Delta` storage buffer by
+  `gl_VertexID`) on both renderers, the shadow and depth passes included,
+  and on the CPU before a `ShaderMaterial`'s vertex stage. A failed load returns a `Gltf_Error` with
   `GLTF_ERROR_TEXT` for messages. If `extensionsRequired` names an extension
   o3d does not implement, loading fails with
   `Gltf_Error.Unsupported_Extension` and records the extension name in
@@ -622,27 +620,31 @@ garbage.
   Each frame, `shading_lights` and `shading_materials` turn the lights and
   the draws' materials into their shading form (linear colours, spot cone
   cosines and axis, the opacity drawn, 2x3 UV transform matrices in o3d UV
-  space, UV set bits, `Shading_Flags`) once; both renderers read those, and
-  the GPU's uniforms are them, packed. Boolean sets are bit sets
+  space, UV set bits, `Shading_Flags`) once; both renderers' programs read
+  those through their uniform blocks. Boolean sets are bit sets
   (`Material_Flags`, `Shading_Flags`, `Texture_Slots`, a pixel's covered
   samples).
-- **Shader contract:** `Light_Kind`'s values and `Shading_Flag`'s bits are
-  the shader's `LIGHT_*` and `FLAG_*` constants; a test reads
-  `shaders/o3d.slang` and checks them.
-- **Shading** is one model in two places, `shade` / `fogged` in
-  `scene.odin` (`tone_map` in `o3d.odin`) and `shaders/o3d.slang`
-  (`shaders/common.slang`): Lambert diffuse plus GGX specular with Smith
+- **Shader contract:** the shaders' uniforms are Odin structs
+  (`Draw_Block`, `Material_Block`, `Frame_Block`, `Post_Block` and the
+  passes'), declared to the GLSL from their fields (`u_<field>`); a
+  variant keeps the fields it reads (oksl's layout) and a field table
+  copies them from the struct. `Shading_Flag`s become `FLAG_*` defines,
+  the frame's lights and shadows code generated per variant, and the
+  constants both sides use (`FOCUS_TILE`, `MOTION_FAR`, `Tone_Mapping`'s
+  values) come from Odin in the prelude.
+- **Shading** is one program, `shaders/o3d.frag`, which oksl compiles
+  for the GPU and its interpreter runs on the CPU: Lambert diffuse plus GGX specular with Smith
   correlated visibility and Schlick Fresnel, plus equirectangular
   environment lighting (`scene.environment`, `scene.environment_intensity`)
   and background (`scene.background`, `scene.background_intensity`,
   `scene.background_blurriness`), as three.js's MeshStandardMaterial
   computes it, with `ao_map` (`1 + (r - 1) * ao_map_intensity`) multiplying
   indirect light only (ambient, hemisphere, environment irradiance and
-  radiance) and `fog_factor` (`.Linear` or `.Exp2` blending toward
+  radiance) and fog (`.Linear` or `.Exp2` blending toward
   `linear(fog.color)`), written as light; the frame's pixels then through
   `tone_map` (`None`, `Linear`, `Reinhard`, `Cineon`, `ACES_Filmic`, `AgX`,
   `Neutral` with `tone_mapping_exposure`) and sRGB encoding, once each
-  (raster.odin's `output`, shaders/post.slang's). When a texture is used as `scene.environment` (or blurred
+  (`shaders/post.frag`'s output pass). When a texture is used as `scene.environment` (or blurred
   `scene.background`), the texture has derived maps, as it has mipmaps: a
   GGX-prefiltered radiance mip chain (roughness 0..1) and a
   cosine-convolved diffuse irradiance map in `Textures`, sampled alike by
@@ -661,9 +663,8 @@ garbage.
   `SKY_DEFAULT`, `sky_radiance` per direction) into such a texture, for
   the background and, prefiltered, the environment (three.js draws it as
   a mesh and bakes it with PMREMGenerator).
-  Changing one means changing the other; the tests compare the two
-  renderers.
-- **Bloom (`bloom.odin`, post.slang's `fs_bloom_*`):** `scene.bloom` (`threshold`,
+  The tests compare the two renderers.
+- **Bloom (`bloom.odin`, `shaders/post.frag`'s `BLOOM_*` passes):** `scene.bloom` (`threshold`,
   `strength`, `radius`, as ovg's `.Bloom` filter's, so the same numbers give the
   same glow on a 2D layer and a 3D frame) works on the frame's linear light, after
   its motion blur and before its depth of field and tone mapping: each pixel's
@@ -671,8 +672,8 @@ garbage.
   `BLOOM_MOST_LIGHT` so that one highlight doesn't flood it; halved level by level;
   a Gaussian with `radius` as its sigma on the level where that is a few texels.
   It joins the light where that is tone mapped, so no pass at the frame's size is
-  added; light over nothing gives the pixel coverage. Both renderers alike.
-- **Motion blur (`motion_blur.odin`, post.slang's `fs_motion*`):** the
+  added; light over nothing gives the pixel coverage. Both renderers run the same passes.
+- **Motion blur (`motion_blur.odin`, `shaders/post.frag`'s `MOTION_*` passes):** the
   frame's depth pass writes, beside its depth, each pixel's velocity (its
   place now less where its surface was at the shutter's opening, in
   pixels: both clip positions interpolated and divided per pixel, the
@@ -682,16 +683,15 @@ garbage.
   is its own vertex stage's, and its position at the opening the same
   stage run again by oksl's tap with its uniforms then (`Shader.depth`).
   The filter follows McGuire et al. 2012's tiles (each tile of `max_blur`
-  pixels its longest velocity, then the longest about it; on the GPU the
-  tile found in two passes, rows then columns) and gathers 15 taps across
+  pixels its longest velocity, found rows then columns, then the longest
+  about it) and gathers 15 taps across
   the tiles' longest motion with interleaved-gradient jitter, but weighs
   them its own way: a pixel shows what passes in front of it (each tap its
   share of the shutter there, the neighbourhood's length over its own)
   and otherwise its own surface and what its or their motion carries
   across. Against 32 subframes at 320x200 that is 38.5 / 35.6 / 29.2 dB on
   a moving box, a pan and both (McGuire's weights: 30.7 / 33.8 / 27.8; the
-  sharp frame 26.3 / 18.1 / 18.2). At 1080p it costs about 7 G
-  instructions a frame on one core and 0.8 ms on the GPU (Radeon), velocity
+  sharp frame 26.3 / 18.1 / 18.2). At 1080p it costs about 0.8 ms on the GPU (Radeon), velocity
   writes included; with motion blur on, the software renderer keeps
   98 MB more (velocity, nearness, the frame's light and its blurred copy).
   Limits: motion is straight per vertex over the shutter; shading that
@@ -706,8 +706,7 @@ garbage.
   camera-facing quad
   (farthest first unless `.Additive`) with a row in the frame's sprite
   table, which both renderers read per quad as exact shapes read their
-  curve tables (the GPU through the curves' vertex shader and
-  `fs_sprite`). The material's `color_map` is the sprite and its colour and
+  curve tables (`shaders/o3d.frag`'s sprite entry). The material's `color_map` is the sprite and its colour and
   opacity multiply the row's; drawn unlit, blended or added
   (`.Additive`), fogged and tone mapped; `softness` fades a particle over
   that distance before the frame's depth (soft particles), which is then
@@ -751,7 +750,7 @@ garbage.
   longer fight (`far_layers`, `test_depth_precision`), and `near` needs no
   tuning. The frame's depth, `camera_project`'s depth and a ShaderMaterial's
   `projectionMatrix` and `gl_FragCoord.z` follow it; `view_depth`,
-  `point_hidden` and `depth_image` turn it into distances as before.
+  `point_hidden` and `software_depth_image` turn it into distances as before.
 - **Blending:** `blend_of(material)` is a draw's `Blend`: `.Opaque`
   (depth written), `.Cut` (the same, for `.Alpha_Mask`: only its shader may
   discard, since that costs a tile-based GPU its hidden-surface removal even
@@ -790,8 +789,8 @@ garbage.
   RGBA16F image (`depth_image_target`, in the same command buffer after
   `record`, with no readback): rgb the distance along the camera's axis
   (`view_depth`, world units) and a 1 where something was drawn; rgb the
-  given `far` and a 0 where nothing was. `depth_image` makes the same from
-  `software_depth` and `read_depth_image` reads the GPU's back; gpu_check
+  given `far` and a 0 where nothing was. `software_depth_image` makes the same from
+  `software_depth` (the same pass) and `read_depth_image` reads the GPU's back; gpu_check
   compares them (within 1e-3 relatively).
 - **External textures:** `texture_add_external` adds a `Textures` entry
   with no texels, for pixels the host already has on the GPU and changes
@@ -868,9 +867,7 @@ garbage.
   light's direct light by `shadow_factor` (with perspective divide `c.xyz /
   c.w`): a 3x3 grid of bilinear depth comparisons (a 4x4 block of texels
   weighed 1 - f, 1, 1, f per axis), edges repeated, outside the light's view
-  lit. The shader has the same arithmetic (`shadow_factor` in
-  `shaders/o3d.slang`); `FLAG_RECEIVE_SHADOW` and `FLAG_ALPHA_MASK` join the
-  shader contract.
+  lit. Both renderers run it (`shadow_factor` in `shaders/o3d.frag`).
 - **Order:** draws whose bounding sphere (the geometry's radius plus
   `(sum |w_t|) * morph_radius`, scaled with the draw, or covering the posed
   joints for a skinned draw) is outside the view, or whose shader failed,
@@ -889,33 +886,37 @@ garbage.
   word, the top bit for even-odd), and the GPU mirrors it as one storage
   buffer. The geometry is a `.Curves` quad per glyph (an exact shape is a
   run of one) over its set's bounds, `uv1` the shape coordinate; the
-  fragment finds its quad's entry by the quad (`vs_curves` passes vertex
-  index / 4 flat, the draw's vertices bound from its first so they count
-  from 0, as morphed draws are; software keeps each triangle's entry).
+  fragment finds its quad's entry by the quad (`shaders/o3d.vert` passes
+  `gl_VertexID` / 4 flat, the draw's vertices counted from its first, as
+  morphed draws' are).
   Each frame `expand_draws` grows each quad
   by half a pixel's footprint around each edge for the view (from the
   model-view-projection's derivative at each corner), so edge pixels just
   outside the bounds are drawn. A pixel's footprint is the shape
-  coordinate's derivatives within its 2x2 quad (fine derivatives on the
-  GPU, the quad's differences in software): a blended draw's alpha is
+  coordinate's derivatives within its 2x2 quad (fine derivatives, which
+  the interpreter takes as the quad's differences): a blended draw's alpha is
   `curves.coverage_affine`, the exact area of the footprint's
   parallelogram inside the shape (Green's theorem over the curves crossing
   it, so exact at grazing angles too; never faded to the shape's mean,
   which it already is once the footprint holds the whole shape); an
   opaque draw's
-  sample mask (`SV_Coverage`) is the winding
+  sample mask (`gl_SampleMask`) is the winding
   at the four sample positions, extrapolated from the centre. Both
-  renderers call the same procedures (`curves.odin`, `curves.slang`), so
-  they agree as the other cases do. The shadow pass keeps texels whose
+  renderers run the same code (ocurves' `curves.GLSL`). The shadow pass keeps texels whose
   centre is inside. Coverage by sample writes depth and needs no sorting;
   coverage by area blends, so it is drawn with the blended draws. Shapes are flat in their
   XY plane (the quad grows along x and y); a ShaderMaterial draws the bare
   quad.
-- **Shaders:** the standard material's are Slang compiled offline
-  (`shaders/build.sh`) to committed SPIR-V and MSL, as ovg's are.
-  ShaderMaterials are compiled at run time by oksl, which is plain Odin in
-  the binary (no external toolchain), to SPIR-V and MSL and to programs
-  its CPU interpreter runs. Their table (`Shaders`) keeps each compiled
+- **Shaders:** all are GLSL compiled at load by oksl, which is plain Odin
+  in the binary (no external toolchain), to SPIR-V and MSL and to programs
+  its CPU interpreter runs, so both renderers run the same program. o3d's
+  own (`shaders/o3d.vert`, `o3d.frag`, `o3d_depth.frag`, `post.frag` and
+  the fullscreen passes) are compiled per variant (`Programs`,
+  `program_get`): one per `Program_Key` (the material's flags, uv sets and
+  layer maps; the entry: main, cut, mirror, sprite, curves; mesh, skinned
+  or quads; the frame's light kinds, shadows, environment and fog), the
+  first time a draw needs it, its values staying uniforms.
+  ShaderMaterials' table (`Shaders`) keeps each compiled
   pair by id with what it reads, found once: the built-ins' block offsets
   per stage, the attributes' locations, the varyings' floats and the flat
   ones as a list. `BUILTINS` and `VERTEX_ATTRIBUTES` make three.js's
@@ -925,14 +926,16 @@ garbage.
   (values: `Shader_Error`, oksl's diagnostics or o3d's own, whose operands
   live with the failed pipeline, also kept) and its draws left out by both
   renderers; `shader_find` looks one up without making it.
-- **Software ShaderMaterials:** a chunk runs its draw's vertex stage once
-  over the vertices it uses (the standard material's too: world position
-  and normal), and a triangle's corners carry those floats, divided by w
-  except flat ones. A band shades a run of one custom draw's triangles as
-  2x2 quads (helper lanes for derivatives) in one oksl call, then writes
-  them through the same coverage, depth and blending as the standard
-  material, in triangle order. Its samplers read the draw's
-  `shader_maps` at the level oksl picks from the quad's derivatives.
+- **Software shading:** a chunk runs its draw's vertex stage (its
+  variant's or its ShaderMaterial's) once over the vertices it uses, and a
+  triangle's corners keep the outputs its fragment stage reads (oksl's
+  reflection lists them; `Corner_Floats`), divided by w except flat ones. A
+  band shades a run of one draw's triangles as 2x2 quads (helper lanes for
+  derivatives) in one oksl call, then writes them through coverage, depth
+  and blending in triangle order; samplers read the draw's maps at the
+  level oksl picks from the quad's derivatives. The background, far plane
+  and post passes run their programs over the frame in bands of rows
+  (`post.odin`).
 - Errors are values (`Error`); no threads of its own: the software
   renderer runs its phases on the caller's `thread.Pool`.
 
@@ -960,10 +963,8 @@ For onimite:
    (unbevelled first; a bevelled cap is an offset outline). Opaque caps
    draw by sample, which equals the mesh, so this waits on a need.
 
-Metal: checked on an Apple Silicon Mac (macOS 27), last with exact shapes:
-`tools/gpu_check` matches the software renderer in all 14 parity cases (53
-to 87 dB PSNR) and passes the external texture and prepared jobs checks, and onimite's notarized macOS release draws its 3D examples
-on Metal as on the CPU. (v0.0.1's standard shader did not compile there:
-a texel `Load` on a combined texture-sampler, which Slang emits wrongly
-for MSL; the shadow map is now sampled at texel centres.)
+Metal: checked on an Apple Silicon Mac (macOS 27), last with the move to
+oksl: `tools/gpu_check` passes all 49 cases (the parity cases, external
+textures, prepared jobs, depth and depth image), and onimite's notarized
+macOS release draws its 3D examples on Metal as on the CPU.
 

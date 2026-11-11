@@ -1,6 +1,5 @@
 package o3d
 
-import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:slice"
@@ -39,21 +38,6 @@ test_primitive_winding :: proc(t: ^testing.T) {
 	testing.expect_value(t, box(&g, 1, 2, 3, 2, 2, 2), ids[0])
 	testing.expect_value(t, primitive(&g, {.Box, {1, 2, 3, 2, 2, 2, 0}}), ids[0])
 	testing.expect_value(t, primitive(&g, {.None, {}}), Geometry_Id(0))
-}
-
-// The shader's constants are the enums': LIGHT_<KIND> is a Light_Kind's
-// value and FLAG_<FLAG> a Shading_Flag's bit.
-@(test)
-test_shader_constants :: proc(t: ^testing.T) {
-	SOURCE :: #load("shaders/o3d.slang", string)
-	for kind in Light_Kind {
-		line := fmt.tprintf("static const uint LIGHT_%s = %d;", strings.to_upper(fmt.tprint(kind), context.temp_allocator), u32(kind))
-		testing.expectf(t, strings.contains(SOURCE, line), "o3d.slang lacks %q", line)
-	}
-	for flag in Shading_Flag {
-		line := fmt.tprintf("static const uint FLAG_%s = %d;", strings.to_upper(fmt.tprint(flag), context.temp_allocator), transmute(u32)Shading_Flags{flag})
-		testing.expectf(t, strings.contains(SOURCE, line), "o3d.slang lacks %q", line)
-	}
 }
 
 // compose matches three.js: a quarter turn about Y takes +X to -Z.
@@ -1055,16 +1039,24 @@ test_alpha_mask_ao_and_uv_transform :: proc(t: ^testing.T) {
 // background pixels.
 @(test)
 test_tone_mapping_and_fog :: proc(t: ^testing.T) {
+	programs: Programs
+	defer programs_destroy(&programs)
+	close :: proc(a, b: Vec3) -> bool {
+		return linalg.length(a - b) < 1e-3
+	}
+	ldr := Vec3{0.3, 0.2, 0.1}
+	none := tone_mapped(&programs, ldr, .None, 1)
+	testing.expectf(t, close(none, ldr), "None leaves light in [0, 1] as it is: %v", none)
+	doubled := tone_mapped(&programs, ldr, .Linear, 2)
+	testing.expectf(t, close(doubled, {0.6, 0.4, 0.2}), "Linear scales by its exposure: %v", doubled)
 	hdr := Vec3{4.0, 2.0, 0.5}
-	testing.expect_value(t, tone_map(hdr, .None, 1.0), hdr)
-	testing.expect_value(t, tone_map(Vec3{0.3, 0.2, 0.1}, .Linear, 2.0), Vec3{0.6, 0.4, 0.2})
 	for mode in Tone_Mapping {
 		if mode == .None || mode == .Linear {
 			continue
 		}
-		mapped := tone_map(hdr, mode, 1.0)
+		mapped := tone_mapped(&programs, hdr, mode, 1)
 		testing.expectf(t, mapped.r > 0.5 && mapped.r < 1.0 && mapped.g > 0.3 && mapped.g < 1.0, "%v compresses HDR into (0, 1): %v", mode, mapped)
-		brighter := tone_map(hdr, mode, 2.0)
+		brighter := tone_mapped(&programs, hdr, mode, 2)
 		testing.expectf(t, brighter.r > mapped.r && brighter.g > mapped.g, "%v exposure increases brightness: %v vs %v", mode, brighter, mapped)
 	}
 
@@ -1341,9 +1333,10 @@ test_instancing_lines_and_points :: proc(t: ^testing.T) {
 // inverted-hull cartoon outlines (`Material.outline_width`, `Material.outline_color`).
 @(test)
 test_toon_shading_and_outlines :: proc(t: ^testing.T) {
-	// 1. Direct `shade()` test: within each of the 3 cel-shading plateaus
-	// (shadow: nl in 0..0.10, midtone: nl in 0.22..0.46, lit: nl in 0.62..0.80)
-	// the diffuse shading is flat/quantized, with sharp steps between plateaus.
+	// 1. The variant's shading (shade_fragment): within each of the 3
+	// cel-shading plateaus (shadow: nl in 0..0.10, midtone: nl in 0.22..0.46,
+	// lit: nl in 0.62..0.80) the diffuse shading is flat/quantized, with sharp
+	// steps between plateaus.
 	sm := Shading_Material{
 		base      = {0.8, 0.4, 0.2},
 		opacity   = 1,
@@ -1357,12 +1350,17 @@ test_toon_shading_and_outlines :: proc(t: ^testing.T) {
 			vector = {0, 0, 1},
 		},
 	}
-	c_shadow_a := shade(surface(&sm), {}, {0, 0, -1}, {0, 0, 5}, lights[:]) // nl = 0.0
-	c_shadow_b := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.08}), {0, 0, 5}, lights[:]) // nl ~ 0.08
-	c_mid_a    := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.30}), {0, 0, 5}, lights[:]) // nl ~ 0.29
-	c_mid_b    := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.45}), {0, 0, 5}, lights[:]) // nl ~ 0.41
-	c_lit_a    := shade(surface(&sm), {}, linalg.normalize(Vec3{1, 0, 0.90}), {0, 0, 5}, lights[:]) // nl ~ 0.67
-	c_lit_b    := shade(surface(&sm), {}, {0, 0, 1}, {0, 0, 5}, lights[:]) // nl = 1.0
+	programs: Programs
+	defer programs_destroy(&programs)
+	toon :: proc(p: ^Programs, sm: ^Shading_Material, lights: []Shading_Light, n: Vec3) -> Vec3 {
+		return shade_fragment(p, sm, lights, {}, n, {0, 0, 5}).rgb
+	}
+	c_shadow_a := toon(&programs, &sm, lights[:], {0, 0, -1}) // nl = 0.0
+	c_shadow_b := toon(&programs, &sm, lights[:], linalg.normalize(Vec3{1, 0, 0.08})) // nl ~ 0.08
+	c_mid_a    := toon(&programs, &sm, lights[:], linalg.normalize(Vec3{1, 0, 0.30})) // nl ~ 0.29
+	c_mid_b    := toon(&programs, &sm, lights[:], linalg.normalize(Vec3{1, 0, 0.45})) // nl ~ 0.41
+	c_lit_a    := toon(&programs, &sm, lights[:], linalg.normalize(Vec3{1, 0, 0.90})) // nl ~ 0.67
+	c_lit_b    := toon(&programs, &sm, lights[:], {0, 0, 1}) // nl = 1.0
 
 	testing.expect(t, linalg.length(c_shadow_a - c_shadow_b) < 1e-5, "shadow band plateau is flat")
 	testing.expect(t, linalg.length(c_mid_a - c_mid_b) < 1e-5, "midtone band plateau is flat")
@@ -1863,7 +1861,7 @@ test_particle_opacity_clamped :: proc(t: ^testing.T) {
 			i := (W / 2 * W + W / 2) * 4
 			c := [4]u8{px[i], px[i + 1], px[i + 2], px[i + 3]}
 			want := [4]u8{} if a < 0 else {255, 128, 64, 255}
-			testing.expectf(t, c == want, "%v, opacity %v: %v, want %v", flags, a, c, want)
+			testing.expectf(t, within_level(c, want), "%v, opacity %v: %v, want %v", flags, a, c, want)
 		}
 	}
 }
@@ -2522,7 +2520,7 @@ test_depth_image :: proc(t: ^testing.T) {
 	defer software_destroy(&s)
 	software_render(&s, &scene, &g, nil, W, W)
 	out := make([]f16, W * W * 4, context.temp_allocator)
-	depth_image(scene.camera, software_depth(&s), W, W, 99, out)
+	software_depth_image(&s, 99, out)
 	c := (16 * W + 16) * 4
 	testing.expectf(t, abs(f32(out[c]) - 2.5) < 2e-3 && out[c + 3] == 1, "the plane 2.5 away: %v", out[c:][:4])
 	testing.expectf(t, out[0] == 99 && out[1] == 99 && out[3] == 0, "nothing: far, a 0: %v", out[:4])
@@ -2560,6 +2558,17 @@ test_sky :: proc(t: ^testing.T) {
 	testing.expect_value(t, sky_texture(&textures, sky, 1), Texture_Id(0))
 }
 
+// Pixels the same within one 8-bit level a channel: a value on a half step
+// rounds either way after the sRGB encoding's float round trip.
+within_level :: proc(a, b: [4]u8) -> bool {
+	for k in 0 ..< 4 {
+		if abs(int(a[k]) - int(b[k])) > 1 {
+			return false
+		}
+	}
+	return true
+}
+
 // Scene.background_color: the frame's clear, premultiplied (transparent by
 // default); an additive draw adds to it; a background texture covers it.
 @(test)
@@ -2591,9 +2600,10 @@ test_background_color :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, at(frame(&s, &scene, &g, &textures, {}, false), 0, 0), [4]u8{0, 0, 0, 0})
 	testing.expect_value(t, at(frame(&s, &scene, &g, &textures, {0.2, 0.4, 0.6, 1}, false), 0, 0), [4]u8{51, 102, 153, 255})
-	testing.expect_value(t, at(frame(&s, &scene, &g, &textures, {0.2, 0.4, 0.6, 0.5}, false), 0, 0), [4]u8{26, 51, 77, 128})
+	half := at(frame(&s, &scene, &g, &textures, {0.2, 0.4, 0.6, 0.5}, false), 0, 0)
+	testing.expectf(t, within_level(half, {26, 51, 77, 128}), "half covered: %v", half)
 	px := frame(&s, &scene, &g, &textures, {0, 0, 0, 1}, true)
-	testing.expectf(t, at(px, W / 2, W / 2) == {128, 0, 0, 255} && at(px, 0, 0) == {0, 0, 0, 255}, "added onto an opaque black: %v, %v", at(px, W / 2, W / 2), at(px, 0, 0))
+	testing.expectf(t, within_level(at(px, W / 2, W / 2), {128, 0, 0, 255}) && at(px, 0, 0) == {0, 0, 0, 255}, "added onto an opaque black: %v, %v", at(px, W / 2, W / 2), at(px, 0, 0))
 	sky := sky_texture(&textures, SKY_DEFAULT, 16)
 	bg := at(frame(&s, &scene, &g, &textures, {1, 0, 0, 1}, false, sky), 0, 0)
 	testing.expectf(t, bg.a == 255 && bg.b > bg.r, "the texture covers the colour: %v", bg)
@@ -3243,7 +3253,7 @@ test_motion_tile_at_the_cap :: proc(t: ^testing.T) {
 	tables: Motion_Tables
 	defer motion_tables_destroy(&tables)
 	motion_blur(&tables, color[:], velocity[:], nearness[:], W, H, {max_blur = 10, depth_scale = 1}, out[:])
-	testing.expect_value(t, tables.tiles[0], [2]f32{10, 0})
+	testing.expect_value(t, tables.tiles[0].xy, [2]f32{10, 0})
 }
 
 // A Basic material ignores shadows, textured or not: the same pixels with

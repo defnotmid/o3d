@@ -1,20 +1,18 @@
 package o3d
 
 import "core:math"
-import "core:math/linalg"
 import "core:slice"
 
 import "deps:oksl"
-import curves "deps:ocurves"
 
-// Phase 3 of the software renderer: each band clears its rows, rasterizes its
-// triangles in drawing order (per pixel when untextured, in 2x2 quads when
-// textured, an exact shape's, or running an oksl ShaderMaterial) into its
-// samples' light (half floats, premultiplied by coverage, blended there, as
-// the GPU's frame), and resolves its pixels: the 4 samples averaged, tone
-// mapped and sRGB-encoded once (or kept as light, for a snapshot or the
-// mirror). The equirectangular background is laid into the samples first,
-// as the GPU draws it first.
+// Phase 3 of the software renderer: each band clears its rows, lays the
+// background into its samples (its pass program, as the GPU draws it
+// first), rasterizes its triangles in drawing order in 2x2 quads, each
+// draw's quads shaded by its program (a variant of shaders/o3d.frag, or a
+// ShaderMaterial's), into its samples' light (half floats, premultiplied by
+// coverage, blended there, as the GPU's frame), and resolves its pixels:
+// the 4 samples averaged into the frame's light, which post.odin's passes
+// then tone map and encode.
 
 @(private)
 draw_band :: proc(data: rawptr, band, wi: int) {
@@ -38,18 +36,13 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 	for r := 0; r < len(refs); {
 		t := s.chunks[refs[r].chunk].tris[refs[r].tri] // gathered from the columns once
 		if !bg_filled && !replaces(blend_of(&s.materials[t.draw])) {
-			fill_band_bg(job, s, width, y0, y1)
+			fill_band_bg(job, s, &s.workers[wi], width, y0, y1)
 			bg_filled = true
 		}
-		if s.materials[t.draw].shader != 0 {
-			r += draw_custom(job, &s.workers[wi], refs[r:], y0, y1)
-			continue
-		}
-		draw_standard(job, refs[r], t, y0, y1)
-		r += 1
+		r += draw_quads(job, &s.workers[wi], refs[r:], y0, y1)
 	}
 	if !bg_filled {
-		fill_band_bg(job, s, width, y0, y1)
+		fill_band_bg(job, s, &s.workers[wi], width, y0, y1)
 	}
 	// The pixels: their samples' light averaged, kept (the snapshot's or
 	// the reflection's level 0), or tone mapped and encoded as the frame's.
@@ -71,24 +64,9 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 		}
 		return
 	}
-	if job.light_into != nil {
-		for i in y0 * width ..< y1 * width {
-			job.light_into[i] = pixel_light(s, i)
-		}
-		return
-	}
-	clear_u64 := transmute(u64)job.clear
-	clear_out := output(from_halves(job.clear), job.tone_mapping, job.tone_exposure)
-	px_out := slice.reinterpret([][4]u8, s.pixels)
+	// The frame's light, for its post passes.
 	for i in y0 * width ..< y1 * width {
-		px := s.light[i * SAMPLES:][:SAMPLES]
-		first := transmute(u64)px[0]
-		if transmute(u64)px[1] == first && transmute(u64)px[2] == first && transmute(u64)px[3] == first {
-			px_out[i] = clear_out if first == clear_u64 else output(from_halves(px[0]), job.tone_mapping, job.tone_exposure)
-		} else {
-			sum := from_halves(px[0]) + from_halves(px[1]) + from_halves(px[2]) + from_halves(px[3])
-			px_out[i] = output(sum * (1.0 / SAMPLES), job.tone_mapping, job.tone_exposure)
-		}
+		job.light_into[i] = pixel_light(s, i)
 	}
 }
 
@@ -96,34 +74,54 @@ draw_band :: proc(data: rawptr, band, wi: int) {
 // (deferred until the first blended draw or band resolve so fully opaque
 // pixels skip sampling the background).
 @(private = "file")
-fill_band_bg :: proc(job: ^Frame_Job, s: ^Software, width, y0, y1: int) {
-	inv_w := 2.0 / f32(width)
-	inv_h := 2.0 / f32(job.height)
+fill_band_bg :: proc(job: ^Frame_Job, s: ^Software, w: ^Worker, width, y0, y1: int) {
+	// Compiled by software_render, before the bands run.
+	x := &s.programs.passes[.Background]
+	if x.pipeline == nil {
+		return
+	}
+	tex, _ := texture_get(job.textures, job.bg_tex)
+	bb := Background_Block {
+		inv_view_proj = job.inv_vp,
+		frame         = {f32(width), f32(job.height), 0, 0},
+		background    = {job.bg_intensity, job.bg_lod, 1 if tex.hdr else 0, 0},
+	}
+	block: [256]u8 = ---
+	block_fill(&x.block, {&bb, nil}, block[:])
+	maps := Pass_Maps{job = job, background = job.bg_tex}
+	sizes := [1][3]i32{{i32(tex.width), i32(tex.height), 1}}
+	targets := [1][][4]f32{s.bg_light[:]}
+	oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], width, job.height, targets[:], &w.vm, {y = y0, w = width, h = y1 - y0, sampler = sample_pass_map, user = &maps, channel_sizes = sizes[:]})
 	for y in y0 ..< y1 {
-		ndc_y := 1 - (f32(y) + 0.5) * inv_h
-		// From the near plane (depth 1) to the far (0).
-		p0_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 1, 1}
-		p1_l := job.inv_vp * Vec4{0.5 * inv_w - 1, ndc_y, 0, 1}
-		p0_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 1, 1}
-		p1_r := job.inv_vp * Vec4{1.5 * inv_w - 1, ndc_y, 0, 1}
-		ray0 := p1_l.xyz / p1_l.w - p0_l.xyz / p0_l.w
-		ray_step := (p1_r.xyz / p1_r.w - p0_r.xyz / p0_r.w) - ray0
 		for x in 0 ..< width {
 			base := (y * width + x) * SAMPLES
-			d := s.depth[base:][:SAMPLES]
-			if d[0] > 0 && d[1] > 0 && d[2] > 0 && d[3] > 0 {
-				continue
-			}
-			dir := linalg.normalize(ray0 + f32(x) * ray_step)
-			c := sample_lod_linear(job.textures, job.bg_tex, equirect_uv(dir), job.bg_lod) * job.bg_intensity
-			px := to_halves({c.r, c.g, c.b, 1})
+			px := to_halves(s.bg_light[y * width + x])
 			for k in 0 ..< SAMPLES {
-				if d[k] == 0 {
+				if s.depth[base + k] == 0 {
 					s.light[base + k] = px
 				}
 			}
 		}
 	}
+}
+
+// What a fullscreen pass samples on the CPU: the background's map, or the
+// frame's depth (`depth`, `width x height`, nearest).
+@(private = "file")
+Pass_Maps :: struct {
+	job:           ^Frame_Job,
+	background:    Texture_Id,
+	depth:         []f32,
+	width, height: int,
+}
+
+@(private = "file")
+sample_pass_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
+	maps := (^Pass_Maps)(user)
+	if maps.depth != nil {
+		return nearest(maps.depth, maps.width, maps.height, uv)
+	}
+	return sample_lod(maps.job.textures, maps.background, {uv.x, 1 - uv.y}, lod, clamp_v = true)
 }
 
 // A pixel's light: its samples' averaged (premultiplied; alpha its
@@ -143,78 +141,11 @@ pixel_light :: #force_inline proc "contextless" (s: ^Software, i: int) -> [4]f32
 	return sum * (1.0 / SAMPLES)
 }
 
-// A pixel of the frame from its light (premultiplied): tone mapped, sRGB
-// premultiplied RGBA8, as the GPU's output pass writes it. Light past what
-// its coverage holds (added light over nothing) stays, as colour past the
-// alpha (up to full), which a premultiplied over adds.
-@(private)
-output :: #force_inline proc "contextless" (light: [4]f32, mode: Tone_Mapping, exposure: f32) -> [4]u8 {
-	a := clamp(light.a, 0, 1)
-	if a <= 0 {
-		return {}
-	}
-	c := tone_map(light.rgb / a, mode, exposure)
-	k := clamp(max(c.r, c.g, c.b), 1, 1 / a)
-	c /= k
-	// Clamped as the GPU's 8-bit target clamps.
-	m := clamp(a * k, 0, 1)
-	return {u8(math.round(linear_to_srgb(c.r) * m * 255)), u8(math.round(linear_to_srgb(c.g) * m * 255)), u8(math.round(linear_to_srgb(c.b) * m * 255)), u8(math.round(a * 255))}
-}
-
-// What a transmissive point sees behind it (`shade`'s `behind`) along its
-// normal; the layers' thickness becomes the refracted ray's world length.
-@(private = "file")
-behind_of :: #force_inline proc "contextless" (job: ^Frame_Job, world, n: Vec3, roughness: f32, ly: ^Shading_Layers) -> Vec4 {
-	uv, lod, distance := refraction(world, n, job.eye, roughness, ly, job.view_proj, job.width)
-	ly.thickness = distance
-	if job.mirrored {
-		// The mirror has no snapshot: the environment shows through.
-		return {}
-	}
-	return frame_behind(job.snapshot, &job.snapshot_tex, uv, lod)
-}
-
-// What a reflective point `p` at pixel (x, y) reads of the frame's
-// reflection (none: nothing, the environment's), at its roughness and its
-// coat's, each blurred as far as its mirrored ray runs (`reflected_run`).
-@(private = "file")
-mirror_at :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, x, y: int, p: Vec3, roughness, coat_roughness: f32) -> (mirror: Mirror_Light) {
-	if job.reflection == nil {
-		return
-	}
-	uv := Vec2{(f32(x) + 0.5) / f32(job.width), (f32(y) + 0.5) / f32(job.height)}
-	coated := .Clearcoat in m.flags
-	d := linalg.length(p - job.eye)
-	focal, ortho, last := job.reflection_focal, job.ortho, job.reflection_last
-	far := reflection_lod(max(roughness, coat_roughness if coated else 0), REFLECTION_MISS, d, focal, ortho, last)
-	run := reflected_run(job.reflection_runs, &job.reflection_tex, uv, far)
-	mirror.spec = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(roughness, run, d, focal, ortho, last))
-	if coated {
-		mirror.coat = reflection_at(job.reflection, &job.reflection_tex, uv, reflection_lod(coat_roughness, run, d, focal, ortho, last))
-	}
-	return
-}
-
-// Whether a point is behind the mirror's plane (`job.clip`, zero in the
-// other passes).
-@(private = "file")
-clipped :: #force_inline proc "contextless" (job: ^Frame_Job, p: Vec3) -> bool {
-	return linalg.dot(job.clip.xyz, p) + job.clip.w < 0
-}
-
-// A shaded point's light as the frame keeps it: premultiplied by its
-// material's alpha, coverage that alpha times transmission's (`through`:
-// what shows behind glass is in `c` already, as the GPU writes it).
-@(private = "file")
-light_of :: #force_inline proc "contextless" (c: Vec3, alpha, through: f32) -> [4]f32 {
-	a := clamp(alpha, 0, 1)
-	return {c.r * a, c.g * a, c.b * a, a * through}
-}
-
-// A band of the shadow map: its rows cleared to the far plane (0), then each
-// triangle's depth at the texel centres it covers, nearest (greatest) kept.
-@(private)
-draw_depth_band :: proc(data: rawptr, band, _: int) {
+// A depth pass's band: a shadow map's (the nearest caster's depth per
+// texel) or the frame's (its depth, and with motion blur each pixel's
+// velocity and nearness: where nothing is drawn, the far plane moving only
+// as the camera did). One sample a pixel, at its centre.
+draw_depth_band :: proc(data: rawptr, band, wi: int) {
 	job := (^Frame_Job)(data)
 	s := job.s
 	smap := job.depth_target
@@ -222,718 +153,177 @@ draw_depth_band :: proc(data: rawptr, band, _: int) {
 	y0 := band * BAND_ROWS
 	y1 := min(y0 + BAND_ROWS, job.height)
 	slice.fill(smap[y0 * size:y1 * size], 0)
-	moving := job.velocity != nil
-	if moving {
-		// Where nothing is drawn: the far plane, moving only as the camera
-		// did.
-		for y in y0 ..< y1 {
-			for x in 0 ..< size {
-				c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
-				ndc := Vec2{c.x / f32(size) * 2 - 1, 1 - c.y / f32(job.height) * 2}
-				o := job.opened_far * Vec4{ndc.x, ndc.y, 0, 1}
-				job.velocity[y * size + x] = pixel_motion(c, o.xyw, size, job.height)
-				job.nearness[y * size + x] = MOTION_FAR
-			}
+	if x := &s.programs.passes[.Velocity_Far]; x.pipeline != nil && job.velocity != nil {
+		far := Far_Block{opened_far = job.opened_far, frame = {f32(size), f32(job.height), 0, 0}}
+		block: [256]u8 = ---
+		block_fill(&x.block, {&far, nil}, block[:])
+		targets := [3][][4]f32{nil, s.far_light[0][:], s.far_light[1][:]}
+		oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], size, job.height, targets[:], &s.workers[wi].vm, {y = y0, w = size, h = y1 - y0})
+		for i in y0 * size ..< y1 * size {
+			job.velocity[i] = s.far_light[0][i].xy
+			job.nearness[i] = s.far_light[1][i].x
 		}
 	}
-	for ref in s.band_tris[s.band_start[band]:s.band_start[band + 1]] {
+	refs := s.band_tris[s.band_start[band]:s.band_start[band + 1]]
+	for r := 0; r < len(refs); {
+		r += draw_depth_quads(job, &s.workers[wi], refs[r:], y0, y1)
+	}
+}
+
+// A run of one draw's triangles in a depth pass, in quads (the lanes whose
+// centres are outside are helpers), through its depth fragment program.
+@(private = "file")
+draw_depth_quads :: proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Ref, y0, y1: int) -> int {
+	s := job.s
+	width := job.width
+	q := &w.quads
+	draw := -1
+	taken := 0
+	for ref in refs {
 		t := s.chunks[ref.chunk].tris[ref.tri]
+		if draw >= 0 && t.draw != draw {
+			break
+		}
+		draw = t.draw
+		taken += 1
 		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
 		if area == 0 {
 			continue
 		}
-		m := &s.materials[t.draw]
-		masked, _ := shadow_mask(m)
-		curved := .Curves in m.flags
-		if job.own_side && m.shader != 0 {
-			masked, curved = false, false // its own vertex stage's: opened floats only
+		span := tri_span(t, width)
+		for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
+			lo, hi := row_span(span, f32(qy), f32(qy + 2), 2)
+			for qx := lo &~ 1; qx < hi; qx += 2 {
+				helpers: oksl.Quad_Lanes
+				for l in 0 ..< 4 {
+					x, y := qx + l & 1, qy + l >> 1
+					if x >= width || y < y0 || y >= y1 || !inside(t, {f32(x) + 0.5, f32(y) + 0.5}, area) {
+						helpers += {l}
+					}
+				}
+				if card(helpers) == 4 {
+					continue
+				}
+				append(&q.origin, [2]i32{i32(qx), i32(qy)})
+				append(&q.helpers, helpers)
+				append(&q.facing, t.front)
+				append(&q.covered, [4]Sample_Mask{})
+				append(&q.tri, ref)
+				if len(q.origin) >= QUAD_BATCH {
+					flush_depth_quads(job, w, draw)
+				}
+			}
 		}
-		ns := shadow_floats(masked, curved)
-		nf := ns + (OPENED_FLOATS if moving else 0)
-		uv, rc: [3]Vec2 = ---, ---
-		oc: [3]Vec3 = ---
-		vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
-		for k in 0 ..< 3 {
-			if masked {
-				uv[k] = (^Vec2)(&vs[k * nf])^
+	}
+	flush_depth_quads(job, w, draw)
+	return taken
+}
+
+// A batch of one draw's quads in a depth pass: o3d's depth variant, or a
+// ShaderMaterial's depth stage in the frame's; where it is nearer, its
+// depth, and with motion blur its velocity and nearness.
+@(private = "file")
+flush_depth_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
+	s := job.s
+	size := job.width
+	q := &w.quads
+	nq := len(q.origin)
+	if nq == 0 {
+		return
+	}
+	m := &s.materials[draw]
+	moving := job.velocity != nil
+	for &t in q.targets {
+		table_grow_non_zero(&t, nq * 4)
+	}
+	table_grow_non_zero(&q.shaded, nq)
+	targets := [3][][4]f32{q.targets[0][:], q.targets[1][:] if moving else nil, q.targets[2][:] if moving else nil}
+	quads := oksl.Fragment_Quads {
+		count        = nq,
+		origin       = q.origin[:],
+		front_facing = q.facing[:],
+		helpers      = q.helpers[:],
+		depth        = q.depths[:],
+	}
+	if job.own_side && m.shader != 0 {
+		sh := shader_get(job.shaders, m.shader)
+		quad_values(s, q, sh.depth.vertex.varying_floats, &sh.depth_corners)
+		quads.varyings, quads.depth = q.values[:], q.depths[:]
+		oksl.run_fragment(&sh.depth.fragment.program, block(job.depth_blocks, draw, .Fragment), quads, targets[:], q.shaded[:], &w.vm)
+	} else {
+		x := &s.programs.list[job.programs[draw]]
+		quad_values(s, q, x.pipeline.vertex.varying_floats, &x.corners)
+		quads.varyings, quads.depth = q.values[:], q.depths[:]
+		maps := program_maps(job, x, m)
+		fb: [size_of(Material_Block) + size_of(Frame_Block)]u8 = ---
+		block_fill(&x.fragment, {&s.material_blocks[draw], job.frame_block}, fb[:])
+		buffers: [2][]u32
+		for b, i in x.fragment_buffers {
+			if b == .Curve_Words {
+				buffers[i] = job.geos.curve_words[:]
 			}
-			if curved {
-				rc[k] = (^Vec2)(&vs[k * nf + ns - SHADOW_MASK_FLOATS])^
+		}
+		oksl.run_fragment(&x.pipeline.fragment.program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], buffers = buffers[:]})
+	}
+	smap := job.depth_target
+	for qi in 0 ..< nq {
+		for l in q.shaded[qi] {
+			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
+			j := qi * 4 + l
+			i := y * size + x
+			z := q.depths[j]
+			if z < 0 || z > 1 || z <= smap[i] {
+				continue
 			}
+			smap[i] = z
 			if moving {
-				oc[k] = (^Vec3)(&vs[k * nf + ns])^
-			}
-		}
-		words: []u32
-		rule: curves.Fill_Rule
-		if curved {
-			words, rule = curve_entry_words(job.geos, t.curve)
-		}
-		span := tri_span(t, size)
-		for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
-			lo, hi := row_span(span, f32(y), f32(y + 1))
-			for x in lo ..< hi {
-				c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
-				if !inside(t, c, area) {
-					continue
-				}
-				b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
-				b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
-				b2 := 1 - b0 - b1
-				z := b0 * t.p[0].z + b1 * t.p[1].z + b2 * t.p[2].z
-				i := y * size + x
-				if z >= 0 && z <= 1 && z > smap[i] {
-					iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
-					if curved && !curves_inside(words, (rc[0] * b0 + rc[1] * b1 + rc[2] * b2) / iw, rule) {
-						continue
-					}
-					if masked {
-						raw := (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) / iw
-						at :: #force_inline proc "contextless" (xf: Uv_Transform, raw: Vec2) -> Vec2 {
-							return xf.linear * raw + xf.offset
-						}
-						a := m.opacity
-						if .Color_Map in m.flags {
-							a *= sample_map_top(job, m.color_map, at(m.uv_transforms[.Color], raw)).a
-						}
-						if .Alpha_Map in m.flags {
-							a *= sample_map_top(job, m.alpha_map, at(m.uv_transforms[.Alpha], raw)).g
-						}
-						if a < m.alpha_cutoff {
-							continue
-						}
-					}
-					smap[i] = z
-					if moving {
-						o := (oc[0] * b0 + oc[1] * b1 + oc[2] * b2) / iw
-						job.velocity[i] = pixel_motion(c, o, size, job.height)
-						job.nearness[i] = -math.ln(view_depth(job.camera, z))
-					}
-				}
+				job.velocity[i] = q.targets[1][j].xy
+				job.nearness[i] = q.targets[2][j].x
 			}
 		}
 	}
+	clear(&q.origin)
+	clear(&q.helpers)
+	clear(&q.facing)
+	clear(&q.covered)
+	clear(&q.tri)
 }
 
-// Pixel `c`'s motion over the first half of the shutter: `c` less where
-// clip position `o` (x, y, w at the opening) falls on a `width x height`
-// frame, as `emit` maps the corners. A point behind the camera then
-// (w <= 0) does not move: no motion is better than a wrapped one.
+// A batch's lanes' varyings (in the vertex stage's record of `nf` floats,
+// at their offsets there: the floats each triangle's corners keep,
+// perspective-correct, helpers' extrapolated, the flat ones its first
+// corner's; the rest, which the fragment does not read, left as they are)
+// and depths (gl_FragCoord.z).
 @(private = "file")
-pixel_motion :: #force_inline proc "contextless" (c: Vec2, o: Vec3, width, height: int) -> Vec2 {
-	if !(o.z > 1e-6) {
-		return {}
-	}
-	iw := 1 / o.z
-	return c - {(o.x * iw * 0.5 + 0.5) * f32(width), (0.5 - o.y * iw * 0.5) * f32(height)}
-}
-
-// Transformed UV and screen derivatives for `slot` (selecting `uv0` or `uv1`).
-@(private = "file")
-slot_uv :: #force_inline proc "contextless" (m: ^Shading_Material, slot: Texture_Slot, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> (uv, ddx, ddy: Vec2) {
-	raw, dx, dy := uv0, d0x, d0y
-	if ((m.uv_sets >> u32(slot)) & 1) != 0 {
-		raw, dx, dy = uv1, d1x, d1y
-	}
-	return transform_uv(m.uv_transforms[slot], raw, dx, dy)
-}
-
-// A uv and its derivatives through a slot's transform.
-@(private = "file")
-transform_uv :: #force_inline proc "contextless" (xf: Uv_Transform, raw, dx, dy: Vec2) -> (uv, ddx, ddy: Vec2) {
-	return xf.linear * raw + xf.offset, xf.linear * dx, xf.linear * dy
-}
-
-// A standard-material triangle's rows in the band: per pixel when untextured,
-// or in 2x2 quads when textured so uv and world derivatives give the mip level
-// and the normal map's tangent frame (and an exact shape's coordinate its
-// pixel footprint).
-@(private = "file")
-draw_standard :: #force_no_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, y0, y1: int) {
-	t := t // a local the pixel loop keeps in registers (a parameter is a reference)
-	s := job.s
-	width := job.width
-	m := &s.materials[t.draw]
-	blend := .Blended in m.flags
-	receive := .Receive_Shadow in m.flags && job.shadow_count > 0
-	area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
-	if area == 0 {
-		return
-	}
-	if .Shadow_Only in m.flags {
-		draw_shadow_only(job, ref, t, m, y0, y1, area)
-		return
-	}
-	if m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite, .Vertex_Colors}) != {} {
-		draw_standard_textured(job, ref, t, m, y0, y1, area, blend, receive)
-		return
-	}
-	if .Alpha_Mask in m.flags && m.opacity < m.alpha_cutoff {
-		return
-	}
-	out_alpha := m.opacity if blend else 1
-	dz := depth_plane(t, area)
-	span := tri_span(t, width)
-	// The mirror's pass clips; a reflective draw reads the reflection.
-	clipping := job.clip != {}
-	reflective := .Reflection in m.flags
-	// World position and normal over w per corner.
-	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
-	world, normal: [3]Vec3
-	for k in 0 ..< 3 {
-		world[k] = (^Vec3)(&vs[k * UNTEX_FLOATS])^
-		normal[k] = (^Vec3)(&vs[k * UNTEX_FLOATS + 3])^
-	}
-	// The triangle's normal, facing the eye: its corners run counter-clockwise
-	// on the screen, which a mirror's pass reverses. A two-sided surface's normal
-	// turns to this side: a smooth normal can lean away from the eye at a
-	// silhouette and still be on the eye's side of its triangle.
-	face_n: Vec3
-	if m.flags & {.Flat_Shading, .Two_Sided} != {} {
-		w0 := world[0] / t.inv_w[0]
-		face_n = linalg.normalize0(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
-		if job.mirrored {
-			face_n = -face_n
-		}
-	}
-	for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
-		lo, hi := row_span(span, f32(y), f32(y + 1))
-		for x in lo ..< hi {
-			covered := coverage(t, x, y, area)
-			if covered == {} {
-				continue
-			}
-			covered = depth_mask(s, width, dz, x, y, covered)
-			if covered == {} {
-				continue
-			}
-			// Shade once, at the pixel centre, perspective-correct.
-			c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
+quad_values :: proc(s: ^Software, q: ^Quads, nf: int, keep: ^Corner_Floats) {
+	nq := len(q.origin)
+	table_grow_non_zero(&q.values, nf * nq * 4)
+	table_grow_non_zero(&q.depths, nq * 4)
+	for qi in 0 ..< nq {
+		ref := q.tri[qi]
+		t := s.chunks[ref.chunk].tris[ref.tri]
+		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
+		dz := depth_plane(t, area)
+		n := keep.count
+		vs := s.chunks[ref.chunk].values[t.values:][:3 * n]
+		for l in 0 ..< 4 {
+			c := Vec2{f32(int(q.origin[qi].x) + l & 1) + 0.5, f32(int(q.origin[qi].y) + l >> 1) + 0.5}
 			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
 			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
 			b2 := 1 - b0 - b1
 			iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
-			p := (world[0] * b0 + world[1] * b1 + world[2] * b2) / iw
-			if clipping && clipped(job, p) {
-				continue
+			j := qi * 4 + l
+			for f, k in keep.from[:n] {
+				q.values[int(f) * nq * 4 + j] = (vs[k] * b0 + vs[n + k] * b1 + vs[2 * n + k] * b2) / iw
 			}
-			n := face_n
-			if .Flat_Shading not_in m.flags {
-				n = linalg.normalize0((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
+			for k in keep.flat {
+				q.values[int(keep.from[k]) * nq * 4 + j] = vs[k] // kept as is: the first corner's
 			}
-			shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
-			if receive {
-				for si in 0 ..< job.shadow_count {
-					shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
-				}
-			}
-			if .Two_Sided in m.flags && linalg.dot(n, face_n) < 0 {
-				n = -n
-			}
-			// The layers as they are, or (transmission) a copy taking the
-			// ray's length.
-			ly := &m.layers
-			local: Shading_Layers = ---
-			behind: Vec4
-			if .Transmission in m.flags {
-				local = m.layers
-				ly = &local
-				behind = behind_of(job, p, n, m.roughness, ly)
-			}
-			mirror: Mirror_Light = ---
-			mp: ^Mirror_Light
-			if reflective {
-				mirror = mirror_at(job, m, x, y, p, m.roughness, m.layers.clearcoat_roughness)
-				mp = &mirror
-			}
-			a: f32 = 1
-			lit: Vec3
-			if m.flags & LAYER_FLAGS != {} {
-				a, lit = shade_layered(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, ly, n, behind, mp)
-			} else {
-				lit = shade(surface(m), p, n, job.eye, job.lights, 1, job.env, 1, shadows, m.emissive, m.layers.f0, mp)
-			}
-			lit = fogged(lit, p, job.eye, job.fog, job.fog_color)
-			light := light_of(lit, out_alpha, a)
-			if job.runs != nil {
-				write_samples(s, width, dz, x, y, covered, light, blend_of(m), job.runs, mirror_run(p, job.eye, job.clip), true)
-			} else {
-				write_samples(s, width, dz, x, y, covered, light, blend_of(m), nil, 0, false)
-			}
+			q.depths[j] = dz.z0 + dz.dx * (c.x - dz.x0) + dz.dy * (c.y - dz.y0)
 		}
 	}
 }
 
-// A shadow-only triangle: its colour at its opacity times the light its
-// shadows take (1 minus the product of their factors), blended.
-@(private = "file")
-draw_shadow_only :: proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32) {
-	s := job.s
-	width := job.width
-	dz := depth_plane(t, area)
-	span := tri_span(t, width)
-	vs := s.chunks[ref.chunk].values[t.values:][:3 * UNTEX_FLOATS]
-	world, normal: [3]Vec3
-	for k in 0 ..< 3 {
-		world[k] = (^Vec3)(&vs[k * UNTEX_FLOATS])^
-		normal[k] = (^Vec3)(&vs[k * UNTEX_FLOATS + 3])^
-	}
-	for y in max(t.min_y, y0) ..< min(t.max_y, y1) {
-		lo, hi := row_span(span, f32(y), f32(y + 1))
-		for x in lo ..< hi {
-			covered := coverage(t, x, y, area)
-			if covered == {} {
-				continue
-			}
-			covered = depth_mask(s, width, dz, x, y, covered)
-			if covered == {} {
-				continue
-			}
-			c := Vec2{f32(x) + 0.5, f32(y) + 0.5}
-			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
-			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
-			b2 := 1 - b0 - b1
-			iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
-			p := (world[0] * b0 + world[1] * b1 + world[2] * b2) / iw
-			n := linalg.normalize0((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) / iw)
-			mask: f32 = 1
-			for si in 0 ..< job.shadow_count {
-				mask *= shadow_factor(s.shadow_maps[si], &job.shadows[si], p, n)
-			}
-			lit := fogged(m.base, p, job.eye, job.fog, job.fog_color)
-			write_samples(s, width, dz, x, y, covered, light_of(lit, m.opacity * (1 - mask), 1), blend_of(m), nil, 0, false)
-		}
-	}
-}
-
-@(private = "file")
-draw_standard_textured :: #force_inline proc(job: ^Frame_Job, ref: Tri_Ref, t: Tri, m: ^Shading_Material, y0, y1: int, area: f32, blend, receive: bool) {
-	s := job.s
-	width := job.width
-	dz := depth_plane(t, area)
-	coloured := .Vertex_Colors in m.flags
-	nf := STANDARD_FLOATS + (COLOR_FLOATS if coloured else 0)
-	vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
-	world, normal: [3]Vec3
-	uv, uv1: [3]Vec2
-	vcolor: [3]Vec4
-	for k in 0 ..< 3 {
-		base := k * nf
-		world[k] = (^Vec3)(&vs[base])^
-		normal[k] = (^Vec3)(&vs[base + 3])^
-		uv[k] = (^Vec2)(&vs[base + 6])^
-		uv1[k] = (^Vec2)(&vs[base + 8])^
-		if coloured {
-			vcolor[k] = (^Vec4)(&vs[base + STANDARD_FLOATS])^
-		}
-	}
-	// The triangle's normal, facing the eye: its corners run counter-clockwise
-	// on the screen, which a mirror's pass reverses. A two-sided surface's normal
-	// turns to this side: a smooth normal can lean away from the eye at a
-	// silhouette and still be on the eye's side of its triangle.
-	face_n: Vec3
-	if m.flags & {.Flat_Shading, .Two_Sided} != {} {
-		w0 := world[0] / t.inv_w[0]
-		face_n = linalg.normalize0(linalg.cross(world[1] / t.inv_w[1] - w0, world[2] / t.inv_w[2] - w0))
-		if job.mirrored {
-			face_n = -face_n
-		}
-	}
-	curved := .Curves in m.flags
-	words: []u32
-	rule: curves.Fill_Rule
-	if curved {
-		words, rule = curve_entry_words(job.geos, t.curve)
-	}
-	// Triplanar: its maps projected in its frame.
-	triplanar := .Triplanar in m.flags
-	frame: Projection_Frame = ---
-	if triplanar {
-		frame = s.frames[t.draw]
-	}
-	// A particle: its row's colour and opacity; soft against the frame's depth.
-	sprite := .Sprite in m.flags
-	row := s.expanded.sprite_rows[t.curve] if sprite && int(t.curve) < len(s.expanded.sprite_rows) else {color = 1}
-	soft := sprite && m.softness > 0 && len(s.depth_map) == s.width * s.height
-	// Probed: faded by the share of its disc unhidden (the same for the quad).
-	if sprite && row.probe.w > 0 && len(s.depth_map) == s.width * s.height {
-		row.color.a *= sprite_visibility(row.probe, s.depth_map[:], s.width, s.height)
-	}
-	inv_area := 1 / area
-	span := tri_span(t, width)
-	clipping := job.clip != {}
-	reflective := .Reflection in m.flags
-	for qy := max(t.min_y, y0) &~ 1; qy < min(t.max_y, y1); qy += 2 {
-		lo, hi := row_span(span, f32(qy), f32(qy + 2), 2)
-		for qx := lo &~ 1; qx < hi; qx += 2 {
-			lanes: [4]Sample_Mask
-			helpers: oksl.Quad_Lanes
-			for l in 0 ..< 4 {
-				x, y := qx + l & 1, qy + l >> 1
-				if x < width && y < y1 {
-					lanes[l] = depth_mask(s, width, dz, x, y, coverage(t, x, y, area))
-				}
-				if lanes[l] == {} {
-					helpers += {l}
-				}
-			}
-			if card(helpers) == 4 {
-				continue
-			}
-			worlds, norms: [4]Vec3 = ---, ---
-			uvs, uv1s: [4]Vec2 = ---, ---
-			colors: [4]Vec4 = ---
-			projected: [4]Vec3 = ---
-			for l in 0 ..< 4 {
-				c := Vec2{f32(qx + l & 1) + 0.5, f32(qy + l >> 1) + 0.5}
-				b0 := edge(t.p[1].xy, t.p[2].xy, c) * inv_area
-				b1 := edge(t.p[2].xy, t.p[0].xy, c) * inv_area
-				b2 := 1 - b0 - b1
-				inv_iw := 1 / max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
-				uvs[l] = (uv[0] * b0 + uv[1] * b1 + uv[2] * b2) * inv_iw
-				worlds[l] = (world[0] * b0 + world[1] * b1 + world[2] * b2) * inv_iw
-				uv1s[l] = (uv1[0] * b0 + uv1[1] * b1 + uv1[2] * b2) * inv_iw
-				if coloured {
-					colors[l] = (vcolor[0] * b0 + vcolor[1] * b1 + vcolor[2] * b2) * inv_iw
-				}
-				if triplanar {
-					projected[l] = (frame.to_local * Vec4{worlds[l].x, worlds[l].y, worlds[l].z, 1}).xyz * m.projection_scale
-				}
-				if l not_in helpers && .Flat_Shading not_in m.flags {
-					norms[l] = linalg.normalize0((normal[0] * b0 + normal[1] * b1 + normal[2] * b2) * inv_iw)
-				}
-			}
-			for l in 0 ..< 4 {
-				if lanes[l] == {} || clipping && clipped(job, worlds[l]) {
-					continue
-				}
-				x, y := qx + l & 1, qy + l >> 1
-				d0x, d0y := quad_deriv(uvs, l)
-				d1x, d1y := quad_deriv(uv1s, l)
-				// Triplanar: where the lane reads (nil: by uv).
-				lane: Triplanar_Lane = ---
-				tl: ^Triplanar_Lane
-				if triplanar {
-					project_lane(&lane, projected, l, frame.normal_to_local * (face_n if .Flat_Shading in m.flags else norms[l]), m.projection_sharpness)
-					tl = &lane
-				}
-				pm := surface(m)
-				emissive := m.emissive
-				opacity := m.opacity
-				if coloured {
-					pm.base *= colors[l].rgb
-					if blend || .Alpha_Mask in m.flags {
-						opacity *= colors[l].a
-					}
-				}
-				smeared := sprite && row.motion.z > 1
-				if .Color_Map in m.flags || smeared {
-					tex: Vec4
-					if smeared {
-						tex = smeared_map(job, m, row.motion, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					} else {
-						tex = read_map(job, m, tl, .Color, m.color_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-						if .Premultiplied in m.flags {
-							tex.rgb = linalg.clamp(tex.rgb / tex.a, 0, 1) if tex.a > 0 else 0
-						}
-					}
-					pm.base *= linear(tex.rgb)
-					if blend || .Alpha_Mask in m.flags {
-						opacity *= tex.a
-					}
-				}
-				if .Alpha_Map in m.flags {
-					opacity *= read_map(job, m, tl, .Alpha, m.alpha_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).g
-				}
-				if sprite {
-					pm.base *= linear(row.color.rgb)
-					opacity *= clamp(row.color.a, 0, 1)
-					if soft {
-						// Faded by how far in front of the frame's depth it is.
-						clip := job.view_proj * Vec4{worlds[l].x, worlds[l].y, worlds[l].z, 1}
-						in_front := view_depth(job.scene.camera, s.depth_map[y * s.width + x]) - view_depth(job.scene.camera, clip.z / clip.w)
-						opacity *= clamp(in_front / m.softness, 0, 1)
-					}
-				}
-				if .Alpha_Mask in m.flags {
-					if opacity < m.alpha_cutoff {
-						continue
-					}
-					if !blend {
-						opacity = 1
-					}
-				}
-				covered := lanes[l]
-				if curved {
-					if blend {
-						cov := curve_coverage(words, uv1s[l], d1x, d1y, rule)
-						if cov <= 0 {
-							continue
-						}
-						opacity *= cov
-					} else {
-						covered &= curve_samples(words, uv1s[l], d1x, d1y, rule)
-						if covered == {} {
-							continue
-						}
-					}
-				}
-				if .Roughness_Map in m.flags {
-					pm.roughness *= read_map(job, m, tl, .Roughness, m.roughness_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).g
-				}
-				if .Metalness_Map in m.flags {
-					pm.metalness *= read_map(job, m, tl, .Metalness, m.metalness_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).b
-				}
-				if .Emissive_Map in m.flags {
-					emissive *= linear(read_map(job, m, tl, .Emissive, m.emissive_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).rgb)
-				}
-				ao: f32 = 1
-				if .Ao_Map in m.flags {
-					ao = (read_map(job, m, tl, .Ao, m.ao_map, uvs[l], uv1s[l], d0x, d0y, d1x, d1y).r - 1) * m.ao_intensity + 1
-				}
-				n := face_n if .Flat_Shading in m.flags else norms[l]
-				shadows := [MAX_SHADOWS]f32{1, 1, 1, 1}
-				if receive {
-					for si in 0 ..< job.shadow_count {
-						shadows[si] = shadow_factor(s.shadow_maps[si], &job.shadows[si], worlds[l], n)
-					}
-				}
-				// The layers' maps, and the coat's normal: the surface's
-				// before its normal map (on the eye's side when two-sided), or
-				// the coat's normal map's.
-				ly := &m.layers
-				local: Shading_Layers = ---
-				if m.flags & {.Layer_Maps, .Transmission} != {} {
-					local = m.layers
-					ly = &local
-					if .Layer_Maps in m.flags {
-						read_layers(job, m, tl, ly, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					}
-				}
-				if .Two_Sided in m.flags && linalg.dot(n, face_n) < 0 {
-					n = -n
-				}
-				coat_n := n
-				if .Normal_Map in m.flags || .Clearcoat_Normal_Map in m.flags {
-					dp_dx, dp_dy := quad_deriv(worlds, l)
-					if .Normal_Map in m.flags {
-						n = map_normal(job, m, tl, frame, .Normal, m.normal_map, m.normal_scale, n, dp_dx, dp_dy, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					}
-					if .Clearcoat_Normal_Map in m.flags {
-						coat_n = map_normal(job, m, tl, frame, .Clearcoat_Normal, m.layer_maps[.Clearcoat_Normal], ly.coat_normal_scale, coat_n, dp_dx, dp_dy, uvs[l], uv1s[l], d0x, d0y, d1x, d1y)
-					}
-				}
-				behind: Vec4
-				if .Transmission in m.flags {
-					behind = behind_of(job, worlds[l], n, pm.roughness, ly)
-				}
-				mirror: Mirror_Light = ---
-				mp: ^Mirror_Light
-				if reflective {
-					mirror = mirror_at(job, m, x, y, worlds[l], pm.roughness, ly.clearcoat_roughness)
-					mp = &mirror
-				}
-				a: f32 = 1
-				lit: Vec3
-				if m.flags & LAYER_FLAGS != {} {
-					a, lit = shade_layered(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, ly, coat_n, behind, mp)
-				} else {
-					lit = shade(pm, worlds[l], n, job.eye, job.lights, 1, job.env, ao, shadows, emissive, m.layers.f0, mp)
-				}
-				lit = fogged(lit, worlds[l], job.eye, job.fog, job.fog_color)
-				light := light_of(lit, opacity, a)
-				if job.runs != nil {
-					write_samples(s, width, dz, x, y, covered, light, blend_of(m), job.runs, mirror_run(worlds[l], job.eye, job.clip), true)
-				} else {
-					write_samples(s, width, dz, x, y, covered, light, blend_of(m), nil, 0, false)
-				}
-			}
-		}
-	}
-}
-
-// A smeared particle's sprite at a pixel (`Sprite_Row.motion`): the sprite
-// (its colour map, or white; nothing past its edges) at the moments of the
-// shutter, its light averaged (premultiplied, linear), back as a straight
-// colour (sRGB-encoded, as the map's) and the share of the shutter it
-// covered the pixel.
-@(private = "file")
-smeared_map :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, motion: Vec4, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec4 {
-	taps := int(motion.z)
-	acc: Vec4
-	for k in 0 ..< taps {
-		uv := uv0 - motion.xy * ((f32(k) + 0.5) / f32(taps) - 0.5)
-		if uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1 {
-			continue
-		}
-		s := Vec4{1, 1, 1, 1}
-		if .Color_Map in m.flags {
-			s = read_map(job, m, nil, .Color, m.color_map, uv, uv1, d0x, d0y, d1x, d1y)
-			if .Premultiplied in m.flags {
-				s.rgb = linalg.clamp(s.rgb / s.a, 0, 1) if s.a > 0 else 0
-			}
-		}
-		acc += {srgb_to_linear(s.r) * s.a, srgb_to_linear(s.g) * s.a, srgb_to_linear(s.b) * s.a, s.a}
-	}
-	if acc.a <= 0 {
-		return {}
-	}
-	c := acc.rgb / acc.a
-	return {linear_to_srgb_exact(c.r), linear_to_srgb_exact(c.g), linear_to_srgb_exact(c.b), acc.a / f32(taps)}
-}
-
-// Where a triplanar lane reads its maps: its position projected along x,
-// y and z (as (z, y), (x, z), (x, y)), their derivatives and weights.
-@(private = "file")
-Triplanar_Lane :: struct {
-	proj, proj_dx, proj_dy: [3]Vec2,
-	weights:                Vec3,
-}
-
-// A lane's triplanar projections from its quad's projected positions, the
-// weights from its normal in the projection's frame: |n| to the
-// sharpness, summing to 1 (shaders/o3d.slang's `project_lane`).
-@(private = "file")
-project_lane :: #force_inline proc "contextless" (at: ^Triplanar_Lane, projected: [4]Vec3, l: int, normal: Vec3, sharpness: f32) {
-	p := projected[l]
-	dx, dy := quad_deriv(projected, l)
-	at.proj = {p.zy, p.xz, p.xy}
-	at.proj_dx = {dx.zy, dx.xz, dx.xy}
-	at.proj_dy = {dy.zy, dy.xz, dy.xy}
-	n := linalg.normalize0(normal)
-	w := Vec3{math.pow(abs(n.x), sharpness), math.pow(abs(n.y), sharpness), math.pow(abs(n.z), sharpness)}
-	at.weights = w / max(w.x + w.y + w.z, 1e-20)
-}
-
-// A material map at a lane: by its uv (`at` nil), or its three
-// projections' samples weighted (a projection weighing nothing is not read).
-@(private = "file")
-read_map :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, slot: Texture_Slot, id: Texture_Id, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec4 {
-	if at == nil {
-		uv, dx, dy := slot_uv(m, slot, uv0, uv1, d0x, d0y, d1x, d1y)
-		return sample_map(job, id, uv, dx, dy)
-	}
-	return read_triplanar(job, m, at, slot, id)
-}
-
-// Out of line: the uv path stays small where it is inlined.
-@(private = "file")
-read_triplanar :: #force_no_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, slot: Texture_Slot, id: Texture_Id) -> Vec4 {
-	acc: Vec4
-	for a in 0 ..< 3 {
-		if at.weights[a] > 0 {
-			acc += at.weights[a] * read_projection(job, m, at, slot, id, a)
-		}
-	}
-	return acc
-}
-
-@(private = "file")
-read_projection :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, slot: Texture_Slot, id: Texture_Id, axis: int) -> Vec4 {
-	uv, dx, dy := transform_uv(m.uv_transforms[slot], at.proj[axis], at.proj_dx[axis], at.proj_dy[axis])
-	return sample_map(job, id, uv, dx, dy)
-}
-
-// A normal map's normal (slot `slot`, its tangent x and y times `scale`)
-// about `n`: by the uv's tangent frame from screen derivatives, or
-// triplanar.
-@(private = "file")
-map_normal :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, frame: Projection_Frame, slot: Texture_Slot, id: Texture_Id, scale: Vec2, n, dp_dx, dp_dy: Vec3, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec3 {
-	if at != nil {
-		return triplanar_normal(job, m, at, frame, slot, id, scale, n)
-	}
-	uv, dx, dy := slot_uv(m, slot, uv0, uv1, d0x, d0y, d1x, d1y)
-	map_n := sample_map(job, id, uv, dx, dy).rgb * 2 - 1
-	map_n.xy *= scale
-	return perturb_normal(n, dp_dx, dp_dy, dx, dy, map_n)
-}
-
-// A triplanar normal map's normal: each projection's tangent normal laid
-// on the surface normal's axes and blended by the weights (a whiteout
-// blend), in the projection's frame, then back in the world's.
-@(private = "file")
-triplanar_normal :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, frame: Projection_Frame, slot: Texture_Slot, id: Texture_Id, scale: Vec2, n: Vec3) -> Vec3 {
-	nl := linalg.normalize(frame.normal_to_local * n)
-	tn: [3]Vec3
-	for a in 0 ..< 3 {
-		if at.weights[a] > 0 {
-			tn[a] = read_projection(job, m, at, slot, id, a).rgb * 2 - 1
-			tn[a].xy *= scale
-		}
-	}
-	bx := Vec3{tn[0].x + nl.z, tn[0].y + nl.y, abs(tn[0].z) * nl.x}
-	by := Vec3{tn[1].x + nl.x, tn[1].y + nl.z, abs(tn[1].z) * nl.y}
-	bz := Vec3{tn[2].x + nl.x, tn[2].y + nl.y, abs(tn[2].z) * nl.z}
-	w := at.weights
-	blended := bx.zyx * w.x + by.xzy * w.y + bz * w.z
-	return linalg.normalize(frame.normal_to_world * linalg.normalize(blended))
-}
-
-// The layers' multiplying maps at a lane, into `ly`: clear coat (red) and
-// its roughness (green), sheen colour (rgb, sRGB) and roughness (alpha),
-// transmission (red) and thickness (green).
-@(private = "file")
-read_layers :: proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, ly: ^Shading_Layers, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) {
-	read :: #force_inline proc "contextless" (job: ^Frame_Job, m: ^Shading_Material, at: ^Triplanar_Lane, r: Layer_Map, uv0, uv1, d0x, d0y, d1x, d1y: Vec2) -> Vec4 {
-		return read_map(job, m, at, layer_slot(r), m.layer_maps[r], uv0, uv1, d0x, d0y, d1x, d1y)
-	}
-	if m.layer_maps[.Clearcoat] != 0 {
-		ly.clearcoat *= read(job, m, at, .Clearcoat, uv0, uv1, d0x, d0y, d1x, d1y).r
-	}
-	if m.layer_maps[.Clearcoat_Roughness] != 0 {
-		ly.clearcoat_roughness *= read(job, m, at, .Clearcoat_Roughness, uv0, uv1, d0x, d0y, d1x, d1y).g
-	}
-	if m.layer_maps[.Sheen_Color] != 0 {
-		ly.sheen *= linear(read(job, m, at, .Sheen_Color, uv0, uv1, d0x, d0y, d1x, d1y).rgb)
-	}
-	if m.layer_maps[.Sheen_Roughness] != 0 {
-		ly.sheen_roughness *= read(job, m, at, .Sheen_Roughness, uv0, uv1, d0x, d0y, d1x, d1y).a
-	}
-	if m.layer_maps[.Transmission] != 0 {
-		ly.transmission *= read(job, m, at, .Transmission, uv0, uv1, d0x, d0y, d1x, d1y).r
-	}
-	if m.layer_maps[.Thickness] != 0 {
-		ly.thickness *= read(job, m, at, .Thickness, uv0, uv1, d0x, d0y, d1x, d1y).g
-	}
-}
-
-// The area of the pixel at shape coordinate `rc` the shape covers, the
-// pixel's footprint the parallelogram its screen derivatives span
-// (shaders/o3d.slang's `fs_curves` likewise): exact under rotation, skew
-// and grazing views, and the shape's mean coverage by itself once the
-// footprint holds the whole shape.
-@(private = "file")
-curve_coverage :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, rule: curves.Fill_Rule) -> f32 {
-	if len(words) == 0 {
-		return 0
-	}
-	return curves.coverage_affine(words, rc, dx, dy, rule)
-}
-
-// The pixel's samples inside the shape: the shape coordinate at each sample
-// position from the centre's and its derivatives.
-@(private = "file")
-curve_samples :: #force_inline proc "contextless" (words: []u32, rc, dx, dy: Vec2, rule: curves.Fill_Rule) -> (inside: Sample_Mask) {
-	if len(words) == 0 {
-		return
-	}
-	for k in 0 ..< SAMPLES {
-		o := SAMPLE_OFFSETS[k] - 0.5
-		if curves_inside(words, rc + dx * o.x + dy * o.y, rule) {
-			inside += {k}
-		}
-	}
-	return
-}
-
-
-// Screen-space horizontal and vertical finite differences across a 2x2 quad.
-@(private = "file")
-quad_deriv :: #force_inline proc "contextless" (v: [4]$T, lane: int) -> (dx, dy: T) {
-	row := lane & 2
-	col := lane & 1
-	return v[row + 1] - v[row], v[2 + col] - v[col]
-}
 
 // Coverage and helper lanes for the 2x2 quad at even pixel (qx, qy).
 @(private = "file")
@@ -954,7 +344,7 @@ quad_coverage :: #force_inline proc "contextless" (t: Tri, qx, qy, width, y1: in
 // first): their quads in the band shaded by the fragment program in one
 // batch, then written in triangle order. Returns how many it took.
 @(private = "file")
-draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Ref, y0, y1: int) -> int {
+draw_quads :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Ref, y0, y1: int) -> int {
 	s := job.s
 	width := job.width
 	q := &w.quads
@@ -986,17 +376,21 @@ draw_custom :: #force_no_inline proc(job: ^Frame_Job, w: ^Worker, refs: []Tri_Re
 				append(&q.covered, lanes)
 				append(&q.tri, ref)
 				if len(q.origin) >= QUAD_BATCH {
-					flush_custom_quads(job, w, draw)
+					flush_quads(job, w, draw)
 				}
 			}
 		}
 	}
-	flush_custom_quads(job, w, draw)
+	flush_quads(job, w, draw)
 	return taken
 }
 
+// A batch of one draw's quads shaded: a ShaderMaterial's fragment program
+// (its colour straight, premultiplied here as the GPU's SRC_ALPHA blend
+// does) or o3d's variant's (light premultiplied by its coverage, and the
+// samples an exact shape covers).
 @(private = "file")
-flush_custom_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
+flush_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 	s := job.s
 	width := job.width
 	q := &w.quads
@@ -1004,31 +398,25 @@ flush_custom_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 	if nq == 0 {
 		return
 	}
-	sh := shader_get(job.shaders, s.materials[draw].shader)
-	nf := sh.varying_floats
-	// Each lane's varyings, perspective-correct (helpers' extrapolated).
-	table_grow_non_zero(&q.values, nf * nq * 4)
-	for qi in 0 ..< nq {
-		ref := q.tri[qi]
-		t := s.chunks[ref.chunk].tris[ref.tri]
-		area := edge(t.p[0].xy, t.p[1].xy, t.p[2].xy)
-		vs := s.chunks[ref.chunk].values[t.values:][:3 * nf]
-		for l in 0 ..< 4 {
-			c := Vec2{f32(int(q.origin[qi].x) + l & 1) + 0.5, f32(int(q.origin[qi].y) + l >> 1) + 0.5}
-			b0 := edge(t.p[1].xy, t.p[2].xy, c) / area
-			b1 := edge(t.p[2].xy, t.p[0].xy, c) / area
-			b2 := 1 - b0 - b1
-			iw := max(b0 * t.inv_w[0] + b1 * t.inv_w[1] + b2 * t.inv_w[2], 1e-9)
-			j := qi * 4 + l
-			for f in 0 ..< nf {
-				q.values[f * nq * 4 + j] = (vs[f] * b0 + vs[nf + f] * b1 + vs[2 * nf + f] * b2) / iw
-			}
-			for f in shader_flat(sh) {
-				q.values[int(f) * nq * 4 + j] = vs[f] // kept as is: the first corner's
-			}
-		}
+	m := &s.materials[draw]
+	straight := m.shader != 0
+	sh: ^Shader
+	x: ^Program
+	program: ^oksl.Program
+	nf: int
+	keep: ^Corner_Floats
+	if straight {
+		sh = shader_get(job.shaders, m.shader)
+		program, nf, keep = &sh.pipeline.fragment.program, sh.varying_floats, &sh.corners
+	} else {
+		x = &s.programs.list[job.programs[draw]]
+		program, nf, keep = &x.pipeline.fragment.program, x.pipeline.vertex.varying_floats, &x.corners
 	}
-	table_grow_non_zero(&q.colours, nq * 4)
+	quad_values(s, q, nf, keep)
+	for &t in q.targets[:2] {
+		table_grow_non_zero(&t, nq * 4)
+	}
+	table_grow_non_zero(&q.masks, nq * 4)
 	table_grow_non_zero(&q.shaded, nq)
 	quads := oksl.Fragment_Quads {
 		count        = nq,
@@ -1036,35 +424,65 @@ flush_custom_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 		front_facing = q.facing[:],
 		helpers      = q.helpers[:],
 		varyings     = q.values[:],
+		depth        = q.depths[:],
 	}
-	maps := Shader_Maps{s = s, textures = job.textures, ids = s.materials[draw].shader_maps, shadow_channel = int(sh.shadow_channel)}
-	if job.shadow_count > 0 {
-		maps.shadow, maps.shadow_size = s.shadow_maps[0], job.shadows[0].size
-	}
-	sizes: [SHADER_MAPS][2]i32
-	for id, c in maps.ids {
-		if c == maps.shadow_channel {
-			sizes[c] = {i32(maps.shadow_size), i32(maps.shadow_size)}
-		} else if ext, bound := bound_external(s, job.textures, id); bound {
-			sizes[c] = {i32(ext.width), i32(ext.height)}
-		} else if tex, ok := texture_get(job.textures, id); ok && !tex.external {
-			sizes[c] = {i32(tex.width), i32(tex.height)}
+	if straight {
+		maps := Shader_Maps{s = s, textures = job.textures, ids = m.shader_maps, shadow_channel = int(sh.shadow_channel)}
+		if job.shadow_count > 0 {
+			maps.shadow, maps.shadow_size = s.shadow_maps[0], job.shadows[0].size
 		}
+		sizes: [SHADER_MAPS][3]i32
+		for id, c in maps.ids {
+			if c == maps.shadow_channel {
+				sizes[c] = {i32(maps.shadow_size), i32(maps.shadow_size), 1}
+			} else if ext, bound := bound_external(s, job.textures, id); bound {
+				sizes[c] = {i32(ext.width), i32(ext.height), 1}
+			} else if tex, ok := texture_get(job.textures, id); ok && !tex.external {
+				sizes[c] = {i32(tex.width), i32(tex.height), 1}
+			}
+		}
+		targets := [1][][4]f32{q.targets[0][:]}
+		oksl.run_fragment(program, block(job.blocks, draw, .Fragment), quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_shader_map, user = &maps, channel_sizes = sizes[:]}, q.masks[:])
+	} else {
+		maps := program_maps(job, x, m)
+		fb: [size_of(Material_Block) + size_of(Frame_Block)]u8 = ---
+		block_fill(&x.fragment, {&s.material_blocks[draw], job.frame_block}, fb[:])
+		buffers: [2][]u32
+		for b, i in x.fragment_buffers {
+			#partial switch b {
+			case .Sprite_Rows:
+				buffers[i] = slice.reinterpret([]u32, s.expanded.sprite_rows[:])
+			case .Curve_Words:
+				buffers[i] = job.geos.curve_words[:]
+			}
+		}
+		// The light, and in the mirror's pass the run (o3d.frag's o_run).
+		targets := [2][][4]f32{q.targets[0][:], q.targets[1][:] if job.runs != nil else nil}
+		oksl.run_fragment(program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], buffers = buffers[:]}, q.masks[:])
 	}
-	oksl.run_fragment(&sh.pipeline.fragment.program, block(job.blocks, draw, .Fragment), quads, q.colours[:], q.shaded[:], &w.vm, {sampler = sample_shader_map, user = &maps, channel_sizes = sizes[:]})
-	blend := blend_of(&s.materials[draw])
+	blend := blend_of(m)
+	// The mirror's runs: o3d's draws but particles (as the GPU's targets).
+	runs := job.runs != nil && !straight && x.key.entry != .Sprite
 	for qi in 0 ..< nq {
 		ref := q.tri[qi]
 		t := s.chunks[ref.chunk].tris[ref.tri]
 		dz := depth_plane(t, edge(t.p[0].xy, t.p[1].xy, t.p[2].xy))
 		for l in q.shaded[qi] {
 			x, y := int(q.origin[qi].x) + l & 1, int(q.origin[qi].y) + l >> 1
-			// Its output is light (three.js's in a render target), premultiplied
-			// when blended, as the GPU's SRC_ALPHA blend multiplies it.
-			c := q.colours[qi * 4 + l]
-			a := clamp(c.a, 0, 1)
-			k: f32 = 1 if replaces(blend) else a
-			write_samples(s, width, dz, x, y, q.covered[qi][l], {c.r * k, c.g * k, c.b * k, a}, blend, nil, 0, false)
+			j := qi * 4 + l
+			covered := q.covered[qi][l] & transmute(Sample_Mask)u8(q.masks[j] & 0xF)
+			c := q.targets[0][j]
+			light := c
+			if straight {
+				a := clamp(c.a, 0, 1)
+				k: f32 = 1 if replaces(blend) else a
+				light = {c.r * k, c.g * k, c.b * k, a}
+			}
+			if runs {
+				write_samples(s, width, dz, x, y, covered, light, blend, job.runs, q.targets[1][j].xy, true)
+			} else {
+				write_samples(s, width, dz, x, y, covered, light, blend, nil, {}, false)
+			}
 		}
 	}
 	clear(&q.origin)
@@ -1072,6 +490,128 @@ flush_custom_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 	clear(&q.facing)
 	clear(&q.covered)
 	clear(&q.tri)
+}
+
+// What an o3d variant's channels read for a draw, for its sampler.
+@(private = "file")
+Program_Maps :: struct {
+	job:   ^Frame_Job,
+	kinds: [oksl.SAMPLER_COUNT]Program_Map,
+	ids:   [oksl.SAMPLER_COUNT]Texture_Id,
+	sizes: [oksl.SAMPLER_COUNT][3]i32,
+	// The frame map's layers: glass's frame behind, or the reflection's
+	// light and runs (levels as floats, laid out as `frame_tex`).
+	frame:     [2][][4]f32,
+	frame_tex: ^Texture,
+}
+
+@(private = "file")
+program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material) -> (maps: Program_Maps) {
+	s := job.s
+	maps.job, maps.kinds = job, x.maps
+	for k, c in x.maps {
+		id: Texture_Id
+		#partial switch k {
+		case .Color:
+			id = m.color_map
+		case .Normal:
+			id = m.normal_map
+		case .Roughness:
+			id = m.roughness_map
+		case .Emissive:
+			id = m.emissive_map
+		case .Metalness:
+			id = m.metalness_map
+		case .Ao:
+			id = m.ao_map
+		case .Alpha:
+			id = m.alpha_map
+		case .Env_Radiance:
+			id = job.env.radiance
+		case .Env_Irradiance:
+			id = job.env.irradiance
+		case .Layer0:
+			id = m.layer_textures[0]
+		case .Layer1:
+			id = m.layer_textures[1]
+		case .Shadow0, .Shadow1, .Shadow2, .Shadow3:
+			n := i32(job.shadows[int(k) - int(Program_Map.Shadow0)].size)
+			maps.sizes[c] = {n, n, 1}
+			continue
+		case .Frame:
+			// Glass: the frame before it (none through the mirror); a
+			// reflective draw: the reflection.
+			if .Transmission in m.flags {
+				if !job.mirrored && job.snapshot != nil {
+					maps.frame[0], maps.frame_tex = job.snapshot, &job.snapshot_tex
+				}
+			} else if job.reflection != nil && !job.mirrored {
+				maps.frame, maps.frame_tex = {job.reflection, job.reflection_runs}, &job.reflection_tex
+			}
+			if maps.frame_tex != nil {
+				maps.sizes[c] = {i32(maps.frame_tex.width), i32(maps.frame_tex.height), 2}
+			}
+			continue
+		case .Scene_Depth:
+			maps.sizes[c] = {i32(job.width), i32(job.height), 1}
+			continue
+		case:
+			continue
+		}
+		maps.ids[c] = id
+		if ext, bound := bound_external(s, job.textures, id); bound {
+			maps.sizes[c] = {i32(ext.width), i32(ext.height), 1}
+		} else if tex, ok := texture_get(job.textures, id); ok && !tex.external {
+			maps.sizes[c] = {i32(tex.width), i32(tex.height), 1}
+		}
+	}
+	return
+}
+
+// An o3d variant's sampler: a material map repeating (white without one),
+// the environment clamped at its poles, a shadow map's or the frame's depth's
+// texel (nearest), the frame map's layer bilinearly between its levels. `uv`
+// runs down the image.
+@(private = "file")
+sample_program_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
+	maps := (^Program_Maps)(user)
+	job := maps.job
+	#partial switch k := maps.kinds[channel]; k {
+	case .Shadow0, .Shadow1, .Shadow2, .Shadow3:
+		i := int(k) - int(Program_Map.Shadow0)
+		return nearest(job.s.shadow_maps[i], job.shadows[i].size, job.shadows[i].size, uv)
+	case .Scene_Depth:
+		return nearest(job.s.depth_map[:], job.width, job.height, uv)
+	case .Env_Radiance, .Env_Irradiance:
+		return sample_lod(job.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = true)
+	case .Frame:
+		texels := maps.frame[clamp(layer, 0, 1)]
+		if texels == nil {
+			return 0
+		}
+		return frame_sample(texels, maps.frame_tex, uv, lod)
+	}
+	id := maps.ids[channel]
+	if ext, ok := bound_external(job.s, job.textures, id); ok {
+		return sample_external(ext, {uv.x, 1 - uv.y})
+	}
+	// No map, or an external one nothing is bound to: as no map.
+	if tex, ok := texture_get(job.textures, id); !ok || tex.external {
+		return 1
+	}
+	return sample_lod(job.textures, id, {uv.x, 1 - uv.y}, lod, clamp_v = false)
+}
+
+// A `w x h` map's texel at uv (rows from the top), nearest, as the GPU's
+// shadow sampler reads it.
+@(private = "file")
+nearest :: #force_inline proc "contextless" (texels: []f32, w, h: int, uv: [2]f32) -> [4]f32 {
+	if w == 0 || h == 0 || len(texels) < w * h {
+		return 0
+	}
+	x := clamp(int(math.floor(uv.x * f32(w))), 0, w - 1)
+	y := clamp(int(math.floor(uv.y * f32(h))), 0, h - 1)
+	return texels[y * w + x]
 }
 
 // A ShaderMaterial draw's textures, for its sampler, and `shadowAt`'s
@@ -1090,7 +630,7 @@ Shader_Maps :: struct {
 // the prelude flips three.js's) and the level oksl picked, repeating as
 // the GPU's sampler; white without one.
 @(private = "file")
-sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32) -> [4]f32 {
+sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, _: int) -> [4]f32 {
 	maps := (^Shader_Maps)(user)
 	if channel < 0 || channel >= SHADER_MAPS {
 		return 1
@@ -1160,18 +700,6 @@ row_span :: #force_inline proc "contextless" (s: Tri_Span, y_min, y_max: f32, st
 	return
 }
 
-@(private = "file")
-depth_mask :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask) -> (passed: Sample_Mask) {
-	base := (y * width + x) * SAMPLES
-	for k in covered {
-		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
-		if z >= 0 && z <= 1 && z > s.depth[base + k] {
-			passed += {k}
-		}
-	}
-	return
-}
-
 // The samples of pixel (x, y) inside the triangle.
 @(private = "file")
 coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (covered: Sample_Mask) {
@@ -1188,10 +716,10 @@ coverage :: #force_inline proc "contextless" (t: Tri, x, y: int, area: f32) -> (
 // depth test: replacing them (depth written), over them, or added to them
 // (light added, alpha over; depth kept), in half floats as the GPU's
 // target blends. In the mirror's pass (`RUNS`), its run past the mirror
-// (`mirror_run`) and coverage into `runs` too, the run premultiplied by
+// (o3d.frag's `mirror_run_of`) and coverage into `runs` too, the run premultiplied by
 // the coverage, both blended as its alpha is (the GPU's second target).
 @(private = "file")
-write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask, light: [4]f32, blend: Blend, runs: [][2]f16, run: f32, $RUNS: bool) {
+write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz: Depth_Plane, x, y: int, covered: Sample_Mask, light: [4]f32, blend: Blend, runs: [][2]f16, run: [2]f32, $RUNS: bool) {
 	px := to_halves(light)
 	for k in covered {
 		z := dz.z0 + dz.dx * (f32(x) + SAMPLE_OFFSETS[k].x - dz.x0) + dz.dy * (f32(y) + SAMPLE_OFFSETS[k].y - dz.y0)
@@ -1210,7 +738,8 @@ write_samples :: #force_inline proc "contextless" (s: ^Software, width: int, dz:
 			s.light[i] = to_halves({light.r + dst.r, light.g + dst.g, light.b + dst.b, light.a + dst.a * (1 - light.a)})
 		}
 		when RUNS {
-			r := [2]f32{run * light.a, light.a}
+			// The run premultiplied by the coverage, and the coverage.
+			r := run
 			if !replaces(blend) {
 				r += [2]f32{from_half(runs[i].x), from_half(runs[i].y)} * (1 - light.a)
 			}
@@ -1286,22 +815,33 @@ sample_external :: #force_inline proc "contextless" (ext: Software_External, uv:
 	return sample_mip(ext.pixels, ext.width, ext.height, uv)
 }
 
-// A map at `uv` as `sample` reads it; an external texture from the pixels
-// bound to it, at their level 0, bilinear (as the GPU reads an unmipped
-// one).
-@(private = "file")
-sample_map :: #force_inline proc "contextless" (job: ^Frame_Job, id: Texture_Id, uv, duv_dx, duv_dy: Vec2) -> Vec4 {
-	if ext, ok := bound_external(job.s, job.textures, id); ok {
-		return sample_external(ext, uv)
-	}
-	return sample(job.textures, id, uv, duv_dx, duv_dy)
-}
 
-// `sample_top`'s, as `sample_map` reads externals.
-@(private = "file")
-sample_map_top :: #force_inline proc "contextless" (job: ^Frame_Job, id: Texture_Id, uv: Vec2) -> Vec4 {
-	if ext, ok := bound_external(job.s, job.textures, id); ok {
-		return sample_external(ext, uv)
+// The last frame's depth as distance (`software_depth`'s through its
+// camera, as the GPU's `record_depth_into` gives it) into `out` (`width x
+// height` RGBA halves): rgb the distance along the camera's axis
+// (`view_depth`) and a 1 where something was drawn; rgb `far` and a 0 where
+// nothing was.
+software_depth_image :: proc(s: ^Software, far: f32, out: []f16) {
+	x := pass_get(&s.programs, .Depth_Image)
+	n := s.width * s.height
+	if x == nil || len(s.depth_map) < n || len(out) < n * 4 {
+		return
 	}
-	return sample_top(job.textures, id, uv)
+	c := s.camera
+	near := c.near if c.near > 0 else 0.1
+	cam_far := c.far if c.far > near else near * 1e4
+	params := Depth_Image_Block{params = {near, cam_far, far, 1 if c.orthographic else 0}, frame = {f32(s.width), f32(s.height), 0, 0}}
+	block: [256]u8 = ---
+	block_fill(&x.block, {&params, nil}, block[:])
+	table_grow_non_zero(&s.bg_light, n)
+	maps := Pass_Maps{depth = s.depth_map[:n], width = s.width, height = s.height}
+	sizes := [1][3]i32{{i32(s.width), i32(s.height), 1}}
+	targets := [1][][4]f32{s.bg_light[:n]}
+	if len(s.workers) == 0 {
+		table_grow(&s.workers, 1)
+	}
+	oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], s.width, s.height, targets[:], &s.workers[0].vm, {sampler = sample_pass_map, user = &maps, channel_sizes = sizes[:]})
+	for v, i in s.bg_light[:n] {
+		out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = f16(v.r), f16(v.g), f16(v.b), f16(v.a)
+	}
 }

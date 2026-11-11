@@ -16,9 +16,9 @@ import "core:math/linalg"
 // shader is not run, as three.js's depth material does not). ShaderMaterials
 // do not receive shadows.
 //
-// Both renderers draw the map the same way (depth at texel centres, nearest
-// wins) and filter it with `shadow_factor`'s arithmetic (shaders/o3d.slang
-// has it again; the tests compare them).
+// Both renderers draw the map with the same program (depth at texel
+// centres, nearest wins) and filter it with the same `shadow_factor`
+// (shaders/o3d.frag).
 
 // A light's shadow settings; zero fields take their defaults.
 Light_Shadow :: struct {
@@ -277,48 +277,6 @@ shadow_side :: proc "contextless" (side: Side) -> Side {
 	case .Double:
 	}
 	return .Double
-}
-
-// How lit a point (world position, normal) is by the shadow light, 0 to 1:
-// three.js's PCF filter, a 3x3 grid of bilinear depth comparisons one texel
-// apart, which weighs a 4x4 block of texels by (1 - f, 1, 1, f) per axis.
-// A texel is lit when the point (moved along its normal by the normal bias,
-// then away from the light by the bias) is no farther than it (depths
-// reversed: no less); texels past the edge repeat the edge; outside the
-// camera is lit.
-shadow_factor :: proc "contextless" (depths: []f32, sh: ^Shadow, world, normal: Vec3) -> f32 {
-	p := world + normal * sh.normal_bias
-	toward := sh.from.xyz if sh.from.w == 0 else linalg.normalize0(sh.from.xyz - p)
-	p -= toward * sh.bias
-	c := sh.view_proj * Vec4{p.x, p.y, p.z, 1}
-	if c.w <= 1e-6 {
-		return 1
-	}
-	inv_w := 1 / c.w
-	u := c.x * inv_w * 0.5 + 0.5
-	v := 0.5 - c.y * inv_w * 0.5 // rows from the top, as the map is drawn
-	z := c.z * inv_w
-	if u < 0 || u > 1 || v < 0 || v > 1 || z < 0 || z > 1 {
-		return 1
-	}
-	size := sh.size
-	s := u * f32(size) - 0.5
-	t := v * f32(size) - 0.5
-	x0, y0 := math.floor(s), math.floor(t)
-	fx, fy := s - x0, t - y0
-	wx := [4]f32{1 - fx, 1, 1, fx}
-	wy := [4]f32{1 - fy, 1, 1, fy}
-	lit: f32
-	for j in 0 ..< 4 {
-		row := clamp(int(y0) - 1 + j, 0, size - 1)
-		acc: f32
-		for i in 0 ..< 4 {
-			col := clamp(int(x0) - 1 + i, 0, size - 1)
-			acc += wx[i] * (1 if z >= depths[row * size + col] else 0)
-		}
-		lit += wy[j] * acc
-	}
-	return lit / 9
 }
 
 @(private)

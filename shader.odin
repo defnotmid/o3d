@@ -96,7 +96,7 @@ Prelude_Function :: enum u8 {
 	// after).
 	Tone_Mapping,
 	// `vec3 fogged(vec3 color, vec3 worldPosition)`: towards the scene's
-	// fog's colour by the distance from the camera (`fog_factor`), linear.
+	// fog's colour by the distance from the camera, linear.
 	Fogged,
 	// `vec4 linearToOutputTexel(vec4 value)`: as is (light; the frame is
 	// encoded after).
@@ -177,7 +177,8 @@ TONE_PRELUDE :: `vec3 toneMapping(vec3 color) {
 }
 `
 
-// fog_factor's, the terms resolved (fog_terms).
+// The scene's fog as shaders/o3d.frag applies it, the terms resolved
+// (fog_terms).
 @(private = "file")
 FOG_PRELUDE :: `vec3 fogged(vec3 color, vec3 worldPosition) {
 	float dist = length(worldPosition - cameraPosition);
@@ -227,6 +228,32 @@ VERTEX_ATTRIBUTES := [Vertex_Attribute]struct {
 // Varying floats a shader may pass per vertex (15 vec4s and a bit, beyond
 // what GLSL ES 3.0 guarantees).
 MAX_VARYING_FLOATS :: 64
+
+// What the software renderer keeps of a vertex stage's record at each
+// corner of a triangle: the floats its fragment stage reads (by their
+// offsets in the record, in order), `flat` those taken from the first
+// corner as they are, the rest divided by w. The fragment reads them at
+// their offsets in the record, where `quad_values` puts them back.
+Corner_Floats :: struct {
+	from:  [MAX_VARYING_FLOATS]u8,
+	flat:  bit_set[0 ..< MAX_VARYING_FLOATS],
+	count: int,
+}
+
+// A pipeline's corner floats: its fragment stage's inputs (oksl lists the
+// ones it reads, at their vertex outputs' offsets).
+corner_floats :: proc "contextless" (p: ^oksl.Pipeline) -> (c: Corner_Floats) {
+	for in_ in p.fragment.stage_inputs {
+		for k in 0 ..< type_floats(in_.type) * max(int(in_.type.array), 1) {
+			if in_.flat {
+				c.flat += {c.count}
+			}
+			c.from[c.count] = u8(in_.offset + k)
+			c.count += 1
+		}
+	}
+	return
+}
 
 // A ShaderMaterial's textures: `Material.shader_maps`, one per oksl
 // channel (its `uniform sampler2D`s in declaration order).
@@ -299,32 +326,30 @@ Shader :: struct {
 	builtins:       [Shader_Stage][Builtin]i32,
 	// Each attribute's location (-1: unused).
 	attributes:     [Vertex_Attribute]i32,
-	// The varyings: floats per vertex, and the ones that are flat (not
-	// interpolated: the first vertex's, as the GPU takes them), listed so
-	// the rasterizer's loops visit only those (`shader_flat`).
+	// The varyings: floats per vertex, and what a triangle's corners keep
+	// of them.
 	varying_floats: int,
-	flat:           [MAX_VARYING_FLOATS]u8,
-	flat_count:     int,
+	corners:        Corner_Floats,
 	// `shadowAt`'s map's channel (-1: the shader does not call it).
 	shadow_channel: i32,
-	// The frame's depth pass (o3d.slang's fs_velocity's for a
-	// ShaderMaterial): its own vertex stage, run once more by a tap toward
+	// The frame's depth pass (shaders/o3d_depth.frag's Velocity entry's
+	// for a ShaderMaterial): its own vertex stage, run once more by a tap toward
 	// where its position was at the shutter's opening (its uniforms then,
 	// its position and normal then as twins), and DEPTH_FRAGMENT. Its
 	// built-ins' offsets (each tap's `block_stride` on), its attributes'
 	// and their twins' locations (-1: unused), where the tap's position is
 	// among its varyings, and the fragment's frame uniforms' offsets.
 	depth:            ^oksl.Pipeline,
+	depth_corners:    Corner_Floats,
 	depth_builtins:   [Builtin]i32,
 	depth_attributes: [Vertex_Attribute]i32,
 	depth_twins:      [2]i32,
-	depth_opened:     i32,
 	depth_frame:      [2]i32,
 }
 
 // The depth pass's vertex prelude after the shader's (DEPTH_FRAGMENT's
 // input, and the twins the tap reads), and its fragment: the depth, and
-// the velocity and nearness as o3d.slang's velocity_out writes them.
+// the velocity and nearness as shaders/o3d_depth.frag writes them.
 @(private = "file")
 DEPTH_VERTEX_PRELUDE :: `out vec4 o3dOpenedPosition;
 in vec3 o3dOpenPosition;
@@ -438,11 +463,6 @@ shader_map :: proc "contextless" (s: ^Shaders, id: Shader_Id, name: string) -> i
 	return -1
 }
 
-// The varying floats that are flat (by offset in a vertex's record).
-shader_flat :: proc "contextless" (sh: ^Shader) -> []u8 {
-	return sh.flat[:sh.flat_count]
-}
-
 shader_module :: proc "contextless" (sh: ^Shader, stage: Shader_Stage) -> ^oksl.Module {
 	return sh.pipeline.vertex if stage == .Vertex else sh.pipeline.fragment
 }
@@ -506,14 +526,7 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 		fail(&sh, {code = .Too_Many_Varyings, stage = .Vertex, n = i64(sh.varying_floats), m = MAX_VARYING_FLOATS})
 		return
 	}
-	for v in p.vertex.stage_outputs {
-		if v.flat {
-			for k in 0 ..< type_floats(v.type) {
-				sh.flat[sh.flat_count] = u8(v.offset + k)
-				sh.flat_count += 1
-			}
-		}
-	}
+	sh.corners = corner_floats(p)
 	// The depth pass's: what compiled above compiles here too, with the tap.
 	taps := []oksl.Tap{{position = "o3dOpenedPosition", attributes = {{"position", "o3dOpenPosition"}, {"normal", "o3dOpenNormal"}}}}
 	vertex_prelude := strings.concatenate({prelude(.Vertex, glsl3, {}), DEPTH_VERTEX_PRELUDE}, context.temp_allocator)
@@ -526,6 +539,7 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 		}
 		return
 	}
+	sh.depth_corners = corner_floats(d)
 	for b in Builtin {
 		offset, _, found := oksl.uniform_offset(d.vertex, BUILTINS[b].name)
 		sh.depth_builtins[b] = i32(offset) if found else -1
@@ -543,12 +557,6 @@ make_shader :: proc(vertex, fragment: string, glsl3: bool) -> (sh: Shader) {
 					sh.depth_attributes[a] = i32(v.location)
 				}
 			}
-		}
-	}
-	sh.depth_opened = -1
-	for v in d.vertex.stage_outputs {
-		if v.name == "o3dOpenedPosition" {
-			sh.depth_opened = i32(v.offset)
 		}
 	}
 	for name, k in ([2]string{"o3dVelocityFrame", "o3dVelocityOrtho"}) {

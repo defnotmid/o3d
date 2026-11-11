@@ -42,24 +42,6 @@ BAND_ROWS :: 32
 CHUNK_TRIS :: 8192
 // Quads shaded by one oksl call (a run of one draw's triangles).
 QUAD_BATCH :: 256
-// The standard material's corner floats: world position, normal, and uv + uv1 when textured
-// (or an exact shape's: uv1 is its shape coordinate), then its vertex colour (linear) and alpha
-// with `.Vertex_Colors`.
-UNTEX_FLOATS :: 6
-STANDARD_FLOATS :: 10
-COLOR_FLOATS :: 4
-// The shadow map's corner floats: the alpha mask's colour map uv, then an
-// exact shape's coordinate, each when there is one.
-SHADOW_MASK_FLOATS :: 2
-
-@(private)
-shadow_floats :: #force_inline proc "contextless" (masked, curved: bool) -> int {
-	return SHADOW_MASK_FLOATS * (int(masked) + int(curved))
-}
-// And with motion blur, the frame's depth pass's after them: the corner's
-// clip x, y and w at the shutter's opening.
-OPENED_FLOATS :: 3
-
 Software :: struct {
 	width, height: int,
 	light:         [][4]f16, // per sample, premultiplied (alpha: coverage)
@@ -70,6 +52,32 @@ Software :: struct {
 	// reuse).
 	order:         [dynamic]int,
 	materials:     [dynamic]Shading_Material, // per draw
+	// o3d's own draws' variants (shading.odin); per draw its variant through
+	// the camera and through the mirror (-1: not drawn so) and its
+	// material's block; each pass's frame block.
+	programs:           Programs,
+	program_ids:        [dynamic]i32,
+	mirror_program_ids: [dynamic]i32,
+	// Every draw's in a shadow map's pass, o3d's draws' in the frame's
+	// depth pass (depth_key).
+	shadow_program_ids:   [dynamic]i32,
+	velocity_program_ids: [dynamic]i32,
+	material_blocks:    [dynamic]Material_Block,
+	frame_block:        Frame_Block,
+	mirror_frame_block: Frame_Block,
+	// The frame's joint table (joint_table) and each draw's place in it.
+	joint_table:        [dynamic]Mat4,
+	// The fullscreen passes' light: the background's (and the depth image's),
+	// the depth pass's far plane's velocity and nearness; and the camera the
+	// last frame was drawn through.
+	bg_light:           [dynamic][4]f32,
+	// The post passes' last light (sRGB-encoded) and their scratch, one
+	// per worker (post.odin).
+	post_light:         [dynamic][4]f32,
+	post_scratch:       [dynamic]oksl.Scratch,
+	far_light:          [2][dynamic][4]f32,
+	camera:             Camera,
+	joint_bases:        [dynamic][2]u32,
 	// ShaderMaterials' uniform blocks, through the camera and through the
 	// mirror, and for the frame's depth pass (`depth_blocks`).
 	blocks:        Shader_Blocks,
@@ -105,9 +113,9 @@ Software :: struct {
 	snapshot_tex:  Texture,
 	snapshot_light: [dynamic][4]f32,
 	// The scene mirrored in its reflector (`mirror_view`), drawn first in
-	// the same samples at its size, with each sample's run (`mirror_run`)
-	// premultiplied by its coverage, and the coverage, blended as the light
-	// (`mirror_runs`): its light resolved into level 0 of `reflection_tex`
+	// the same samples at its size, with each sample's run (o3d.frag's
+	// `mirror_run_of`) premultiplied by its coverage, and the coverage,
+	// blended as the light (`mirror_runs`): its light resolved into level 0 of `reflection_tex`
 	// (texture 1), its runs into the same levels of texture 2 (red and
 	// green, alpha 1, as the GPU's second layer), both mipmapped as the
 	// GPU's, then their levels read as floats (`reflection_light`,
@@ -160,6 +168,22 @@ software_destroy :: proc(s: ^Software) {
 	motion_tables_destroy(&s.motion)
 	delete(s.order)
 	delete(s.materials)
+	programs_destroy(&s.programs)
+	delete(s.program_ids)
+	delete(s.mirror_program_ids)
+	delete(s.shadow_program_ids)
+	delete(s.velocity_program_ids)
+	delete(s.material_blocks)
+	delete(s.joint_table)
+	delete(s.bg_light)
+	delete(s.post_light)
+	for &sc in s.post_scratch {
+		oksl.scratch_destroy(&sc)
+	}
+	delete(s.post_scratch)
+	delete(s.far_light[0])
+	delete(s.far_light[1])
+	delete(s.joint_bases)
 	shader_blocks_destroy(&s.blocks)
 	shader_blocks_destroy(&s.mirror_blocks)
 	shader_blocks_destroy(&s.depth_blocks)
@@ -221,7 +245,6 @@ Tri :: struct {
 	p:            [3]Vec3,
 	inv_w:        [3]f32,
 	values:       u32,
-	curve:        u32,
 	draw:         int,
 	min_y, max_y: int,
 	front:        bool, // facing the camera (before back faces were turned)
@@ -252,17 +275,29 @@ Worker :: struct {
 	values:    [dynamic]f32,
 	skinned:   [dynamic]Vertex, // posed chunk vertices for a skinned ShaderMaterial
 	opened:    [dynamic]Vertex, // and posed as at the shutter's opening (the depth pass's twins)
-	quads:     struct {
-		origin:  [dynamic][2]i32,
-		helpers: [dynamic]oksl.Quad_Lanes,
-		facing:  [dynamic]bool,
-		covered: [dynamic][4]Sample_Mask, // per lane
-		tri:     [dynamic]Tri_Ref,
-		values:  [dynamic]f32, // structure of arrays, as run_fragment reads them
-		colours: [dynamic][4]f32,
-		shaded:  [dynamic]oksl.Quad_Lanes,
-	},
+	quads:     Quads,
 }
+
+// A batch of one draw's 2x2 quads for its fragment program: each quad's
+// top-left pixel, helper lanes, facing, its lanes' covered samples and its
+// triangle; per lane (structure of arrays, as run_fragment reads them) its
+// varyings and depth, its outputs (a colour pass's light and the mirror's
+// run; a depth pass's depth, velocity and nearness) and covered samples
+// (gl_SampleMask), and the lanes each quad shaded.
+@(private)
+Quads :: struct {
+	origin:  [dynamic][2]i32,
+	helpers: [dynamic]oksl.Quad_Lanes,
+	facing:  [dynamic]bool,
+	covered: [dynamic][4]Sample_Mask,
+	tri:     [dynamic]Tri_Ref,
+	values:  [dynamic]f32,
+	depths:  [dynamic]f32,
+	targets: [3][dynamic][4]f32,
+	masks:   [dynamic]u32,
+	shaded:  [dynamic]oksl.Quad_Lanes,
+}
+
 
 @(private = "file")
 worker_destroy :: proc(w: ^Worker) {
@@ -271,14 +306,19 @@ worker_destroy :: proc(w: ^Worker) {
 	delete(w.values)
 	delete(w.skinned)
 	delete(w.opened)
-	delete(w.quads.origin)
-	delete(w.quads.helpers)
-	delete(w.quads.facing)
-	delete(w.quads.covered)
-	delete(w.quads.tri)
-	delete(w.quads.values)
-	delete(w.quads.colours)
-	delete(w.quads.shaded)
+	q := &w.quads
+	delete(q.origin)
+	delete(q.helpers)
+	delete(q.facing)
+	delete(q.covered)
+	delete(q.tri)
+	delete(q.values)
+	delete(q.depths)
+	for &t in q.targets {
+		delete(t)
+	}
+	delete(q.masks)
+	delete(q.shaded)
 }
 
 // Draws `scene` into `width x height` premultiplied RGBA8, rows from the
@@ -332,6 +372,16 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	}
 	env := shading_environment(active, textures)
 	bg_tex, bg_intensity, bg_lod := shading_background(active, textures)
+	s.camera = active.camera
+	// The fullscreen passes the bands run, compiled here (the bands only read
+	// them).
+	if bg_tex != 0 {
+		table_grow_non_zero(&s.bg_light, width * height)
+		pass_get(&s.programs, .Background)
+	}
+	if motion_of(active) {
+		pass_get(&s.programs, .Velocity_Far)
+	}
 	job := Frame_Job {
 		s             = s,
 		blocks        = &s.blocks,
@@ -354,6 +404,59 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		fog           = active.fog,
 		fog_color     = linear(active.fog.color),
 	}
+	// Each light's shadow by the frame's shadows (as the GPU's).
+	for si in 0 ..< ns {
+		for &l, li in lights[:nl] {
+			if li == shadows[si].light {
+				l.shadowed = u32(si + 1)
+			}
+		}
+	}
+	// o3d's own draws: each one's variant through the camera and the
+	// mirror, its material's block, and the passes' frame blocks.
+	{
+		nd := len(active.draws)
+		rad, _ := texture_get(textures, env.radiance)
+		shape := frame_shape(lights[:nl], ns, env, rad.hdr, active.fog.kind)
+		joint_table(active, motion_of(active), &s.joint_table, &s.joint_bases)
+		table_grow_non_zero(&s.program_ids, nd)
+		table_grow_non_zero(&s.mirror_program_ids, nd)
+		table_grow_non_zero(&s.material_blocks, nd)
+		table_grow_non_zero(&s.shadow_program_ids, nd)
+		table_grow_non_zero(&s.velocity_program_ids, nd)
+		depth := needs_depth(active) || motion_of(active)
+		for &m, i in s.materials[:nd] {
+			s.program_ids[i], s.mirror_program_ids[i], s.shadow_program_ids[i], s.velocity_program_ids[i] = -1, -1, -1, -1
+			d := &active.draws[i]
+			geo, has_geo := geometry_get_any(geos, &s.expanded, d.geometry)
+			if !has_geo {
+				continue
+			}
+			skinned := len(geometry_skin(geos, d.geometry)) > 0 && len(scene_draw_joints(active, i)) > 0
+			if ns > 0 {
+				s.shadow_program_ids[i] = program_get(&s.programs, depth_key(&m, skinned, false))
+			}
+			if m.shader != 0 {
+				s.material_blocks[i] = material_block(&m, {}, geo.curve_table)
+				continue
+			}
+			if depth {
+				s.velocity_program_ids[i] = program_get(&s.programs, depth_key(&m, skinned, true))
+			}
+			s.program_ids[i] = program_get(&s.programs, program_key(&m, skinned, false, shape))
+			if reflect {
+				s.mirror_program_ids[i] = program_get(&s.programs, program_key(&m, skinned, true, shape))
+			}
+			s.material_blocks[i] = material_block(&m, s.frames[i], geo.sprite_table if geo.mode == .Sprites else geo.curve_table)
+		}
+		frame_block(&s.frame_block, active.camera, active.camera.position, proj * view, width, height, lights[:nl], shadows[:ns], env, active.fog)
+		if reflect {
+			s.frame_block.reflect = {f32(mv.levels - 1), mv.focal, 0, 0}
+			frame_block(&s.mirror_frame_block, active.camera, mv.eye, proj * mv.view, mv.width, mv.height, lights[:nl], shadows[:ns], env, active.fog)
+			s.mirror_frame_block.clip_plane = mv.plane
+		}
+		job.programs, job.frame_block = s.program_ids[:nd], &s.frame_block
+	}
 	for si in 0 ..< ns {
 		sh := &job.shadows[si]
 		size := sh.size
@@ -363,6 +466,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		}
 		shadow_casters(active, geos, shaders, sh, &s.order, &s.expanded)
 		job.shadow_index = si
+		job.programs = s.shadow_program_ids[:len(active.draws)]
 		job.view_proj, job.width, job.height, job.depth_only = sh.view_proj, size, size, true
 		job.depth_target, job.own_side = s.shadow_maps[si], false
 		run_pass(s, active, geos, &job, pool, draw_depth_band, 0, len(s.order))
@@ -379,9 +483,12 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		depth_blocks(active, shaders, view, proj, ov, op, width, height, shadows[:ns], &s.depth_blocks)
 		job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, true
 		job.depth_target, job.own_side, job.depth_blocks = s.depth_map[:width * height], true, &s.depth_blocks
+		job.programs = s.velocity_program_ids[:len(active.draws)]
 		if moving {
 			table_grow_non_zero(&s.velocity, width * height)
 			table_grow_non_zero(&s.nearness, width * height)
+			table_grow_non_zero(&s.far_light[0], width * height)
+			table_grow_non_zero(&s.far_light[1], width * height)
 			job.velocity, job.nearness, job.camera = s.velocity[:width * height], s.nearness[:width * height], active.camera
 			job.opened_view_proj = op * ov
 			job.opened_far = job.opened_view_proj * linalg.inverse(proj * view)
@@ -391,6 +498,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	} else {
 		clear(&s.depth_map)
 	}
+	job.programs = s.program_ids[:len(active.draws)]
 	if reflect {
 		// The mirror's light in the frame's samples at its size: its pass
 		// with the mirrored camera, front faces turned, what is behind the
@@ -409,6 +517,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		mj := job
 		mj.view_proj, mj.width, mj.height, mj.depth_only = proj * mv.view, mv.width, mv.height, false
 		mj.eye, mj.mirrored, mj.clip, mj.blocks = mv.eye, true, mv.plane, &s.mirror_blocks
+		mj.programs, mj.frame_block = s.mirror_program_ids[:len(active.draws)], &s.mirror_frame_block
 		mj.bg_tex, mj.clear = 0, {}
 		mj.capture_into = s.reflection.hdr_texels[s.reflection_tex.mips[0]:][:mv.width * mv.height]
 		mj.runs = s.mirror_runs[:mv.width * mv.height * SAMPLES]
@@ -440,45 +549,36 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		job.snapshot, job.snapshot_tex = light_levels(&s.snapshot, &s.snapshot_tex, &s.snapshot_light), s.snapshot_tex
 		job.keep = true
 	}
-	focus, blurred := focus_of(active.camera, height)
-	chain, bloomed := bloom_of(active.bloom, width, height)
-	if blurred || moving || bloomed {
-		table_grow_non_zero(&s.frame, width * height)
-		job.light_into = s.frame[:width * height]
-	}
+	// The frame's light, resolved by the bands, then its post passes as the
+	// GPU's: blurred along its motion, its bloom, then through its depth of
+	// field or straight to the output (tone mapped and encoded).
+	table_grow_non_zero(&s.frame, width * height)
+	job.light_into = s.frame[:width * height]
 	run_pass(s, active, geos, &job, pool, draw_band, snapshot if job.keep else 0, len(s.order))
-	// The frame's light blurred along its motion, its bloom over that, then
-	// through its depth of field, tone mapped and encoded.
-	frame := s.frame[:width * height] if blurred || moving || bloomed else nil
+	frame := s.frame[:width * height]
 	if moving {
 		table_grow_non_zero(&s.blurred, width * height)
 		motion_blur(&s.motion, frame, s.velocity[:], s.nearness[:], width, height, motion_params(active.camera, height), s.blurred[:width * height], pool)
 		frame = s.blurred[:width * height]
 	}
 	bloom: Bloom_Output
-	if bloomed {
-		bloom = bloom_run(&s.bloom, chain, frame, width, height, pool)
+	if chain, bloomed := bloom_of(active.bloom, width, height); bloomed {
+		bloom = bloom_run(&s.bloom, chain, frame, width, height, &s.programs, &s.post_scratch, pool)
 	}
-	if blurred {
+	if focus, blurred := focus_of(active.camera, height); blurred {
 		depth_of_field(s, frame, focus, active.camera, active.tone_mapping, active.tone_mapping_exposure, bloom, pool)
-	} else if moving || bloomed {
-		Output_Job :: struct {
-			frame:         [][4]f32,
-			pixels:        []u8,
-			width, height: int,
-			tone_mapping:  Tone_Mapping,
-			tone_exposure: f32,
-			bloom:         Bloom_Output,
+	} else {
+		exposure := active.tone_mapping_exposure
+		block := Post_Block {
+			tone  = {f32(active.tone_mapping), exposure if exposure > 0 else 1, f32(width), f32(height)},
+			frame = {f32(width), f32(height), 0, 0},
+			bloom = {0, 0, bloom.gain, 0},
 		}
-		out := Output_Job{frame, s.pixels, width, height, active.tone_mapping, active.tone_mapping_exposure, bloom}
-		parallel(pool, height, &out, proc(data: rawptr, y, _: int) {
-			o := (^Output_Job)(data)
-			for x in 0 ..< o.width {
-				i := y * o.width + x
-				px := output(bloom_light(o.frame[i], o.bloom, x, y, o.width, o.height), o.tone_mapping, o.tone_exposure)
-				copy(o.pixels[i * 4:][:4], px[:])
-			}
-		})
+		table_grow_non_zero(&s.post_light, width * height)
+		maps := #partial Post_Images{.Light = {f4 = frame, width = width, height = height}, .Bloom = {f4 = bloom.glow, width = bloom.width, height = bloom.height}}
+		out := [1][][4]f32{s.post_light[:width * height]}
+		post_run(&s.programs, &s.post_scratch, .Output, &block, maps, out[:], width, height, pool)
+		post_pixels(s.post_light[:width * height], s.pixels)
 	}
 	return s.pixels
 }
@@ -610,6 +710,10 @@ Frame_Job :: struct {
 	reflection_last: f32,
 	reflection_focal: f32,
 	ortho:         bool,
+	// The pass's variant per draw (Software.program_ids or
+	// mirror_program_ids) and its frame block.
+	programs:      []i32,
+	frame_block:   ^Frame_Block,
 }
 
 @(private = "file")
@@ -658,107 +762,96 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 		return
 	}
 	count := int(hi - lo) + 1
-	sh := shader_get(job.shaders, m.shader) if !job.depth_only else nil
-	textured := m.flags & (TEXTURE_FLAGS + {.Curves, .Sprite, .Vertex_Colors}) != {}
-	coloured := .Vertex_Colors in m.flags
-	nf := sh.varying_floats if sh != nil else (STANDARD_FLOATS + (COLOR_FLOATS if coloured else 0) if textured else UNTEX_FLOATS)
-	masked, curved: bool
-	ns := 0 // the shadow floats
-	// The frame's depth pass with motion blur: where the corners were at
-	// the shutter's opening, through the camera then, as the draw was then
-	// (its model, joints and weights, each as now when it has none).
-	moving := job.depth_only && job.velocity != nil
-	opened_mvp: Mat4
-	opened_joints := joints
-	opened_buf: [MAX_MORPH_TARGETS]Active_Morph = ---
-	opened_active := active
-	if job.depth_only {
-		if .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} == {} && m.opacity < m.alpha_cutoff {
-			slice.zero(s.chunk_bands[ci * job.bands:][:job.bands])
-			return
-		}
-		masked, _ = shadow_mask(m)
-		curved = .Curves in m.flags
-		ns = shadow_floats(masked, curved)
-		nf = ns + (OPENED_FLOATS if moving else 0)
-	}
-	// A ShaderMaterial in the frame's depth pass: its own vertex stage.
-	custom := shader_get(job.shaders, m.shader) if job.depth_only && job.own_side && m.shader != 0 else nil
-	if custom != nil {
-		masked, curved, ns, nf = false, false, 0, OPENED_FLOATS if moving else 0
-	}
-	if moving {
-		model := scene_draw_opened(job.scene, di)
-		opened_mvp = job.opened_view_proj * (model if model != {} else d.model)
-		if j := scene_draw_opened_joints(job.scene, di); j != nil {
-			opened_joints = j
-		}
-		if w := scene_draw_opened_morphs(job.scene, di); w != nil {
-			opened_active = opened_buf[:active_morphs(geo, w, &opened_buf)]
+	// What the vertices go through: a ShaderMaterial's vertex stage in a
+	// colour pass (`sh`), its depth pass's in the frame's depth pass
+	// (`custom`), else o3d's variant for the pass (`x`).
+	sh, custom: ^Shader
+	x: ^Program
+	switch {
+	case !job.depth_only && m.shader != 0:
+		sh = shader_get(job.shaders, m.shader)
+	case job.depth_only && job.own_side && m.shader != 0:
+		custom = shader_get(job.shaders, m.shader)
+	case:
+		if id := job.programs[di]; id >= 0 {
+			x = &s.programs.list[id]
 		}
 	}
-	flat := shader_flat(sh) if sh != nil else nil
+	// A masked draw its opacity leaves wholly cut draws no depth.
+	masked_out := job.depth_only && .Alpha_Mask in m.flags && m.flags & {.Color_Map, .Alpha_Map} == {} && m.opacity < m.alpha_cutoff
+	if sh == nil && custom == nil && x == nil || masked_out {
+		slice.zero(s.chunk_bands[ci * job.bands:][:job.bands])
+		return
+	}
+	// The vertex stage's record (nf floats a vertex) and what each corner
+	// keeps of it.
+	nf: int
+	keep: ^Corner_Floats
+	switch {
+	case sh != nil:
+		nf, keep = sh.varying_floats, &sh.corners
+	case custom != nil:
+		nf, keep = custom.depth.vertex.varying_floats, &custom.depth_corners
+	case:
+		nf, keep = x.pipeline.vertex.varying_floats, &x.corners
+	}
 	table_grow_non_zero(&w.positions, count)
 	table_grow_non_zero(&w.values, count * nf)
 	if custom != nil {
-		depth_vertices(job, w, custom, di, vertices[lo:][:count], lo, skin, joints, opened_joints, active, opened_active, deltas, count, moving)
-	} else if job.depth_only {
-		mvp := job.view_proj * d.model
-		_, use_uv1 := shadow_mask(m)
-		for vtx, i in vertices[lo:][:count] {
-			vi := lo + u32(i)
-			v := vtx
-			if morphed {
-				v.position, v.normal = morph_vertex(v, vi, deltas, active)
+		// Posed now and as at the shutter's opening (its model, joints and
+		// weights then, each as now when it has none).
+		opened_joints := joints
+		opened_buf: [MAX_MORPH_TARGETS]Active_Morph = ---
+		opened_active := active
+		if job.velocity != nil {
+			if j := scene_draw_opened_joints(job.scene, di); j != nil {
+				opened_joints = j
 			}
-			if skinned {
-				v.position, v.normal = skin_vertex(v, skin[vi], joints)
-			}
-			w.positions[i] = mvp * Vec4{v.position.x, v.position.y, v.position.z, 1}
-			if masked {
-				(^Vec2)(&w.values[i * nf])^ = v.uv1 if use_uv1 else v.uv
-			}
-			if curved {
-				(^Vec2)(&w.values[i * nf + ns - SHADOW_MASK_FLOATS])^ = v.uv1
-			}
-			if moving {
-				o := vtx
-				if len(opened_active) > 0 {
-					o.position, o.normal = morph_vertex(o, vi, deltas, opened_active)
-				}
-				if skinned {
-					o.position, o.normal = skin_vertex(o, skin[vi], opened_joints)
-				}
-				oc := opened_mvp * Vec4{o.position.x, o.position.y, o.position.z, 1}
-				(^Vec3)(&w.values[i * nf + ns])^ = {oc.x, oc.y, oc.w}
+			if ow := scene_draw_opened_morphs(job.scene, di); ow != nil {
+				opened_active = opened_buf[:active_morphs(geo, ow, &opened_buf)]
 			}
 		}
-	} else if sh == nil {
-		mvp := job.view_proj * d.model
-		nm := normal_matrix(d.model)
-		for vtx, i in vertices[lo:][:count] {
-			vi := lo + u32(i)
-			v := vtx
-			if morphed {
-				v.position, v.normal = morph_vertex(v, vi, deltas, active)
+		depth_vertices(job, w, custom, di, vertices[lo:][:count], lo, skin, joints, opened_joints, active, opened_active, deltas, count)
+	} else if x != nil {
+		attrs: [len(Program_Attribute)]oksl.Attribute
+		for a in Program_Attribute {
+			loc := x.attributes[a]
+			if loc < 0 {
+				continue
 			}
-			if skinned {
-				v.position, v.normal = skin_vertex(v, skin[vi], joints)
-			}
-			p := Vec4{v.position.x, v.position.y, v.position.z, 1}
-			w.positions[i] = mvp * p
-			base := i * nf
-			(^Vec3)(&w.values[base])^ = (d.model * p).xyz
-			(^Vec3)(&w.values[base + 3])^ = (nm * Vec4{v.normal.x, v.normal.y, v.normal.z, 0}).xyz
-			if textured {
-				(^Vec2)(&w.values[base + 6])^ = v.uv
-				(^Vec2)(&w.values[base + 8])^ = v.uv1
-			}
-			if coloured {
-				c := v.color
-				(^Vec4)(&w.values[base + STANDARD_FLOATS])^ = {srgb_to_linear(f32(c.r) / 255), srgb_to_linear(f32(c.g) / 255), srgb_to_linear(f32(c.b) / 255), f32(c.a) / 255}
+			row := PROGRAM_ATTRIBUTES[a]
+			if row.skin {
+				attrs[loc] = {rawptr(uintptr(&skin[lo]) + row.offset), size_of(Skin_Vertex), row.format}
+			} else {
+				attrs[loc] = {rawptr(uintptr(&vertices[lo]) + row.offset), size_of(Vertex), row.format}
 			}
 		}
+		weights := scene_draw_morphs(job.scene, di)
+		db: Draw_Block = ---
+		draw_block(&db, job.view_proj * d.model, d.model, geo, weights, s.joint_bases[di])
+		if x.key.entry == .Velocity {
+			// The frame's depth pass: the draw as at the shutter's opening,
+			// through the camera then (as now without motion blur).
+			if job.velocity != nil {
+				model := scene_draw_opened(job.scene, di)
+				opened_weights := scene_draw_opened_morphs(job.scene, di)
+				draw_block_opened(&db, job.opened_view_proj * (model if model != {} else d.model), geo, opened_weights if opened_weights != nil else weights)
+			} else {
+				draw_block_opened(&db, job.view_proj * d.model, geo, weights)
+			}
+		}
+		vb: [size_of(Draw_Block)]u8 = ---
+		block_fill(&x.vertex, {&db, nil}, vb[:])
+		buffers: [2][]u32
+		for b, i in x.vertex_buffers {
+			#partial switch b {
+			case .Morph_Deltas:
+				buffers[i] = slice.reinterpret([]u32, deltas)
+			case .Skin_Joints:
+				buffers[i] = slice.reinterpret([]u32, s.joint_table[:])
+			}
+		}
+		oksl.run_vertex(&x.pipeline.vertex.program, vb[:x.vertex.size], attrs[:], count, w.positions[:], w.values[:], &w.vm, {buffers = buffers[:], first_vertex = int(lo)})
 	} else {
 		src_verts := vertices[lo:][:count]
 		if morphed || skinned {
@@ -789,14 +882,11 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 	}
 	side := shadow_side(d.material.side) if job.depth_only && !job.own_side else d.material.side
 	values := raw_data(w.values) // nil with no floats (the shadow map): never read
-	curved_geo := geo.mode == .Curves && .Curves in m.flags
 	for t := 0; t + 2 < len(indices); t += 3 {
 		v := [3]int{int(indices[t] - lo), int(indices[t + 1] - lo), int(indices[t + 2] - lo)}
 		clip := [3]Vec4{w.positions[v[0]], w.positions[v[1]], w.positions[v[2]]}
-		// Its quad's entry: an exact shape's curve set, or a particle's row.
-		curve := curve_quad_entry(job.geos, geo, indices[t] / 4) if curved_geo else (geo.sprite_table + indices[t] / 4 if geo.mode == .Sprites else 0)
 		if clip[0].z <= clip[0].w && clip[1].z <= clip[1].w && clip[2].z <= clip[2].w {
-			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, nf, flat, di, curve, job.width, job.height, side, job.mirrored)
+			emit(c, clip, {values[v[0] * nf:], values[v[1] * nf:], values[v[2] * nf:]}, keep, di, job.width, job.height, side, job.mirrored)
 			continue
 		}
 		corners: [3]Corner = ---
@@ -804,7 +894,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 			corners[k].c = clip[k]
 			copy(corners[k].v[:nf], w.values[v[k] * nf:][:nf])
 		}
-		clip_near(c, &corners, nf, flat, di, curve, job.width, job.height, side, job.mirrored)
+		clip_near(c, &corners, nf, keep, di, job.width, job.height, side, job.mirrored)
 	}
 	counts := s.chunk_bands[ci * job.bands:][:job.bands]
 	slice.zero(counts)
@@ -822,7 +912,7 @@ transform_chunk :: proc(data: rawptr, ci, wi: int) {
 // shutter's opening repacked as the depth band reads it (OPENED_FLOATS),
 // its twins the vertices posed as then.
 @(private = "file")
-depth_vertices :: proc(job: ^Frame_Job, w: ^Worker, sh: ^Shader, di: int, src: []Vertex, lo: u32, skin: []Skin_Vertex, joints, opened_joints: []Mat4, active, opened_active: []Active_Morph, deltas: []Morph_Delta, count: int, moving: bool) {
+depth_vertices :: proc(job: ^Frame_Job, w: ^Worker, sh: ^Shader, di: int, src: []Vertex, lo: u32, skin: []Skin_Vertex, joints, opened_joints: []Mat4, active, opened_active: []Active_Morph, deltas: []Morph_Delta, count: int) {
 	pose :: proc(out: ^[dynamic]Vertex, src: []Vertex, lo: u32, skin: []Skin_Vertex, joints: []Mat4, active: []Active_Morph, deltas: []Morph_Delta) -> []Vertex {
 		if len(active) == 0 && len(joints) == 0 {
 			return src
@@ -856,20 +946,7 @@ depth_vertices :: proc(job: ^Frame_Job, w: ^Worker, sh: ^Shader, di: int, src: [
 			attrs[loc] = {rawptr(uintptr(&then[0]) + row.offset), size_of(Vertex), .Float3}
 		}
 	}
-	nv := sh.depth.vertex.varying_floats
-	table_grow_non_zero(&w.values, count * max(nv, OPENED_FLOATS))
 	oksl.run_vertex(&sh.depth.vertex.program, block(job.depth_blocks, di, .Vertex), attrs[:], count, w.positions[:], w.values[:], &w.vm)
-	if !moving {
-		return
-	}
-	// x, y and w of each vertex's vec4, packed in place (never ahead of
-	// what is read).
-	at := int(sh.depth_opened)
-	for i in 0 ..< count {
-		v := w.values[i * nv + at:][:4]
-		x, y, ww := v[0], v[1], v[3]
-		w.values[i * OPENED_FLOATS], w.values[i * OPENED_FLOATS + 1], w.values[i * OPENED_FLOATS + 2] = x, y, ww
-	}
 }
 
 // A draw's uniform block for a stage (nil: none).
@@ -915,11 +992,12 @@ list_chunk :: proc(data: rawptr, ci, _: int) {
 }
 
 // Clips a triangle crossing the near plane (z <= w in clip space) and keeps
-// what is left as one or two screen triangles; `nf` floats per corner,
-// the `flat` ones the first vertex's, carried, not interpolated.
+// what is left as one or two screen triangles; `nf` floats per corner, the
+// flat ones `keep` keeps the first vertex's, carried, not interpolated.
 @(private = "file")
-clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side, mirrored: bool) {
-	for f in flat {
+clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, keep: ^Corner_Floats, draw: int, width, height: int, side: Side, mirrored: bool) {
+	for j in keep.flat {
+		f := keep.from[j]
 		tri[1].v[f], tri[2].v[f] = tri[0].v[f], tri[0].v[f]
 	}
 	in_: [4]Corner = ---
@@ -938,26 +1016,25 @@ clip_near :: proc(c: ^Chunk, tri: ^[3]Corner, nf: int, flat: []u8, draw: int, cu
 			for f in 0 ..< nf {
 				o.v[f] = a.v[f] * (1 - t) + b.v[f] * t
 			}
-			for f in flat {
-				o.v[f] = a.v[f]
+			for j in keep.flat {
+				o.v[keep.from[j]] = a.v[keep.from[j]]
 			}
 			count += 1
 		}
 	}
 	for k in 1 ..< count - 1 {
-		emit(c, {in_[0].c, in_[k].c, in_[k + 1].c}, {&in_[0].v[0], &in_[k].v[0], &in_[k + 1].v[0]}, nf, flat, draw, curve, width, height, side, mirrored)
+		emit(c, {in_[0].c, in_[k].c, in_[k + 1].c}, {&in_[0].v[0], &in_[k].v[0], &in_[k + 1].v[0]}, keep, draw, width, height, side, mirrored)
 	}
 }
 
 // A clipped triangle to the screen, kept if it faces a drawn side and
-// reaches a row: its corners' `nf` floats each (`values`), divided by w
-// except the flat ones, the first corner's. Seen in a mirror, a front
-// face turns clockwise.
+// reaches a row: of its corners' records (`values`) the floats `keep`
+// keeps, divided by w except the flat ones, the first corner's. Seen in a
+// mirror, a front face turns clockwise.
 @(private = "file")
-emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, draw: int, curve: u32, width, height: int, side: Side, mirrored: bool) {
+emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, keep: ^Corner_Floats, draw: int, width, height: int, side: Side, mirrored: bool) {
 	t: Tri
 	t.draw = draw
-	t.curve = curve
 	for k in 0 ..< 3 {
 		clip := clip[k]
 		w := clip.w if abs(clip.w) > 1e-9 else 1e-9
@@ -985,17 +1062,18 @@ emit :: proc(c: ^Chunk, clip: [3]Vec4, values: [3][^]f32, nf: int, flat: []u8, d
 	if t.min_y >= t.max_y {
 		return
 	}
+	n := keep.count
 	at := len(c.values)
 	t.values = u32(at)
-	table_grow_non_zero(&c.values, at + 3 * nf)
+	table_grow_non_zero(&c.values, at + 3 * n)
 	out := c.values[at:]
 	for k, i in order {
 		iw := t.inv_w[i]
-		for f in 0 ..< nf {
-			out[i * nf + f] = values[k][f] * iw
+		for f, j in keep.from[:n] {
+			out[i * n + j] = values[k][f] * iw
 		}
-		for f in flat {
-			out[i * nf + int(f)] = values[0][f]
+		for j in keep.flat {
+			out[i * n + j] = values[0][keep.from[j]]
 		}
 	}
 	append(&c.tris, t)

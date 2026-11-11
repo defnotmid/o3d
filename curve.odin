@@ -62,7 +62,7 @@ Curve_Set :: struct {
 }
 
 // A `.Curves` quad's entry in its geometry's table: its set's first word,
-// and this bit for the even-odd rule (shaders/o3d.slang reads it too).
+// and this bit for the even-odd rule (shaders/o3d.frag reads it too).
 CURVE_EVEN_ODD :: u32(1) << 31
 
 // Contours' curves as a curve set, in their units: cubics become

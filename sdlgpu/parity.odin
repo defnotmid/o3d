@@ -1851,7 +1851,7 @@ depth_image_check :: proc(g: ^GPU) -> (err: string) {
 		defer o3d.software_destroy(&sw)
 		o3d.software_render(&sw, &a.scene, &a.geos, &a.shaders, int(w), int(h), nil, &a.textures)
 		want := make([]f16, w * h * 4, context.temp_allocator)
-		o3d.depth_image(a.scene.camera, o3d.software_depth(&sw), int(w), int(h), FAR, want)
+		o3d.software_depth_image(&sw, FAR, want)
 		differ, drawn := 0, 0
 		for i in 0 ..< int(w * h) {
 			gv, wv := got[i * 4:][:4], want[i * 4:][:4]

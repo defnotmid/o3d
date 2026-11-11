@@ -8,10 +8,10 @@ import "core:mem"
 // texture has derived maps, as a texture has mipmaps: a GGX radiance mip
 // pyramid and a cosine-convolved diffuse irradiance texture in `Textures`,
 // made by `environment_prefilter` (heavy: a host calls it at load, with the
-// texture), sampled identically by the software renderer (`shade`) and the
-// SDL_GPU renderer (`shaders/o3d.slang`). A render only reads them, so
-// that renders may share the tables: without them, `scene.environment`
-// lights nothing and a blurred `scene.background` shows sharp.
+// texture), sampled by both renderers' programs (shaders/o3d.frag). A
+// render only reads them, so that renders may share the tables: without
+// them, `scene.environment` lights nothing and a blurred
+// `scene.background` shows sharp.
 // `scene.background` is sampled along each pixel's unprojected camera ray,
 // from its sharp mip (blurriness = 0) or the prefiltered radiance pyramid.
 

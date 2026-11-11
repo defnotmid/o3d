@@ -340,16 +340,6 @@ sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: 
 	return linalg.lerp(c0, sample_level(t, &tex, l1, uv), frac)
 }
 
-// Bilinearly samples `id`'s top level at `uv`, repeating (as the GPU's
-// shadow pass reads alpha masks).
-sample_top :: proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2) -> Vec4 {
-	tex, ok := texture_get(t, id)
-	if !ok || tex.external {
-		return {1, 1, 1, 1}
-	}
-	return sample_level(t, &tex, 0, uv)
-}
-
 // Trilinearly samples `id` at explicit `lod`, repeating horizontally and,
 // with `clamp_v`, clamping vertically at the poles (equirectangular
 // environment and background maps); else repeating both ways.
@@ -450,18 +440,5 @@ sample_mip_hdr :: proc "contextless" (mip: [][4]f16, w, h: int, uv: Vec2, clamp_
 	top := linalg.lerp(from_halves(mip[row0 + ix0]), from_halves(mip[row0 + ix1]), wt.x)
 	bottom := linalg.lerp(from_halves(mip[row1 + ix0]), from_halves(mip[row1 + ix1]), wt.x)
 	return linalg.lerp(top, bottom, wt.y)
-}
-
-// Perturbs unit surface normal `n` by tangent-space `map_n` (-1..1) from screen
-// derivatives of world position (`dp_dx`, `dp_dy`) and uv (`duv_dx`, `duv_dy`),
-// as three.js's perturbNormal2Arb does (with screen y running down).
-perturb_normal :: proc "contextless" (n, dp_dx, dp_dy: Vec3, duv_dx, duv_dy: Vec2, map_n: Vec3) -> Vec3 {
-	q1perp := linalg.cross(n, dp_dy)
-	q0perp := linalg.cross(dp_dx, n)
-	t := q1perp * duv_dx.x + q0perp * duv_dy.x
-	b := q1perp * duv_dx.y + q0perp * duv_dy.y
-	det := max(linalg.length2(t), linalg.length2(b))
-	scale := linalg.inverse_sqrt(det) if det > 0 else 0
-	return linalg.normalize0(t * (map_n.x * scale) + b * (map_n.y * scale) + n * map_n.z)
 }
 

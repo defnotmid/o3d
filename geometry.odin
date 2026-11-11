@@ -104,8 +104,8 @@ active_morphs :: proc "contextless" (geo: Geometry, weights: []f32, out: ^[MAX_M
 }
 
 // Applies morph target deltas `active` to `v` (vertex `vi` within its
-// geometry) in local space, before skinning, the same math as `vs_main` and
-// `vs_skinned` in shaders/o3d.slang.
+// geometry) in local space, before skinning, the same math as
+// shaders/o3d.vert's.
 morph_vertex :: #force_inline proc "contextless" (v: Vertex, vi: u32, deltas: []Morph_Delta, active: []Active_Morph) -> (pos, norm: Vec3) {
 	pos, norm = v.position, v.normal
 	for a in active {
@@ -117,7 +117,7 @@ morph_vertex :: #force_inline proc "contextless" (v: Vertex, vi: u32, deltas: []
 }
 
 // Applies linear blend skinning from `joints` to `v` in the draw's local
-// space, the same math as `vs_skinned` in shaders/o3d.slang.
+// space, the same math as shaders/o3d.vert's `skin_matrix`.
 skin_vertex :: #force_inline proc "contextless" (v: Vertex, sv: Skin_Vertex, joints: []Mat4) -> (pos, norm: Vec3) {
 	last := u16(len(joints) - 1)
 	j0 := min(sv.joints[0], last)
