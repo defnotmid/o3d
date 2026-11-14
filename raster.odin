@@ -105,22 +105,16 @@ fill_band_bg :: proc(job: ^Frame_Job, s: ^Software, w: ^Worker, width, y0, y1: i
 	}
 }
 
-// What a fullscreen pass samples on the CPU: the background's map, or the
-// frame's depth (`depth`, `width x height`, nearest).
+// What the background pass samples on the CPU: its map.
 @(private = "file")
 Pass_Maps :: struct {
-	job:           ^Frame_Job,
-	background:    Texture_Id,
-	depth:         []f32,
-	width, height: int,
+	job:        ^Frame_Job,
+	background: Texture_Id,
 }
 
 @(private = "file")
 sample_pass_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
 	maps := (^Pass_Maps)(user)
-	if maps.depth != nil {
-		return nearest(maps.depth, maps.width, maps.height, uv)
-	}
 	return sample_lod(maps.job.textures, maps.background, {uv.x, 1 - uv.y}, lod, clamp_v = true)
 }
 
@@ -263,7 +257,7 @@ flush_depth_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 				buffers[i] = job.geos.curve_words[:]
 			}
 		}
-		oksl.run_fragment(&x.pipeline.fragment.program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], buffers = buffers[:]})
+		oksl.run_fragment(&x.pipeline.fragment.program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], channel_images = maps.images[:], buffers = buffers[:]})
 	}
 	smap := job.depth_target
 	for qi in 0 ..< nq {
@@ -458,7 +452,7 @@ flush_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 		}
 		// The light, and in the mirror's pass the run (o3d.frag's o_run).
 		targets := [2][][4]f32{q.targets[0][:], q.targets[1][:] if job.runs != nil else nil}
-		oksl.run_fragment(program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], buffers = buffers[:]}, q.masks[:])
+		oksl.run_fragment(program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], channel_images = maps.images[:], buffers = buffers[:]}, q.masks[:])
 	}
 	blend := blend_of(m)
 	// The mirror's runs: o3d's draws but particles (as the GPU's targets).
@@ -495,10 +489,12 @@ flush_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 // What an o3d variant's channels read for a draw, for its sampler.
 @(private = "file")
 Program_Maps :: struct {
-	job:   ^Frame_Job,
-	kinds: [oksl.SAMPLER_COUNT]Program_Map,
-	ids:   [oksl.SAMPLER_COUNT]Texture_Id,
-	sizes: [oksl.SAMPLER_COUNT][3]i32,
+	job:    ^Frame_Job,
+	kinds:  [oksl.SAMPLER_COUNT]Program_Map,
+	ids:    [oksl.SAMPLER_COUNT]Texture_Id,
+	sizes:  [oksl.SAMPLER_COUNT][3]i32,
+	// The shadow maps and the frame's depth, read nearest by oksl.
+	images: [oksl.SAMPLER_COUNT]oksl.Channel_Image,
 	// The frame map's layers: glass's frame behind, or the reflection's
 	// light and runs (levels as floats, laid out as `frame_tex`).
 	frame:     [2][][4]f32,
@@ -535,8 +531,11 @@ program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material) -> (map
 		case .Layer1:
 			id = m.layer_textures[1]
 		case .Shadow0, .Shadow1, .Shadow2, .Shadow3:
-			n := i32(job.shadows[int(k) - int(Program_Map.Shadow0)].size)
-			maps.sizes[c] = {n, n, 1}
+			i := int(k) - int(Program_Map.Shadow0)
+			n := job.shadows[i].size
+			if n > 0 && len(s.shadow_maps[i]) == n * n {
+				maps.images[c] = oksl.channel_image(s.shadow_maps[i], n, n)
+			}
 			continue
 		case .Frame:
 			// Glass: the frame before it (none through the mirror); a
@@ -553,7 +552,9 @@ program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material) -> (map
 			}
 			continue
 		case .Scene_Depth:
-			maps.sizes[c] = {i32(job.width), i32(job.height), 1}
+			if n := job.width * job.height; n > 0 && len(s.depth_map) >= n {
+				maps.images[c] = oksl.channel_image(s.depth_map[:n], job.width, job.height)
+			}
 			continue
 		case:
 			continue
@@ -568,20 +569,18 @@ program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material) -> (map
 	return
 }
 
-// An o3d variant's sampler: a material map repeating (white without one),
-// the environment clamped at its poles, a shadow map's or the frame's depth's
-// texel (nearest), the frame map's layer bilinearly between its levels. `uv`
-// runs down the image.
+// An o3d variant's sampler for the channels not bound to images: a
+// material map repeating (white without one), the environment clamped at
+// its poles, the frame map's layer bilinearly between its levels. `uv` runs
+// down the image.
 @(private = "file")
 sample_program_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
 	maps := (^Program_Maps)(user)
 	job := maps.job
 	#partial switch k := maps.kinds[channel]; k {
-	case .Shadow0, .Shadow1, .Shadow2, .Shadow3:
-		i := int(k) - int(Program_Map.Shadow0)
-		return nearest(job.s.shadow_maps[i], job.shadows[i].size, job.shadows[i].size, uv)
-	case .Scene_Depth:
-		return nearest(job.s.depth_map[:], job.width, job.height, uv)
+	case .Shadow0, .Shadow1, .Shadow2, .Shadow3, .Scene_Depth:
+		// Bound (program_maps) unless there is none.
+		return 0
 	case .Env_Radiance, .Env_Irradiance:
 		return sample_lod(job.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = true)
 	case .Frame:
@@ -600,18 +599,6 @@ sample_program_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, lay
 		return 1
 	}
 	return sample_lod(job.textures, id, {uv.x, 1 - uv.y}, lod, clamp_v = false)
-}
-
-// A `w x h` map's texel at uv (rows from the top), nearest, as the GPU's
-// shadow sampler reads it.
-@(private = "file")
-nearest :: #force_inline proc "contextless" (texels: []f32, w, h: int, uv: [2]f32) -> [4]f32 {
-	if w == 0 || h == 0 || len(texels) < w * h {
-		return 0
-	}
-	x := clamp(int(math.floor(uv.x * f32(w))), 0, w - 1)
-	y := clamp(int(math.floor(uv.y * f32(h))), 0, h - 1)
-	return texels[y * w + x]
 }
 
 // A ShaderMaterial draw's textures, for its sampler, and `shadowAt`'s
@@ -834,13 +821,12 @@ software_depth_image :: proc(s: ^Software, far: f32, out: []f16) {
 	block: [256]u8 = ---
 	block_fill(&x.block, {&params, nil}, block[:])
 	table_grow_non_zero(&s.bg_light, n)
-	maps := Pass_Maps{depth = s.depth_map[:n], width = s.width, height = s.height}
-	sizes := [1][3]i32{{i32(s.width), i32(s.height), 1}}
+	depth := [1]oksl.Channel_Image{oksl.channel_image(s.depth_map[:n], s.width, s.height)}
 	targets := [1][][4]f32{s.bg_light[:n]}
 	if len(s.workers) == 0 {
 		table_grow(&s.workers, 1)
 	}
-	oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], s.width, s.height, targets[:], &s.workers[0].vm, {sampler = sample_pass_map, user = &maps, channel_sizes = sizes[:]})
+	oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], s.width, s.height, targets[:], &s.workers[0].vm, {channel_images = depth[:]})
 	for v, i in s.bg_light[:n] {
 		out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = f16(v.r), f16(v.g), f16(v.b), f16(v.a)
 	}

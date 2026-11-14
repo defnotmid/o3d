@@ -575,7 +575,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 			bloom = {0, 0, bloom.gain, 0},
 		}
 		table_grow_non_zero(&s.post_light, width * height)
-		maps := #partial Post_Images{.Light = {f4 = frame, width = width, height = height}, .Bloom = {f4 = bloom.glow, width = bloom.width, height = bloom.height}}
+		maps := #partial Post_Images{.Light = oksl.channel_image(frame, width, height), .Bloom = oksl.channel_image(bloom.glow, bloom.width, bloom.height)}
 		out := [1][][4]f32{s.post_light[:width * height]}
 		post_run(&s.programs, &s.post_scratch, .Output, &block, maps, out[:], width, height, pool)
 		post_pixels(s.post_light[:width * height], s.pixels)

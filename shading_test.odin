@@ -155,7 +155,7 @@ tone_mapped :: proc(p: ^Programs, c: Vec3, mode: Tone_Mapping, exposure: f32) ->
 		frame = {1, 1, 0, 0},
 	}
 	maps := #partial Post_Images {
-		.Light = {f4 = light[:], width = 1, height = 1},
+		.Light = oksl.channel_image(light[:], 1, 1),
 	}
 	targets := [1][][4]f32{out[:]}
 	post_run(p, &scratches, .Output, &block, maps, targets[:], 1, 1, nil)

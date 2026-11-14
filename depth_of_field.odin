@@ -3,6 +3,8 @@ package o3d
 import "core:math"
 import "core:thread"
 
+import "deps:oksl"
+
 // Depth of field on the software renderer (`focus_of`), post.frag's focus
 // passes as the GPU runs them: once the frame's pass has resolved its light
 // into `Software.frame` (and blurred it along its motion), the largest blur
@@ -51,24 +53,24 @@ depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, 
 	table_grow_non_zero(&t.half, half_w * half_h)
 	table_grow_non_zero(&t.half_keys, half_w * half_h)
 	table_grow_non_zero(&s.post_light, n)
-	light := Post_Image{f4 = frame[:n], width = w, height = h}
-	depth := Post_Image{f1 = s.depth_map[:n], width = w, height = h}
+	light := oksl.channel_image(frame[:n], w, h)
+	depth := oksl.channel_image(s.depth_map[:n], w, h)
 	p, sc := &s.programs, &s.post_scratch
 	rows := [1][][4]f32{t.rows[:]}
 	post_run(p, sc, .Focus_Rows, &block, #partial {.Depth = depth}, rows[:], tiles_w, h, pool)
 	tiles := [1][][4]f32{t.tiles[:]}
-	post_run(p, sc, .Focus_Tiles, &block, #partial {.Tiles = {f4 = t.rows[:], width = tiles_w, height = h}}, tiles[:], tiles_w, tiles_h, pool)
+	post_run(p, sc, .Focus_Tiles, &block, #partial {.Tiles = oksl.channel_image(t.rows[:], tiles_w, h)}, tiles[:], tiles_w, tiles_h, pool)
 	near_tiles := [1][][4]f32{t.near[:]}
-	post_run(p, sc, .Focus_Near, &block, #partial {.Tiles = {f4 = t.tiles[:], width = tiles_w, height = tiles_h}}, near_tiles[:], tiles_w, tiles_h, pool)
+	post_run(p, sc, .Focus_Near, &block, #partial {.Tiles = oksl.channel_image(t.tiles[:], tiles_w, tiles_h)}, near_tiles[:], tiles_w, tiles_h, pool)
 	halves := [2][][4]f32{t.half[:], t.half_keys[:]}
 	post_run(p, sc, .Focus_Half, &block, #partial {.Light = light, .Depth = depth}, halves[:], half_w, half_h, pool)
 	maps := #partial Post_Images {
 		.Light     = light,
-		.Bloom     = {f4 = bloom.glow, width = bloom.width, height = bloom.height},
+		.Bloom     = oksl.channel_image(bloom.glow, bloom.width, bloom.height),
 		.Depth     = depth,
-		.Tiles     = {f4 = t.near[:], width = tiles_w, height = tiles_h},
-		.Half      = {f4 = t.half[:], width = half_w, height = half_h},
-		.Half_Keys = {f4 = t.half_keys[:], width = half_w, height = half_h},
+		.Tiles     = oksl.channel_image(t.near[:], tiles_w, tiles_h),
+		.Half      = oksl.channel_image(t.half[:], half_w, half_h),
+		.Half_Keys = oksl.channel_image(t.half_keys[:], half_w, half_h),
 	}
 	out := [1][][4]f32{s.post_light[:n]}
 	post_run(p, sc, .Focus_Gather, &block, maps, out[:], w, h, pool)

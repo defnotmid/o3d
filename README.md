@@ -933,9 +933,11 @@ needs), where its shapes would draw garbage.
   band shades a run of one draw's triangles as 2x2 quads (helper lanes for
   derivatives) in one oksl call, then writes them through coverage, depth
   and blending in triangle order; samplers read the draw's maps at the
-  level oksl picks from the quad's derivatives. The background, far plane
-  and post passes run their programs over the frame in bands of rows
-  (`post.odin`).
+  level oksl picks from the quad's derivatives; the shadow maps, the
+  frame's depth and the post passes' images are flat float images bound to
+  their channels (oksl's `channel_images`), which oksl reads itself. The
+  background, far plane and post passes run their programs over the frame
+  in bands of rows (`post.odin`).
 - Errors are values (`Error`); no threads of its own: the software
   renderer runs its phases on the caller's `thread.Pool`.
 
