@@ -65,10 +65,9 @@ motion_blur :: proc(t: ^Motion_Tables, color: [][4]f32, velocity: [][2]f32, near
 	tile := max(int(math.ceil(params.max_blur)), 1)
 	tiles_w, tiles_h := (width + tile - 1) / tile, (height + tile - 1) / tile
 	block := Post_Block {
-		tone        = {0, 0, f32(width), f32(height)},
 		frame       = {f32(width), f32(height), 0, 0},
 		motion      = {max(params.max_blur, 0), params.depth_scale if params.depth_scale > 0 else MOTION_DEPTH_SCALE, f32(tile), 0},
-		motion_size = {f32(width), f32(height), f32(tiles_w), f32(tiles_h)},
+		motion_size = {0, 0, f32(tiles_w), f32(tiles_h)},
 	}
 	table_grow_non_zero(&t.rows, tiles_w * height)
 	table_grow_non_zero(&t.tiles, tiles_w * tiles_h)

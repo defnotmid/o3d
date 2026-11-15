@@ -40,7 +40,7 @@ depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, 
 	near := camera.near if camera.near > 0 else 0.1
 	far := camera.far if camera.far > near else near * 1e4
 	block := Post_Block {
-		tone   = {f32(tone_mapping), tone_exposure if tone_exposure > 0 else 1, f32(w), f32(h)},
+		tone   = {f32(tone_mapping), tone_exposure if tone_exposure > 0 else 1, 0, 0},
 		lens   = {f.focus, f.blur, f.max_blur, math.ceil(f.max_blur / FOCUS_TILE)},
 		camera = {near, far, 1 if camera.orthographic else 0, 0},
 		frame  = {f32(w), f32(h), f32(tiles_w), f32(tiles_h)},

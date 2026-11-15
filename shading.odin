@@ -847,12 +847,11 @@ PASS_MAP_NAMES := [Pass_Map]string {
 @(private = "file")
 POST_GLSL :: #load("shaders/post.frag", string)
 
-// The post passes' uniforms: the tone mapping, exposure, the light
-// texture's size; the focus, blur and its most (pixels), the tiles a blur
+// The post passes' uniforms: the tone mapping and exposure; the focus, blur and its most (pixels), the tiles a blur
 // reaches; the camera's near, far, orthographic; the frame's size, its
 // tiles across and down; the motion blur's longest half streak, nearness's
-// scale and tiles' size, the velocity maps' size and motion tiles across and
-// down; bloom's threshold, sigma and gain, its Gaussian's axis and the size
+// scale and tiles' size, the motion tiles across and down (motion_size.zw);
+// bloom's threshold, sigma and gain, its Gaussian's axis and the size
 // of the level drawn (post.frag says more).
 Post_Block :: struct {
 	tone:        [4]f32,

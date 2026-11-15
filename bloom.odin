@@ -90,7 +90,6 @@ Bloom_Output :: struct {
 // as the GPU's `record_bloom`.
 bloom_run :: proc(t: ^Bloom_Tables, c: Bloom_Chain, frame: [][4]f32, width, height: int, programs: ^Programs, workers: ^[dynamic]Post_Worker, pool: ^thread.Pool) -> Bloom_Output {
 	block := Post_Block {
-		tone  = {0, 0, f32(width), f32(height)},
 		frame = {f32(width), f32(height), 0, 0},
 		bloom = {c.threshold, c.sigma, 0, 0},
 	}

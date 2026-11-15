@@ -960,11 +960,9 @@ record :: proc(g: ^GPU, job: ^Job, out: ^sdl.GPUTexture, cmd: ^sdl.GPUCommandBuf
 	// The frame's light blurred along its motion, then tone mapped and
 	// encoded (through its depth of field: its tables, then the gather as
 	// the output), then copied out.
-	job.post.tone.zw = {f32(g.capacity.x), f32(g.capacity.y)}
 	if job.motion {
-		record_motion_blur(g, &job.motion_tables, cmd, light, job.velocity_map, job.nearness_map, job.blurred, width, height, job.motion_params, g.capacity) or_return
+		record_motion_blur(g, &job.motion_tables, cmd, light, job.velocity_map, job.nearness_map, job.blurred, width, height, job.motion_params) or_return
 		light = job.blurred
-		job.post.tone.zw = {f32(job.blurred_size.x), f32(job.blurred_size.y)}
 	}
 	bloom: ^sdl.GPUTexture
 	job.post.bloom = {}

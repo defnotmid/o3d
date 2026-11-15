@@ -907,12 +907,11 @@ motion_tables_destroy :: proc(g: ^GPU, t: ^Motion_Tables) {
 }
 
 // The motion blur filter (o3d.motion_blur's) recorded into `cmd` on `g`'s
-// device: `color` (light, premultiplied, its texture `color_size`; 0: as
-// the frame) blurred along `velocity` (VELOCITY_FORMAT, pixels over the
+// device: `color` (light, premultiplied) blurred along `velocity` (VELOCITY_FORMAT, pixels over the
 // shutter's first half) and ordered by `nearness` (NEARNESS_FORMAT, larger
 // nearer), each `width x height` from the top left, into the same of `out`
 // (LIGHT_FORMAT, not `color`).
-record_motion_blur :: proc(g: ^GPU, t: ^Motion_Tables, cmd: ^sdl.GPUCommandBuffer, color, velocity, nearness, out: ^sdl.GPUTexture, width, height: u32, params: o3d.Motion_Blur, color_size := [2]u32{}) -> o3d.Error {
+record_motion_blur :: proc(g: ^GPU, t: ^Motion_Tables, cmd: ^sdl.GPUCommandBuffer, color, velocity, nearness, out: ^sdl.GPUTexture, width, height: u32, params: o3d.Motion_Blur) -> o3d.Error {
 	tile := u32(max(math.ceil(params.max_blur), 1))
 	tiles := [2]u32{(width + tile - 1) / tile, (height + tile - 1) / tile}
 	if t.size != {width, height, tile} || t.tiles == nil {
@@ -925,12 +924,10 @@ record_motion_blur :: proc(g: ^GPU, t: ^Motion_Tables, cmd: ^sdl.GPUCommandBuffe
 		}
 		t.size = {width, height, tile}
 	}
-	cs := color_size if color_size != {} else [2]u32{width, height}
 	u := o3d.Post_Block {
-		tone        = {0, 0, f32(cs.x), f32(cs.y)},
 		frame       = {f32(width), f32(height), 0, 0},
 		motion      = {max(params.max_blur, 0), params.depth_scale if params.depth_scale > 0 else o3d.MOTION_DEPTH_SCALE, f32(tile), 0},
-		motion_size = {f32(width), f32(height), f32(tiles.x), f32(tiles.y)},
+		motion_size = {0, 0, f32(tiles.x), f32(tiles.y)},
 	}
 	post_draw(g, cmd, .Motion_Rows, {t.rows}, {tiles.x, height}, #partial Post_Bindings{.Velocity = velocity}, &u)
 	post_draw(g, cmd, .Motion_Tiles, {t.tiles}, tiles, #partial Post_Bindings{.Motion = t.rows}, &u)

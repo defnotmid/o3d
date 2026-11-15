@@ -7,12 +7,12 @@
 // the output adds) and its depth of field (the largest blur per tile and
 // near it, a half-size copy, then the gather, written as the output).
 //
-// Post_Block's fields: u_tone: the tone mapping, exposure, the light
-// texture's size; u_lens: the focus, blur and its most (pixels), how many
+// Post_Block's fields: u_tone: the tone mapping, exposure (zw unused);
+// u_lens: the focus, blur and its most (pixels), how many
 // tiles a blur reaches; u_camera: near, far, orthographic; u_frame: its
 // size, its tiles across and down; u_motion: the longest half streak
-// (pixels), nearness's scale, the tiles' size (pixels); u_motion_size: the
-// velocity and nearness maps' size, the motion tiles across and down;
+// (pixels), nearness's scale, the tiles' size (pixels); u_motion_size: (xy
+// unused) the motion tiles across and down;
 // u_bloom: the threshold, the Gaussian's sigma on the chain's last level,
 // the share of it the output adds; u_bloom_size: the Gaussian's axis, the
 // size of the level drawn.
@@ -169,7 +169,7 @@ vec4 bloomed(vec4 light, ivec2 p) {
 
 #if defined(PASS_OUTPUT) || defined(PASS_BLOOM_BRIGHT) || defined(PASS_FOCUS_HALF) || defined(PASS_FOCUS_GATHER) || defined(PASS_MOTION_GATHER)
 vec4 light_at(ivec2 p) {
-	return textureLod(lightMap, (vec2(p) + 0.5) / u_tone.zw, 0.0);
+	return texelFetch(lightMap, p, 0);
 }
 #endif
 
@@ -177,7 +177,7 @@ vec4 light_at(ivec2 p) {
 // A pixel's key from its depth (reversed, 0 where nothing is): 1 / its
 // distance along the camera's axis (o3d.view_depth), 0 where nothing is.
 float key_at(ivec2 p) {
-	float d = textureLod(depthMap, (vec2(p) + 0.5) / u_frame.xy, 0.0).r;
+	float d = texelFetch(depthMap, p, 0).r;
 	if (d <= 0.0) {
 		return 0.0;
 	}
@@ -200,19 +200,19 @@ vec2 motion_cut(vec2 v) {
 }
 
 vec2 velocity_at(ivec2 p) {
-	return textureLod(velocityMap, (vec2(p) + 0.5) / u_motion_size.xy, 0.0).xy;
+	return texelFetch(velocityMap, p, 0).xy;
 }
 #endif
 
 #if defined(PASS_MOTION_AROUND) || defined(PASS_MOTION_GATHER)
 vec2 motion_tile(ivec2 t) {
-	return textureLod(motionMap, (vec2(t) + 0.5) / u_motion_size.zw, 0.0).xy;
+	return texelFetch(motionMap, t, 0).xy;
 }
 #endif
 
 #ifdef PASS_MOTION_GATHER
 float nearness_at(ivec2 p) {
-	return textureLod(nearnessMap, (vec2(p) + 0.5) / u_motion_size.xy, 0.0).r;
+	return texelFetch(nearnessMap, p, 0).r;
 }
 
 float motion_reach(float d, float l) {
@@ -282,7 +282,7 @@ void main() {
 	// A tile's: the largest of its rows'.
 	float m = 0.0;
 	for (int y = p.y * FOCUS_TILE; y < min((p.y + 1) * FOCUS_TILE, int(u_frame.y)); y++) {
-		m = max(m, textureLod(tileMap, (vec2(float(p.x), float(y)) + 0.5) / vec2(u_frame.z, u_frame.y), 0.0).r);
+		m = max(m, texelFetch(tileMap, ivec2(p.x, y), 0).r);
 	}
 	o_blur = m;
 #elif defined(PASS_FOCUS_NEAR)
@@ -292,7 +292,7 @@ void main() {
 	float m = 0.0;
 	for (int y = max(p.y - reach, 0); y < min(p.y + reach + 1, tiles.y); y++) {
 		for (int x = max(p.x - reach, 0); x < min(p.x + reach + 1, tiles.x); x++) {
-			m = max(m, textureLod(tileMap, (vec2(float(x), float(y)) + 0.5) / vec2(tiles), 0.0).r);
+			m = max(m, texelFetch(tileMap, ivec2(x, y), 0).r);
 		}
 	}
 	o_blur = m;
@@ -318,7 +318,7 @@ void main() {
 	// output.
 	ivec2 size = ivec2(u_frame.xy);
 	ivec2 half_size = (size + 1) / 2;
-	float reach = textureLod(tileMap, (vec2(p / FOCUS_TILE) + 0.5) / u_frame.zw, 0.0).r;
+	float reach = texelFetch(tileMap, p / FOCUS_TILE, 0).r;
 	vec4 sum = light_at(p);
 	if (reach >= 0.5) {
 		float centre_key = key_at(p);
@@ -336,9 +336,8 @@ void main() {
 				key = key_at(s);
 			} else {
 				ivec2 s = clamp(ivec2(floor((vec2(p) + 0.5 + o) * 0.5)), ivec2(0), half_size - 1);
-				vec2 uv = (vec2(s) + 0.5) / vec2(half_size);
-				light = textureLod(halfMap, uv, 0.0);
-				key = textureLod(halfKeyMap, uv, 0.0).r;
+				light = texelFetch(halfMap, s, 0);
+				key = texelFetch(halfKeyMap, s, 0).r;
 			}
 			float blur = focus_blur(key);
 			if (key < centre_key) {
@@ -369,7 +368,7 @@ void main() {
 	int k = int(u_motion.z);
 	vec2 m = vec2(0.0);
 	for (int y = p.y * k; y < min((p.y + 1) * k, int(u_frame.y)); y++) {
-		vec2 v = textureLod(motionMap, (vec2(float(p.x), float(y)) + 0.5) / vec2(u_motion_size.z, u_frame.y), 0.0).xy;
+		vec2 v = texelFetch(motionMap, ivec2(p.x, y), 0).xy;
 		if (dot(v, v) > dot(m, m)) {
 			m = v;
 		}
