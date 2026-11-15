@@ -88,7 +88,7 @@ Bloom_Output :: struct {
 
 // The chain over `frame` (`width x height` light): post.frag's bloom passes,
 // as the GPU's `record_bloom`.
-bloom_run :: proc(t: ^Bloom_Tables, c: Bloom_Chain, frame: [][4]f32, width, height: int, programs: ^Programs, scratches: ^[dynamic]oksl.Scratch, pool: ^thread.Pool) -> Bloom_Output {
+bloom_run :: proc(t: ^Bloom_Tables, c: Bloom_Chain, frame: [][4]f32, width, height: int, programs: ^Programs, workers: ^[dynamic]Post_Worker, pool: ^thread.Pool) -> Bloom_Output {
 	block := Post_Block {
 		tone  = {0, 0, f32(width), f32(height)},
 		frame = {f32(width), f32(height), 0, 0},
@@ -97,22 +97,22 @@ bloom_run :: proc(t: ^Bloom_Tables, c: Bloom_Chain, frame: [][4]f32, width, heig
 	w, h := bloom_level_size(width, height, 0)
 	table_grow_non_zero(&t.levels[0], w * h)
 	out := [1][][4]f32{t.levels[0][:w * h]}
-	post_run(programs, scratches, .Bloom_Bright, &block, #partial {.Light = oksl.channel_image(frame[:width * height], width, height)}, out[:], w, h, pool)
+	post_run(programs, workers, .Bloom_Bright, &block, #partial {.Light = oksl.channel_image(frame[:width * height], width, height)}, out[:], w, h, pool)
 	for k in 1 ..< c.levels {
 		from := oksl.channel_image(t.levels[k - 1][:w * h], w, h)
 		w, h = bloom_level_size(width, height, k)
 		table_grow_non_zero(&t.levels[k], w * h)
 		block.bloom_size = {0, 0, f32(w), f32(h)}
 		out = {t.levels[k][:w * h]}
-		post_run(programs, scratches, .Bloom_Down, &block, #partial {.Bloom = from}, out[:], w, h, pool)
+		post_run(programs, workers, .Bloom_Down, &block, #partial {.Bloom = from}, out[:], w, h, pool)
 	}
 	last := t.levels[c.levels - 1][:w * h]
 	table_grow_non_zero(&t.across, w * h)
 	block.bloom_size = {1, 0, f32(w), f32(h)}
 	out = {t.across[:w * h]}
-	post_run(programs, scratches, .Bloom_Blur, &block, #partial {.Bloom = oksl.channel_image(last, w, h)}, out[:], w, h, pool)
+	post_run(programs, workers, .Bloom_Blur, &block, #partial {.Bloom = oksl.channel_image(last, w, h)}, out[:], w, h, pool)
 	block.bloom_size = {0, 1, f32(w), f32(h)}
 	out = {last}
-	post_run(programs, scratches, .Bloom_Blur, &block, #partial {.Bloom = oksl.channel_image(t.across[:w * h], w, h)}, out[:], w, h, pool)
+	post_run(programs, workers, .Bloom_Blur, &block, #partial {.Bloom = oksl.channel_image(t.across[:w * h], w, h)}, out[:], w, h, pool)
 	return {last, w, h, c.gain}
 }

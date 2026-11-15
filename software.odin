@@ -39,6 +39,10 @@ SAMPLE_OFFSETS := [SAMPLES]Vec2{{0.375, 0.125}, {0.875, 0.375}, {0.125, 0.625}, 
 // The samples of a pixel a triangle covers.
 Sample_Mask :: bit_set[0 ..< SAMPLES; u8]
 BAND_ROWS :: 32
+// Rows a fullscreen pass writes into a thread's own buffer at a time, before
+// they are copied into the renderer's tables (oksl's batch height, as the
+// interpreter runs 8 x 8 batches): small, since every thread keeps one.
+STAGE_ROWS :: 8
 CHUNK_TRIS :: 8192
 // Quads shaded by one oksl call (a run of one draw's triangles).
 QUAD_BATCH :: 256
@@ -67,15 +71,9 @@ Software :: struct {
 	mirror_frame_block: Frame_Block,
 	// The frame's joint table (joint_table) and each draw's place in it.
 	joint_table:        [dynamic]Mat4,
-	// The fullscreen passes' light: the background's (and the depth image's),
-	// the depth pass's far plane's velocity and nearness; and the camera the
-	// last frame was drawn through.
-	bg_light:           [dynamic][4]f32,
-	// The post passes' last light (sRGB-encoded) and their scratch, one
-	// per worker (post.odin).
-	post_light:         [dynamic][4]f32,
-	post_scratch:       [dynamic]oksl.Scratch,
-	far_light:          [2][dynamic][4]f32,
+	// The post passes' working memory, one per thread (post.odin), and the
+	// camera the last frame was drawn through.
+	post_workers:       [dynamic]Post_Worker,
 	camera:             Camera,
 	joint_bases:        [dynamic][2]u32,
 	// ShaderMaterials' uniform blocks, through the camera and through the
@@ -175,14 +173,7 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.velocity_program_ids)
 	delete(s.material_blocks)
 	delete(s.joint_table)
-	delete(s.bg_light)
-	delete(s.post_light)
-	for &sc in s.post_scratch {
-		oksl.scratch_destroy(&sc)
-	}
-	delete(s.post_scratch)
-	delete(s.far_light[0])
-	delete(s.far_light[1])
+	post_workers_destroy(&s.post_workers)
 	delete(s.joint_bases)
 	shader_blocks_destroy(&s.blocks)
 	shader_blocks_destroy(&s.mirror_blocks)
@@ -276,6 +267,7 @@ Worker :: struct {
 	skinned:   [dynamic]Vertex, // posed chunk vertices for a skinned ShaderMaterial
 	opened:    [dynamic]Vertex, // and posed as at the shutter's opening (the depth pass's twins)
 	quads:     Quads,
+	rows:      [2][dynamic][4]f32, // STAGE_ROWS of a fullscreen pass (background, far plane, depth image)
 }
 
 // A batch of one draw's 2x2 quads for its fragment program: each quad's
@@ -306,6 +298,8 @@ worker_destroy :: proc(w: ^Worker) {
 	delete(w.values)
 	delete(w.skinned)
 	delete(w.opened)
+	delete(w.rows[0])
+	delete(w.rows[1])
 	q := &w.quads
 	delete(q.origin)
 	delete(q.helpers)
@@ -376,7 +370,6 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	// The fullscreen passes the bands run, compiled here (the bands only read
 	// them).
 	if bg_tex != 0 {
-		table_grow_non_zero(&s.bg_light, width * height)
 		pass_get(&s.programs, .Background)
 	}
 	if motion_of(active) {
@@ -487,8 +480,6 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		if moving {
 			table_grow_non_zero(&s.velocity, width * height)
 			table_grow_non_zero(&s.nearness, width * height)
-			table_grow_non_zero(&s.far_light[0], width * height)
-			table_grow_non_zero(&s.far_light[1], width * height)
 			job.velocity, job.nearness, job.camera = s.velocity[:width * height], s.nearness[:width * height], active.camera
 			job.opened_view_proj = op * ov
 			job.opened_far = job.opened_view_proj * linalg.inverse(proj * view)
@@ -563,7 +554,7 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	}
 	bloom: Bloom_Output
 	if chain, bloomed := bloom_of(active.bloom, width, height); bloomed {
-		bloom = bloom_run(&s.bloom, chain, frame, width, height, &s.programs, &s.post_scratch, pool)
+		bloom = bloom_run(&s.bloom, chain, frame, width, height, &s.programs, &s.post_workers, pool)
 	}
 	if focus, blurred := focus_of(active.camera, height); blurred {
 		depth_of_field(s, frame, focus, active.camera, active.tone_mapping, active.tone_mapping_exposure, bloom, pool)
@@ -574,11 +565,8 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 			frame = {f32(width), f32(height), 0, 0},
 			bloom = {0, 0, bloom.gain, 0},
 		}
-		table_grow_non_zero(&s.post_light, width * height)
 		maps := #partial Post_Images{.Light = oksl.channel_image(frame, width, height), .Bloom = oksl.channel_image(bloom.glow, bloom.width, bloom.height)}
-		out := [1][][4]f32{s.post_light[:width * height]}
-		post_run(&s.programs, &s.post_scratch, .Output, &block, maps, out[:], width, height, pool)
-		post_pixels(s.post_light[:width * height], s.pixels)
+		post_run_pixels(&s.programs, &s.post_workers, .Output, &block, maps, s.pixels, width, height, pool)
 	}
 	return s.pixels
 }

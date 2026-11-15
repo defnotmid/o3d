@@ -90,15 +90,19 @@ fill_band_bg :: proc(job: ^Frame_Job, s: ^Software, w: ^Worker, width, y0, y1: i
 	block_fill(&x.block, {&bb, nil}, block[:])
 	maps := Pass_Maps{job = job, background = job.bg_tex}
 	sizes := [1][3]i32{{i32(tex.width), i32(tex.height), 1}}
-	targets := [1][][4]f32{s.bg_light[:]}
-	oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], width, job.height, targets[:], &w.vm, {y = y0, w = width, h = y1 - y0, sampler = sample_pass_map, user = &maps, channel_sizes = sizes[:]})
-	for y in y0 ..< y1 {
-		for x in 0 ..< width {
-			base := (y * width + x) * SAMPLES
-			px := to_halves(s.bg_light[y * width + x])
-			for k in 0 ..< SAMPLES {
-				if s.depth[base + k] == 0 {
-					s.light[base + k] = px
+	table_grow_non_zero(&w.rows[0], width * STAGE_ROWS)
+	for r0 := y0; r0 < y1; r0 += STAGE_ROWS {
+		r1 := min(r0 + STAGE_ROWS, y1)
+		targets := [1][][4]f32{w.rows[0][:]}
+		oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], width, job.height, targets[:], &w.vm, {y = r0, w = width, h = r1 - r0, sampler = sample_pass_map, user = &maps, channel_sizes = sizes[:], region_targets = true})
+		for y in r0 ..< r1 {
+			for x in 0 ..< width {
+				base := (y * width + x) * SAMPLES
+				px := to_halves(w.rows[0][(y - r0) * width + x])
+				for k in 0 ..< SAMPLES {
+					if s.depth[base + k] == 0 {
+						s.light[base + k] = px
+					}
 				}
 			}
 		}
@@ -151,11 +155,17 @@ draw_depth_band :: proc(data: rawptr, band, wi: int) {
 		far := Far_Block{opened_far = job.opened_far, frame = {f32(size), f32(job.height), 0, 0}}
 		block: [256]u8 = ---
 		block_fill(&x.block, {&far, nil}, block[:])
-		targets := [3][][4]f32{nil, s.far_light[0][:], s.far_light[1][:]}
-		oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], size, job.height, targets[:], &s.workers[wi].vm, {y = y0, w = size, h = y1 - y0})
-		for i in y0 * size ..< y1 * size {
-			job.velocity[i] = s.far_light[0][i].xy
-			job.nearness[i] = s.far_light[1][i].x
+		w := &s.workers[wi]
+		table_grow_non_zero(&w.rows[0], size * STAGE_ROWS)
+		table_grow_non_zero(&w.rows[1], size * STAGE_ROWS)
+		for r0 := y0; r0 < y1; r0 += STAGE_ROWS {
+			n := size * (min(r0 + STAGE_ROWS, y1) - r0)
+			targets := [3][][4]f32{nil, w.rows[0][:n], w.rows[1][:n]}
+			oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], size, job.height, targets[:], &w.vm, {y = r0, w = size, h = n / size, region_targets = true})
+			for i in 0 ..< n {
+				job.velocity[r0 * size + i] = w.rows[0][i].xy
+				job.nearness[r0 * size + i] = w.rows[1][i].x
+			}
 		}
 	}
 	refs := s.band_tris[s.band_start[band]:s.band_start[band + 1]]
@@ -820,14 +830,19 @@ software_depth_image :: proc(s: ^Software, far: f32, out: []f16) {
 	params := Depth_Image_Block{params = {near, cam_far, far, 1 if c.orthographic else 0}, frame = {f32(s.width), f32(s.height), 0, 0}}
 	block: [256]u8 = ---
 	block_fill(&x.block, {&params, nil}, block[:])
-	table_grow_non_zero(&s.bg_light, n)
 	depth := [1]oksl.Channel_Image{oksl.channel_image(s.depth_map[:n], s.width, s.height)}
-	targets := [1][][4]f32{s.bg_light[:n]}
 	if len(s.workers) == 0 {
 		table_grow(&s.workers, 1)
 	}
-	oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], s.width, s.height, targets[:], &s.workers[0].vm, {channel_images = depth[:]})
-	for v, i in s.bg_light[:n] {
-		out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = f16(v.r), f16(v.g), f16(v.b), f16(v.a)
+	w := &s.workers[0]
+	for y0 := 0; y0 < s.height; y0 += STAGE_ROWS {
+		rows := min(STAGE_ROWS, s.height - y0)
+		table_grow_non_zero(&w.rows[0], s.width * rows)
+		targets := [1][][4]f32{w.rows[0][:s.width * rows]}
+		oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], s.width, s.height, targets[:], &w.vm, {y = y0, w = s.width, h = rows, channel_images = depth[:], region_targets = true})
+		for v, i in w.rows[0][:s.width * rows] {
+			o := (y0 * s.width + i) * 4
+			out[o], out[o + 1], out[o + 2], out[o + 3] = f16(v.r), f16(v.g), f16(v.b), f16(v.a)
+		}
 	}
 }

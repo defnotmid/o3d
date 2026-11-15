@@ -52,10 +52,9 @@ depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, 
 	table_grow_non_zero(&t.near, tiles_w * tiles_h)
 	table_grow_non_zero(&t.half, half_w * half_h)
 	table_grow_non_zero(&t.half_keys, half_w * half_h)
-	table_grow_non_zero(&s.post_light, n)
 	light := oksl.channel_image(frame[:n], w, h)
 	depth := oksl.channel_image(s.depth_map[:n], w, h)
-	p, sc := &s.programs, &s.post_scratch
+	p, sc := &s.programs, &s.post_workers
 	rows := [1][][4]f32{t.rows[:]}
 	post_run(p, sc, .Focus_Rows, &block, #partial {.Depth = depth}, rows[:], tiles_w, h, pool)
 	tiles := [1][][4]f32{t.tiles[:]}
@@ -72,7 +71,5 @@ depth_of_field :: proc(s: ^Software, frame: [][4]f32, f: Focus, camera: Camera, 
 		.Half      = oksl.channel_image(t.half[:], half_w, half_h),
 		.Half_Keys = oksl.channel_image(t.half_keys[:], half_w, half_h),
 	}
-	out := [1][][4]f32{s.post_light[:n]}
-	post_run(p, sc, .Focus_Gather, &block, maps, out[:], w, h, pool)
-	post_pixels(s.post_light[:n], s.pixels)
+	post_run_pixels(p, sc, .Focus_Gather, &block, maps, s.pixels, w, h, pool)
 }

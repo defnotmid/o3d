@@ -937,7 +937,11 @@ needs), where its shapes would draw garbage.
   frame's depth and the post passes' images are flat float images bound to
   their channels (oksl's `channel_images`), which oksl reads itself. The
   background, far plane and post passes run their programs over the frame
-  in bands of rows (`post.odin`).
+  in bands of rows (`post.odin`); a pass whose light goes straight into
+  the renderer's own tables (the background, the far plane's velocity and
+  nearness, the output's pixels) writes 8 rows at a time into its thread's
+  own small buffer (oksl's `region_targets`), so no frame-sized copy of it
+  is kept.
 - Errors are values (`Error`); no threads of its own: the software
   renderer runs its phases on the caller's `thread.Pool`.
 

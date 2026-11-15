@@ -32,7 +32,7 @@ Motion_Blur :: struct {
 Motion_Tables :: struct {
 	rows, tiles, around: [dynamic][4]f32,
 	programs:            Programs,
-	scratches:           [dynamic]oksl.Scratch,
+	workers:             [dynamic]Post_Worker,
 }
 
 motion_tables_destroy :: proc(t: ^Motion_Tables) {
@@ -40,10 +40,7 @@ motion_tables_destroy :: proc(t: ^Motion_Tables) {
 	delete(t.tiles)
 	delete(t.around)
 	programs_destroy(&t.programs)
-	for &sc in t.scratches {
-		oksl.scratch_destroy(&sc)
-	}
-	delete(t.scratches)
+	post_workers_destroy(&t.workers)
 	t^ = {}
 }
 
@@ -79,11 +76,11 @@ motion_blur :: proc(t: ^Motion_Tables, color: [][4]f32, velocity: [][2]f32, near
 	n := width * height
 	vel := oksl.channel_image(velocity[:n], width, height)
 	rows := [1][][4]f32{t.rows[:]}
-	post_run(&t.programs, &t.scratches, .Motion_Rows, &block, #partial {.Velocity = vel}, rows[:], tiles_w, height, pool)
+	post_run(&t.programs, &t.workers, .Motion_Rows, &block, #partial {.Velocity = vel}, rows[:], tiles_w, height, pool)
 	tiles := [1][][4]f32{t.tiles[:]}
-	post_run(&t.programs, &t.scratches, .Motion_Tiles, &block, #partial {.Motion = oksl.channel_image(t.rows[:], tiles_w, height)}, tiles[:], tiles_w, tiles_h, pool)
+	post_run(&t.programs, &t.workers, .Motion_Tiles, &block, #partial {.Motion = oksl.channel_image(t.rows[:], tiles_w, height)}, tiles[:], tiles_w, tiles_h, pool)
 	around := [1][][4]f32{t.around[:]}
-	post_run(&t.programs, &t.scratches, .Motion_Around, &block, #partial {.Motion = oksl.channel_image(t.tiles[:], tiles_w, tiles_h)}, around[:], tiles_w, tiles_h, pool)
+	post_run(&t.programs, &t.workers, .Motion_Around, &block, #partial {.Motion = oksl.channel_image(t.tiles[:], tiles_w, tiles_h)}, around[:], tiles_w, tiles_h, pool)
 	gathered := [1][][4]f32{out[:n]}
 	maps := #partial Post_Images {
 		.Light    = oksl.channel_image(color[:n], width, height),
@@ -91,5 +88,5 @@ motion_blur :: proc(t: ^Motion_Tables, color: [][4]f32, velocity: [][2]f32, near
 		.Nearness = oksl.channel_image(nearness[:n], width, height),
 		.Motion   = oksl.channel_image(t.around[:], tiles_w, tiles_h),
 	}
-	post_run(&t.programs, &t.scratches, .Motion_Gather, &block, maps, gathered[:], width, height, pool)
+	post_run(&t.programs, &t.workers, .Motion_Gather, &block, maps, gathered[:], width, height, pool)
 }

@@ -141,13 +141,8 @@ shade_fragment :: proc(p: ^Programs, m: ^Shading_Material, lights: []Shading_Lig
 // of full coverage, tone mapped by `mode` and `exposure`, its sRGB encoding
 // decoded.
 tone_mapped :: proc(p: ^Programs, c: Vec3, mode: Tone_Mapping, exposure: f32) -> Vec3 {
-	scratches: [dynamic]oksl.Scratch
-	defer {
-		for &sc in scratches {
-			oksl.scratch_destroy(&sc)
-		}
-		delete(scratches)
-	}
+	workers: [dynamic]Post_Worker
+	defer post_workers_destroy(&workers)
 	light := [1][4]f32{{c.r, c.g, c.b, 1}}
 	out: [1][4]f32
 	block := Post_Block {
@@ -158,6 +153,6 @@ tone_mapped :: proc(p: ^Programs, c: Vec3, mode: Tone_Mapping, exposure: f32) ->
 		.Light = oksl.channel_image(light[:], 1, 1),
 	}
 	targets := [1][][4]f32{out[:]}
-	post_run(p, &scratches, .Output, &block, maps, targets[:], 1, 1, nil)
+	post_run(p, &workers, .Output, &block, maps, targets[:], 1, 1, nil)
 	return {srgb_to_linear_exact(out[0].r), srgb_to_linear_exact(out[0].g), srgb_to_linear_exact(out[0].b)}
 }
