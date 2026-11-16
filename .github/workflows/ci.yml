@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Odin nightly o3d is developed against (same pin as onimite).
+  ODIN_VERSION: dev-2026-11a
+
+# o3d reads oksl (the shader compiler: o3d's shading is GLSL compiled at
+# load), ocurves (exact shapes' curves, and the curves.GLSL its shaders
+# include) and oicut (image decoding and PNG writing) through
+# `-collection:deps=..`, so the job checks them out side by side:
+#   $GITHUB_WORKSPACE/{o3d,oksl,ocurves,oicut}
+# All are pinned to the tags onimite builds o3d with. The core package (the
+# software renderer, which runs every shader in oksl) is tested with oksl's
+# JIT and with its interpreter; the SDL_GPU backend (sdlgpu/), the GPU
+# parity check (tools/gpu_check), the benchmark and the demo are
+# type-checked only, since hosted runners have no GPU and `odin check` needs
+# no SDL3 library. GPU parity is run by hand on Vulkan and Metal.
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: o3d
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: o3d
+      - uses: actions/checkout@v4
+        with:
+          repository: defnotmid/oksl
+          ref: v0.0.19
+          path: oksl
+      - uses: actions/checkout@v4
+        with:
+          repository: defnotmid/ocurves
+          ref: v0.0.17
+          path: ocurves
+      - uses: actions/checkout@v4
+        with:
+          repository: defnotmid/oicut
+          ref: v0.0.29
+          path: oicut
+
+      - name: Cache Odin
+        id: odin-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.odin
+          key: odin-${{ runner.os }}-${{ runner.arch }}-${{ env.ODIN_VERSION }}-v1
+
+      - name: Install Odin
+        if: steps.odin-cache.outputs.cache-hit != 'true'
+        run: |
+          case "$RUNNER_OS" in
+            Linux) asset="odin-linux-amd64-$ODIN_VERSION.tar.gz" ;;
+            macOS) asset="odin-macos-arm64-$ODIN_VERSION.tar.gz" ;;
+          esac
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/odin.tar.gz" \
+            "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/$asset"
+          mkdir -p ~/.odin
+          tar -xzf "$RUNNER_TEMP/odin.tar.gz" -C ~/.odin --strip-components=1
+
+      - name: Set up Odin
+        run: |
+          echo "$HOME/.odin" >> "$GITHUB_PATH"
+          echo "ODIN_ROOT=$HOME/.odin" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: |
+          mkdir -p build
+          odin test . -collection:deps=.. -vet -strict-style -out:build/o3d_test
+          # oksl's JIT is x86-64 only; on arm64 both runs take the interpreter.
+          odin test . -collection:deps=.. -vet -strict-style -define:OKSL_JIT=false -out:build/o3d_test_vm
+
+      - name: Check the SDL_GPU backend, gpu_check, bench and demo
+        run: |
+          odin check sdlgpu -collection:deps=.. -no-entry-point -vet -strict-style
+          odin check tools/gpu_check -collection:deps=.. -vet -strict-style
+          odin check bench -collection:deps=.. -vet -strict-style
+          odin check demo -collection:deps=.. -vet -strict-style
+          # The other desktop target's compile (Windows needs an SDK to check).
+          if [ "$RUNNER_OS" = Linux ]; then
+            odin check sdlgpu -collection:deps=.. -no-entry-point -target:darwin_arm64
+          fi

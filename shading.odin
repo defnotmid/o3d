@@ -484,8 +484,8 @@ write_uniforms :: proc(b: ^strings.Builder, parts: []typeid) {
 // layout is Odin's: 4-byte scalars, [4] vectors of them, Mat4, and arrays
 // of those 16- and 64-byte elements.
 @(private = "file")
-glsl_type :: proc(ti: ^runtime.Type_Info) -> (name: string, count: int) {
-	ti := runtime.type_info_base(ti)
+glsl_type :: proc(field: ^runtime.Type_Info) -> (name: string, count: int) {
+	ti := runtime.type_info_base(field)
 	#partial switch v in ti.variant {
 	case runtime.Type_Info_Float:
 		return "float", 0
