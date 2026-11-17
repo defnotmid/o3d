@@ -158,9 +158,9 @@ environment_prefilter :: proc(t: ^Textures, id: Texture_Id) -> (radiance, irradi
 @(private = "file")
 env_fetch :: #force_inline proc "contextless" (mip: []$T, w, h: int, uv: Vec2) -> Vec3 {
 	when T == [4]f16 {
-		return sample_mip_hdr(mip, w, h, uv, true).rgb
+		return sample_mip_hdr(mip, w, h, uv).rgb
 	} else {
-		return linear(sample_mip(mip, w, h, uv, true).rgb)
+		return linear(sample_mip(mip, w, h, uv).rgb)
 	}
 }
 

@@ -471,9 +471,8 @@ test_software_shadow :: proc(t: ^testing.T) {
 	testing.expectf(t, differ == 0, "%d bytes differ on a pool", differ)
 }
 
-// Textures build a full mipmap chain in one shared array and `sample` picks
-// the level from screen uv derivatives: magnified reads the fine checker,
-// minified reads the averaged top level.
+// Textures build a full mipmap chain in one shared array: level 0 keeps the
+// fine checker, the top level (1x1) its average.
 @(test)
 test_texture_mipmaps :: proc(t: ^testing.T) {
 	textures: Textures
@@ -490,18 +489,14 @@ test_texture_mipmaps :: proc(t: ^testing.T) {
 	id := texture_add(&textures, px[:], N, N)
 	tex, ok := texture_get(&textures, id)
 	testing.expect(t, ok && tex.levels == 5 && tex.texel_count == 16 * 16 + 8 * 8 + 4 * 4 + 2 * 2 + 1)
-	// Magnified (zero derivatives -> level 0): texel centres return 240 and 20.
-	c0 := sample(&textures, id, {0.5 / N, 1 - 0.5 / N}, {}, {})
-	c1 := sample(&textures, id, {1.5 / N, 1 - 0.5 / N}, {}, {})
-	testing.expectf(t, c0.r > 0.9 && c1.r < 0.1, "level 0 texels: %v, %v", c0, c1)
-	// Minified (1 uv unit per pixel -> level 4, 1x1 average ~ 130/255).
-	avg := sample(&textures, id, {0.25, 0.75}, {1, 0}, {0, 1})
-	testing.expectf(t, abs(avg.r - 130.0 / 255.0) < 0.02, "minified average: %v", avg)
+	c0, c1 := textures.texels[tex.mips[0]], textures.texels[tex.mips[0] + 1]
+	testing.expectf(t, c0.r == 240 && c1.r == 20, "level 0 texels: %v, %v", c0, c1)
+	avg := textures.texels[tex.mips[4]]
+	testing.expectf(t, abs(int(avg.r) - 130) <= 5, "the top level's average: %v", avg)
 }
 
-// An external texture (pixels bound on the GPU) has no texels: the software
-// renderer samples it white, draws its material as with no map, and makes no
-// environment maps from it; images added after it still sample their own.
+// An external texture (pixels bound on the GPU) has no texels and makes no
+// environment maps; images added after it keep their own.
 @(test)
 test_external_texture_software :: proc(t: ^testing.T) {
 	textures: Textures
@@ -511,9 +506,8 @@ test_external_texture_software :: proc(t: ^testing.T) {
 	img := texture_add(&textures, px[:], 1, 1)
 	tex, ok := texture_get(&textures, ext)
 	testing.expect(t, ok && tex.external && tex.levels == 0 && tex.width == 64 && tex.height == 32)
-	testing.expect(t, sample(&textures, ext, {0.3, 0.6}, {1, 0}, {0, 1}) == {1, 1, 1, 1})
-	testing.expect(t, sample_lod(&textures, ext, {0.3, 0.6}, 2) == {})
-	testing.expect(t, sample(&textures, img, {0.5, 0.5}, {}, {}).r > 0.7)
+	it, _ := texture_get(&textures, img)
+	testing.expect(t, textures.texels[it.first_texel] == px)
 	_, _, prefiltered := environment_prefilter(&textures, ext)
 	testing.expect(t, !prefiltered)
 
@@ -1572,9 +1566,6 @@ test_hdr_textures :: proc(t: ^testing.T) {
 	testing.expect_value(t, [3]f32{f32(top.r), f32(top.g), f32(top.b)}, [3]f32{1, 0.5, 0.25})
 	mip := textures.hdr_texels[tex.mips[1]]
 	testing.expect(t, abs(f32(mip.r) - (1 + 3 * 128) / 4.0) < 0.5, "the mip averages in float")
-	// Linear on reading: no sRGB decode.
-	c := sample_lod_linear(&textures, id, {0.25, 0.75}, 0)
-	testing.expect(t, abs(c.r - 1) < 1e-3 && abs(c.b - 0.25) < 1e-3, "the top-left texel, linear")
 
 	// An environment at 100 everywhere: its maps stay at 100.
 	EW, EH :: 16, 8
@@ -1588,8 +1579,8 @@ test_hdr_textures :: proc(t: ^testing.T) {
 	rt, _ := texture_get(&textures, rad)
 	it, _ := texture_get(&textures, irr)
 	testing.expect(t, rt.hdr && it.hdr, "HDR maps")
-	testing.expect(t, abs(sample_lod_linear(&textures, irr, {0.5, 0.5}, 0).g - 100) < 0.5, "irradiance 100")
-	testing.expect(t, abs(sample_lod_linear(&textures, rad, {0.3, 0.6}, 3).r - 100) < 0.5, "a rough radiance level 100")
+	testing.expect(t, abs(f32(textures.hdr_texels[it.mips[0] + 5].g) - 100) < 0.5, "irradiance 100")
+	testing.expect(t, abs(f32(textures.hdr_texels[rt.mips[3]].r) - 100) < 0.5, "a rough radiance level 100")
 }
 
 // A shadow-only material (three.js's ShadowMaterial) draws nothing where
@@ -3180,30 +3171,6 @@ test_ior_without_layers :: proc(t: ^testing.T) {
 	}
 	low, high := centre(&s, &scene, &g, 1.5), centre(&s, &scene, &g, 2.4)
 	testing.expectf(t, high > low + 10, "ior 2.4 %d, 1.5 %d", high, low)
-}
-
-// The transmission snapshot's mipmaps as the GPU's blit makes them: an odd
-// level spread over the whole level above (3 texels to 1: the middle one,
-// where a 2x2 box would average the first two), an even one boxed.
-@(test)
-test_snapshot_mips_blit :: proc(t: ^testing.T) {
-	textures: Textures
-	defer textures_destroy(&textures)
-	tex := texture_grow(&textures.hdr_texels, 3, 1)
-	tex.hdr = true
-	level := textures.hdr_texels[tex.mips[0]:][:3]
-	level[0], level[1], level[2] = {0, 0, 0, 1}, {1, 1, 1, 1}, {0, 0, 0, 1}
-	id := texture_finish(&textures, &tex, blit = true)
-	got, _ := texture_get(&textures, id)
-	testing.expect_value(t, f32(textures.hdr_texels[got.mips[1]].r), 1)
-
-	even := texture_grow(&textures.hdr_texels, 2, 1)
-	even.hdr = true
-	l0 := textures.hdr_texels[even.mips[0]:][:2]
-	l0[0], l0[1] = {0, 0, 0, 1}, {1, 1, 1, 1}
-	eid := texture_finish(&textures, &even, blit = true)
-	eg, _ := texture_get(&textures, eid)
-	testing.expect_value(t, f32(textures.hdr_texels[eg.mips[1]].r), 0.5)
 }
 
 // equirect_uv's fast arcs agree with atan2 and asin all round, the diagonals

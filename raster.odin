@@ -88,13 +88,14 @@ fill_band_bg :: proc(job: ^Frame_Job, s: ^Software, w: ^Worker, width, y0, y1: i
 	}
 	block: [256]u8 = ---
 	block_fill(&x.block, {&bb, nil}, block[:])
-	maps := Pass_Maps{job = job, background = job.bg_tex}
-	sizes := [1][3]i32{{i32(tex.width), i32(tex.height), 1}}
+	// Its map repeating around and clamped at its poles (none reads 0).
+	maps: [1]oksl.Channel_Image
+	maps[0], _ = texture_image(s, job.textures, job.bg_tex, {.Repeat, .Clamp}, &w.levels[0])
 	table_grow_non_zero(&w.rows[0], width * STAGE_ROWS)
 	for r0 := y0; r0 < y1; r0 += STAGE_ROWS {
 		r1 := min(r0 + STAGE_ROWS, y1)
 		targets := [1][][4]f32{w.rows[0][:]}
-		oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], width, job.height, targets[:], &w.vm, {y = r0, w = width, h = r1 - r0, sampler = sample_pass_map, user = &maps, channel_sizes = sizes[:], region_targets = true})
+		oksl.run_targets(&x.pipeline.fragment.program, block[:x.block.size], width, job.height, targets[:], &w.vm, {y = r0, w = width, h = r1 - r0, channel_images = maps[:], region_targets = true})
 		for y in r0 ..< r1 {
 			for x in 0 ..< width {
 				base := (y * width + x) * SAMPLES
@@ -107,19 +108,6 @@ fill_band_bg :: proc(job: ^Frame_Job, s: ^Software, w: ^Worker, width, y0, y1: i
 			}
 		}
 	}
-}
-
-// What the background pass samples on the CPU: its map.
-@(private = "file")
-Pass_Maps :: struct {
-	job:        ^Frame_Job,
-	background: Texture_Id,
-}
-
-@(private = "file")
-sample_pass_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
-	maps := (^Pass_Maps)(user)
-	return sample_lod(maps.job.textures, maps.background, {uv.x, 1 - uv.y}, lod, clamp_v = true)
 }
 
 // A pixel's light: its samples' averaged (premultiplied; alpha its
@@ -258,7 +246,7 @@ flush_depth_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 		x := &s.programs.list[job.programs[draw]]
 		quad_values(s, q, x.pipeline.vertex.varying_floats, &x.corners)
 		quads.varyings, quads.depth = q.values[:], q.depths[:]
-		maps := program_maps(job, x, m)
+		images := program_maps(job, x, m, &w.levels)
 		fb: [size_of(Material_Block) + size_of(Frame_Block)]u8 = ---
 		block_fill(&x.fragment, {&s.material_blocks[draw], job.frame_block}, fb[:])
 		buffers: [2][]u32
@@ -267,7 +255,7 @@ flush_depth_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 				buffers[i] = job.geos.curve_words[:]
 			}
 		}
-		oksl.run_fragment(&x.pipeline.fragment.program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], channel_images = maps.images[:], buffers = buffers[:]})
+		oksl.run_fragment(&x.pipeline.fragment.program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {channel_images = images[:], buffers = buffers[:]})
 	}
 	smap := job.depth_target
 	for qi in 0 ..< nq {
@@ -431,24 +419,11 @@ flush_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 		depth        = q.depths[:],
 	}
 	if straight {
-		maps := Shader_Maps{s = s, textures = job.textures, ids = m.shader_maps, shadow_channel = int(sh.shadow_channel)}
-		if job.shadow_count > 0 {
-			maps.shadow, maps.shadow_size = s.shadow_maps[0], job.shadows[0].size
-		}
-		sizes: [SHADER_MAPS][3]i32
-		for id, c in maps.ids {
-			if c == maps.shadow_channel {
-				sizes[c] = {i32(maps.shadow_size), i32(maps.shadow_size), 1}
-			} else if ext, bound := bound_external(s, job.textures, id); bound {
-				sizes[c] = {i32(ext.width), i32(ext.height), 1}
-			} else if tex, ok := texture_get(job.textures, id); ok && !tex.external {
-				sizes[c] = {i32(tex.width), i32(tex.height), 1}
-			}
-		}
+		images := shader_maps(job, sh, m, &w.levels)
 		targets := [1][][4]f32{q.targets[0][:]}
-		oksl.run_fragment(program, block(job.blocks, draw, .Fragment), quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_shader_map, user = &maps, channel_sizes = sizes[:]}, q.masks[:])
+		oksl.run_fragment(program, block(job.blocks, draw, .Fragment), quads, targets[:], q.shaded[:], &w.vm, {channel_images = images[:]}, q.masks[:])
 	} else {
-		maps := program_maps(job, x, m)
+		images := program_maps(job, x, m, &w.levels)
 		fb: [size_of(Material_Block) + size_of(Frame_Block)]u8 = ---
 		block_fill(&x.fragment, {&s.material_blocks[draw], job.frame_block}, fb[:])
 		buffers: [2][]u32
@@ -462,7 +437,7 @@ flush_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 		}
 		// The light, and in the mirror's pass the run (o3d.frag's o_run).
 		targets := [2][][4]f32{q.targets[0][:], q.targets[1][:] if job.runs != nil else nil}
-		oksl.run_fragment(program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {sampler = sample_program_map, user = &maps, channel_sizes = maps.sizes[:], channel_images = maps.images[:], buffers = buffers[:]}, q.masks[:])
+		oksl.run_fragment(program, fb[:x.fragment.size], quads, targets[:], q.shaded[:], &w.vm, {channel_images = images[:], buffers = buffers[:]}, q.masks[:])
 	}
 	blend := blend_of(m)
 	// The mirror's runs: o3d's draws but particles (as the GPU's targets).
@@ -496,25 +471,59 @@ flush_quads :: proc(job: ^Frame_Job, w: ^Worker, draw: int) {
 	clear(&q.tri)
 }
 
-// What an o3d variant's channels read for a draw, for its sampler.
+// What a material channel reads without a texture: white, as the GPU's
+// dummy texture.
 @(private = "file")
-Program_Maps :: struct {
-	job:    ^Frame_Job,
-	kinds:  [oksl.SAMPLER_COUNT]Program_Map,
-	ids:    [oksl.SAMPLER_COUNT]Texture_Id,
-	sizes:  [oksl.SAMPLER_COUNT][3]i32,
-	// The shadow maps and the frame's depth, read nearest by oksl.
-	images: [oksl.SAMPLER_COUNT]oksl.Channel_Image,
-	// The frame map's layers: glass's frame behind, or the reflection's
-	// light and runs (levels as floats, laid out as `frame_tex`).
-	frame:     [2][][4]f32,
-	frame_tex: ^Texture,
-}
+white_texel := [1][4]u8{{255, 255, 255, 255}}
 
 @(private = "file")
-program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material) -> (maps: Program_Maps) {
+white_image :: proc "contextless" () -> oksl.Channel_Image {
+	return {format = .Rgba8, pixels = slice.to_bytes(white_texel[:]), width = 1, height = 1}
+}
+
+// Texture `id` as oksl samples it, as the GPU's sampler: all its levels
+// (`levels` holds those above 0 and outlives the run), linearly, each axis
+// by `wrap` ({u, v}); an external one is the pixels the host bound to it,
+// level 0 only. 8-bit texels stay sRGB-encoded (the shading decodes them).
+// false: no texture, or an external one nothing is bound to.
+@(private = "file")
+texture_image :: proc "contextless" (s: ^Software, t: ^Textures, id: Texture_Id, wrap: [2]oksl.Channel_Wrap, levels: ^Image_Levels) -> (im: oksl.Channel_Image, ok: bool) {
+	tex := texture_get(t, id) or_return
+	im = {filter = .Linear, wrap = wrap}
+	if tex.external {
+		ext := bound_external(s, t, id) or_return
+		im.width, im.height = ext.width, ext.height
+		if ext.halves != nil {
+			im.format, im.pixels = .Rgba16f, slice.to_bytes(ext.halves)
+		} else {
+			im.format, im.pixels = .Rgba8, slice.to_bytes(ext.pixels)
+		}
+		return im, true
+	}
+	w, h := int(tex.width), int(tex.height)
+	im.width, im.height = w, h
+	for l in 1 ..< int(tex.levels) {
+		lw, lh := max(w >> uint(l), 1), max(h >> uint(l), 1)
+		levels[l - 1] = oksl.channel_level(t.hdr_texels[tex.mips[l]:][:lw * lh], lw, lh) if tex.hdr else oksl.channel_level(t.texels[tex.mips[l]:][:lw * lh], lw, lh)
+	}
+	im.levels = levels[:tex.levels - 1]
+	if tex.hdr {
+		im.format, im.pixels = .Rgba16f, slice.to_bytes(t.hdr_texels[tex.first_texel:][:w * h])
+	} else {
+		im.format, im.pixels = .Rgba8, slice.to_bytes(t.texels[tex.first_texel:][:w * h])
+	}
+	return im, true
+}
+
+// What an o3d variant's channels read for a draw, as bound images: its
+// material maps repeating (white without one), the environment repeating
+// around and clamped at its poles, the shadow maps and the frame's depth
+// nearest, the frame map (glass's frame behind, or the reflection) clamped;
+// an unbound one (no environment, shadow, depth or frame map) reads 0. The
+// textures' levels are in `levels` (the worker's).
+@(private = "file")
+program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material, levels: ^[oksl.SAMPLER_COUNT]Image_Levels) -> (images: [oksl.SAMPLER_COUNT]oksl.Channel_Image) {
 	s := job.s
-	maps.job, maps.kinds = job, x.maps
 	for k, c in x.maps {
 		id: Texture_Id
 		#partial switch k {
@@ -532,10 +541,11 @@ program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material) -> (map
 			id = m.ao_map
 		case .Alpha:
 			id = m.alpha_map
-		case .Env_Radiance:
-			id = job.env.radiance
-		case .Env_Irradiance:
-			id = job.env.irradiance
+		case .Env_Radiance, .Env_Irradiance:
+			// No environment reads 0, as unbound.
+			id = job.env.radiance if k == .Env_Radiance else job.env.irradiance
+			images[c], _ = texture_image(s, job.textures, id, {.Repeat, .Clamp}, &levels[c])
+			continue
 		case .Layer0:
 			id = m.layer_textures[0]
 		case .Layer1:
@@ -544,111 +554,54 @@ program_maps :: proc(job: ^Frame_Job, x: ^Program, m: ^Shading_Material) -> (map
 			i := int(k) - int(Program_Map.Shadow0)
 			n := job.shadows[i].size
 			if n > 0 && len(s.shadow_maps[i]) == n * n {
-				maps.images[c] = oksl.channel_image(s.shadow_maps[i], n, n)
+				images[c] = oksl.channel_image(s.shadow_maps[i], n, n)
 			}
 			continue
 		case .Frame:
-			// Glass: the frame before it (none through the mirror); a
-			// reflective draw: the reflection.
-			if .Transmission in m.flags {
-				if !job.mirrored && job.snapshot != nil {
-					maps.frame[0], maps.frame_tex = job.snapshot, &job.snapshot_tex
-				}
-			} else if job.reflection != nil && !job.mirrored {
-				maps.frame, maps.frame_tex = {job.reflection, job.reflection_runs}, &job.reflection_tex
-			}
-			if maps.frame_tex != nil {
-				maps.sizes[c] = {i32(maps.frame_tex.width), i32(maps.frame_tex.height), 2}
+			// Glass: the frame before it; a reflective draw: the reflection
+			// (none through the mirror).
+			if !job.mirrored {
+				images[c] = job.snapshot if .Transmission in m.flags else job.reflection
 			}
 			continue
 		case .Scene_Depth:
 			if n := job.width * job.height; n > 0 && len(s.depth_map) >= n {
-				maps.images[c] = oksl.channel_image(s.depth_map[:n], job.width, job.height)
+				images[c] = oksl.channel_image(s.depth_map[:n], job.width, job.height)
 			}
 			continue
 		case:
 			continue
 		}
-		maps.ids[c] = id
-		if ext, bound := bound_external(s, job.textures, id); bound {
-			maps.sizes[c] = {i32(ext.width), i32(ext.height), 1}
-		} else if tex, ok := texture_get(job.textures, id); ok && !tex.external {
-			maps.sizes[c] = {i32(tex.width), i32(tex.height), 1}
+		bound: bool
+		images[c], bound = texture_image(s, job.textures, id, {.Repeat, .Repeat}, &levels[c])
+		if !bound {
+			// No map, or an external one nothing is bound to: as no map.
+			images[c] = white_image()
 		}
 	}
 	return
 }
 
-// An o3d variant's sampler for the channels not bound to images: a
-// material map repeating (white without one), the environment clamped at
-// its poles, the frame map's layer bilinearly between its levels. `uv` runs
-// down the image.
+// A ShaderMaterial draw's channels as bound images: its textures repeating
+// (white without one), and `shadowAt`'s shadow map nearest; their levels in
+// `levels` (the worker's).
 @(private = "file")
-sample_program_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
-	maps := (^Program_Maps)(user)
-	job := maps.job
-	#partial switch k := maps.kinds[channel]; k {
-	case .Shadow0, .Shadow1, .Shadow2, .Shadow3, .Scene_Depth:
-		// Bound (program_maps) unless there is none.
-		return 0
-	case .Env_Radiance, .Env_Irradiance:
-		return sample_lod(job.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = true)
-	case .Frame:
-		texels := maps.frame[clamp(layer, 0, 1)]
-		if texels == nil {
-			return 0
+shader_maps :: proc(job: ^Frame_Job, sh: ^Shader, m: ^Shading_Material, levels: ^[oksl.SAMPLER_COUNT]Image_Levels) -> (images: [SHADER_MAPS]oksl.Channel_Image) {
+	s := job.s
+	for id, c in m.shader_maps {
+		if c == int(sh.shadow_channel) {
+			if n := job.shadows[0].size; job.shadow_count > 0 && len(s.shadow_maps[0]) == n * n {
+				images[c] = oksl.channel_image(s.shadow_maps[0], n, n)
+			}
+			continue
 		}
-		return frame_sample(texels, maps.frame_tex, uv, lod)
-	}
-	id := maps.ids[channel]
-	if ext, ok := bound_external(job.s, job.textures, id); ok {
-		return sample_external(ext, {uv.x, 1 - uv.y})
-	}
-	// No map, or an external one nothing is bound to: as no map.
-	if tex, ok := texture_get(job.textures, id); !ok || tex.external {
-		return 1
-	}
-	return sample_lod(job.textures, id, {uv.x, 1 - uv.y}, lod, clamp_v = false)
-}
-
-// A ShaderMaterial draw's textures, for its sampler, and `shadowAt`'s
-// shadow map (its channel; -1: none).
-@(private = "file")
-Shader_Maps :: struct {
-	s:              ^Software,
-	textures:       ^Textures,
-	ids:            [SHADER_MAPS]Texture_Id,
-	shadow_channel: int,
-	shadow:         []f32,
-	shadow_size:    int,
-}
-
-// oksl's sampler: a channel's texture at uv (running down the image, as
-// the prelude flips three.js's) and the level oksl picked, repeating as
-// the GPU's sampler; white without one.
-@(private = "file")
-sample_shader_map :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, _: int) -> [4]f32 {
-	maps := (^Shader_Maps)(user)
-	if channel < 0 || channel >= SHADER_MAPS {
-		return 1
-	}
-	if channel == maps.shadow_channel {
-		// The texel, rows from the top, nearest (the GPU's shadow sampler).
-		size := maps.shadow_size
-		if size == 0 || len(maps.shadow) < size * size {
-			return 0
+		bound: bool
+		images[c], bound = texture_image(s, job.textures, id, {.Repeat, .Repeat}, &levels[c])
+		if !bound {
+			images[c] = white_image()
 		}
-		x := clamp(int(math.floor(uv.x * f32(size))), 0, size - 1)
-		y := clamp(int(math.floor(uv.y * f32(size))), 0, size - 1)
-		return maps.shadow[y * size + x]
 	}
-	if _, ok := texture_get(maps.textures, maps.ids[channel]); !ok {
-		return 1
-	}
-	if ext, ok := bound_external(maps.s, maps.textures, maps.ids[channel]); ok {
-		return sample_external(ext, {uv.x, 1 - uv.y})
-	}
-	return sample_lod(maps.textures, maps.ids[channel], {uv.x, 1 - uv.y}, lod, clamp_v = false)
+	return
 }
 
 @(private = "file")
@@ -801,15 +754,6 @@ bound_external :: #force_inline proc "contextless" (s: ^Software, textures: ^Tex
 	}
 	tex, ok := texture_get(textures, id)
 	return s.externals[id - 1], ok && tex.external
-}
-
-// An external texture's pixels at `uv`, bilinear at their level 0.
-@(private = "file")
-sample_external :: #force_inline proc "contextless" (ext: Software_External, uv: Vec2) -> Vec4 {
-	if ext.halves != nil {
-		return sample_mip_hdr(ext.halves, ext.width, ext.height, uv)
-	}
-	return sample_mip(ext.pixels, ext.width, ext.height, uv)
 }
 
 

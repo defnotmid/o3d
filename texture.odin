@@ -1,6 +1,5 @@
 package o3d
 
-import "core:math"
 import "core:math/linalg"
 import "core:mem"
 import "core:os"
@@ -163,13 +162,11 @@ texture_grow :: proc(table: ^[dynamic]$T, width, height: int) -> Texture {
 
 // Downsamples level 0 of a grown texture into its mip chain and lists it.
 @(private)
-texture_finish :: proc(t: ^Textures, tex: ^Texture, blit := false) -> Texture_Id {
+texture_finish :: proc(t: ^Textures, tex: ^Texture) -> Texture_Id {
 	sw, sh := int(tex.width), int(tex.height)
 	for l in 1 ..< int(tex.levels) {
 		dw, dh := max(sw >> 1, 1), max(sh >> 1, 1)
-		if tex.hdr && blit {
-			downsample_mip_hdr_blit(t.hdr_texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.hdr_texels[tex.mips[l]:][:dw * dh], dw, dh)
-		} else if tex.hdr {
+		if tex.hdr {
 			downsample_mip_hdr(t.hdr_texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.hdr_texels[tex.mips[l]:][:dw * dh], dw, dh)
 		} else {
 			downsample_mip(t.texels[tex.mips[l - 1]:][:sw * sh], sw, sh, t.texels[tex.mips[l]:][:dw * dh], dw, dh)
@@ -278,116 +275,16 @@ downsample_mip_hdr :: proc "contextless" (src: [][4]f16, sw, sh: int, dst: [][4]
 	}
 }
 
-// An HDR level downsampled as a GPU's linear blit does (SDL's
-// GenerateMipmaps): each texel bilinear at its centre scaled to the level
-// above, 8-bit subtexel weights; the 2x2 box for even sizes, odd ones
-// spread over the whole level rather than dropping its last row.
-@(private = "file")
-downsample_mip_hdr_blit :: proc "contextless" (src: [][4]f16, sw, sh: int, dst: [][4]f16, dw, dh: int) #no_bounds_check {
-	tap :: #force_inline proc "contextless" (d, sn, dn: int) -> (i0, i1: int, w: f32) {
-		p := (f32(d) + 0.5) * f32(sn) / f32(dn) - 0.5
-		f := math.floor(p)
-		w = math.round((p - f) * BILINEAR_SCALE) / BILINEAR_SCALE
-		i := int(f)
-		return clamp(i, 0, sn - 1), clamp(i + 1, 0, sn - 1), w
-	}
-	for y in 0 ..< dh {
-		y0, y1, wy := tap(y, sh, dh)
-		for x in 0 ..< dw {
-			x0, x1, wx := tap(x, sw, dw)
-			top := linalg.lerp(from_halves(src[y0 * sw + x0]), from_halves(src[y0 * sw + x1]), wx)
-			bottom := linalg.lerp(from_halves(src[y1 * sw + x0]), from_halves(src[y1 * sw + x1]), wx)
-			dst[y * dw + x] = to_halves(linalg.lerp(top, bottom, wy))
-		}
-	}
-}
-
-// One level of a texture, bilinearly: an 8-bit texture's raw (sRGB-encoded)
-// values, an HDR one's linear ones.
-@(private)
-sample_level :: #force_inline proc "contextless" (t: ^Textures, tex: ^Texture, l: int, uv: Vec2, clamp_v := false) -> Vec4 {
-	w, h := int(max(tex.width >> u32(l), 1)), int(max(tex.height >> u32(l), 1))
-	if tex.hdr {
-		return sample_mip_hdr(t.hdr_texels[tex.mips[l]:], w, h, uv, clamp_v)
-	}
-	return sample_mip(t.texels[tex.mips[l]:], w, h, uv, clamp_v)
-}
-
-// Trilinearly samples `id` at `uv` (repeating; v = 1 is row 0, the top of the
-// image, matching three.js's flipY and the primitive uvs) with mip level
-// chosen from screen derivatives `duv_dx` and `duv_dy` as the GPU does.
-sample :: proc "contextless" (t: ^Textures, id: Texture_Id, uv, duv_dx, duv_dy: Vec2) -> Vec4 {
-	tex, ok := texture_get(t, id)
-	if !ok || tex.external {
-		return {1, 1, 1, 1}
-	}
-	if tex.levels <= 1 {
-		return sample_level(t, &tex, 0, uv)
-	}
-	size := Vec2{f32(tex.width), f32(tex.height)}
-	rho2 := max(linalg.length2(duv_dx * size), linalg.length2(duv_dy * size))
-	if rho2 <= 1 {
-		return sample_level(t, &tex, 0, uv)
-	}
-	lod := clamp(0.5 * log2_fast(rho2), 0, f32(tex.levels - 1))
-	l0 := int(lod)
-	l1 := min(l0 + 1, int(tex.levels) - 1)
-	frac := lod - f32(l0)
-	c0 := sample_level(t, &tex, l0, uv)
-	if l0 == l1 || frac <= 0 {
-		return c0
-	}
-	return linalg.lerp(c0, sample_level(t, &tex, l1, uv), frac)
-}
-
-// Trilinearly samples `id` at explicit `lod`, repeating horizontally and,
-// with `clamp_v`, clamping vertically at the poles (equirectangular
-// environment and background maps); else repeating both ways.
-sample_lod :: #force_inline proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32, clamp_v := true) -> Vec4 {
-	tex, ok := texture_get(t, id)
-	if !ok || tex.external {
-		return {0, 0, 0, 0}
-	}
-	return sample_tex_lod(t, &tex, uv, lod, clamp_v)
-}
-
-@(private = "file")
-sample_tex_lod :: #force_inline proc "contextless" (t: ^Textures, tex: ^Texture, uv: Vec2, lod: f32, clamp_v: bool) -> Vec4 {
-	// Not above 0 (magnified, or -inf or NaN where uv does not change).
-	if tex.levels <= 1 || !(lod > 0) {
-		return sample_level(t, tex, 0, uv, clamp_v)
-	}
-	lod_clamped := clamp(lod, 0, f32(tex.levels - 1))
-	l0 := int(lod_clamped)
-	l1 := min(l0 + 1, int(tex.levels) - 1)
-	frac := lod_clamped - f32(l0)
-	c0 := sample_level(t, tex, l0, uv, clamp_v)
-	if l0 == l1 || frac <= 0 {
-		return c0
-	}
-	return linalg.lerp(c0, sample_level(t, tex, l1, uv, clamp_v), frac)
-}
-
-// `sample_lod`'s colour, linear: an HDR texture's as it is, an 8-bit one's
-// decoded from sRGB (an environment's or background's either way).
-sample_lod_linear :: #force_inline proc "contextless" (t: ^Textures, id: Texture_Id, uv: Vec2, lod: f32) -> Vec3 {
-	tex, ok := texture_get(t, id)
-	if !ok || tex.external {
-		return {}
-	}
-	c := sample_tex_lod(t, &tex, uv, lod, true)
-	return c.rgb if tex.hdr else linear(c.rgb)
-}
-
 BILINEAR_SCALE :: 256
 TEXEL_NORM :: 1.0 / (f32(BILINEAR_SCALE * BILINEAR_SCALE) * 255.0)
 
-// Bilinearly samples one mip level with 8-bit fixed-point subtexel weights
-// (matching GPU hardware filtering). When `clamp_v` is true, u wraps and v
-// clamps to edge (equirectangular poles).
+// Bilinearly samples one level of an equirectangular map (v = 1 is row 0)
+// with 8-bit fixed-point subtexel weights, as GPU filtering: u wrapping, v
+// clamped at the poles. The environment's bake reads its source with it;
+// the renderers' shading samples through oksl and the GPU.
 @(private)
-sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2, clamp_v := false) -> Vec4 #no_bounds_check {
-	tc := Vec2{linalg.fract(uv.x), clamp(1 - uv.y, 0, 1) if clamp_v else linalg.fract(1 - uv.y)}
+sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2) -> Vec4 #no_bounds_check {
+	tc := Vec2{linalg.fract(uv.x), clamp(1 - uv.y, 0, 1)}
 	st := tc * Vec2{f32(w), f32(h)} - 0.5
 	f0 := linalg.floor(st)
 	p0 := linalg.array_cast(f0, int)
@@ -400,14 +297,7 @@ sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2, clamp_v := 
 
 	ix0 := p0.x + w if p0.x < 0 else (p0.x - w if p0.x >= w else p0.x)
 	ix1 := 0 if ix0 + 1 >= w else ix0 + 1
-	iy0, iy1: int
-	if clamp_v {
-		iy0 = clamp(p0.y, 0, h - 1)
-		iy1 = clamp(p0.y + 1, 0, h - 1)
-	} else {
-		iy0 = p0.y + h if p0.y < 0 else (p0.y - h if p0.y >= h else p0.y)
-		iy1 = 0 if iy0 + 1 >= h else iy0 + 1
-	}
+	iy0, iy1 := clamp(p0.y, 0, h - 1), clamp(p0.y + 1, 0, h - 1)
 
 	row0, row1 := iy0 * w, iy1 * w
 	c00 := linalg.array_cast(mip[row0 + ix0], i32)
@@ -420,22 +310,15 @@ sample_mip :: proc "contextless" (mip: [][4]u8, w, h: int, uv: Vec2, clamp_v := 
 // `sample_mip` for an HDR level: the same 8-bit subtexel weights (as GPU
 // filtering), linear values.
 @(private)
-sample_mip_hdr :: proc "contextless" (mip: [][4]f16, w, h: int, uv: Vec2, clamp_v := false) -> Vec4 #no_bounds_check {
-	tc := Vec2{linalg.fract(uv.x), clamp(1 - uv.y, 0, 1) if clamp_v else linalg.fract(1 - uv.y)}
+sample_mip_hdr :: proc "contextless" (mip: [][4]f16, w, h: int, uv: Vec2) -> Vec4 #no_bounds_check {
+	tc := Vec2{linalg.fract(uv.x), clamp(1 - uv.y, 0, 1)}
 	st := tc * Vec2{f32(w), f32(h)} - 0.5
 	f0 := linalg.floor(st)
 	p0 := linalg.array_cast(f0, int)
 	wt := linalg.array_cast(linalg.clamp(linalg.array_cast(linalg.round((st - f0) * f32(BILINEAR_SCALE)), i32), 0, BILINEAR_SCALE), f32) * (1.0 / BILINEAR_SCALE)
 	ix0 := p0.x + w if p0.x < 0 else (p0.x - w if p0.x >= w else p0.x)
 	ix1 := 0 if ix0 + 1 >= w else ix0 + 1
-	iy0, iy1: int
-	if clamp_v {
-		iy0 = clamp(p0.y, 0, h - 1)
-		iy1 = clamp(p0.y + 1, 0, h - 1)
-	} else {
-		iy0 = p0.y + h if p0.y < 0 else (p0.y - h if p0.y >= h else p0.y)
-		iy1 = 0 if iy0 + 1 >= h else iy0 + 1
-	}
+	iy0, iy1 := clamp(p0.y, 0, h - 1), clamp(p0.y + 1, 0, h - 1)
 	row0, row1 := iy0 * w, iy1 * w
 	top := linalg.lerp(from_halves(mip[row0 + ix0]), from_halves(mip[row0 + ix1]), wt.x)
 	bottom := linalg.lerp(from_halves(mip[row1 + ix0]), from_halves(mip[row1 + ix1]), wt.x)

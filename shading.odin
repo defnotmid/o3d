@@ -47,7 +47,7 @@ float srgb_to_linear(float c) {
 vec3 linear_rgb(vec3 c) {
 	return vec3(srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b));
 }
-// A direction's equirectangular coordinates, top-down (sample_mip's).
+// A direction's equirectangular coordinates, top-down (v = 0 the first row).
 vec2 equirect_uv(vec3 d) {
 	float u = atan(d.z, d.x) * (0.5 / PI) + 0.5;
 	float v = 0.5 - asin(clamp(d.y, -1.0, 1.0)) * (1.0 / PI);

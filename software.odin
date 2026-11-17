@@ -105,24 +105,18 @@ Software :: struct {
 	externals:     [dynamic]Software_External,
 	// The frame drawn before its transmissive draws, for them to see
 	// through: its light resolved by each band into level 0 of
-	// `snapshot_tex` (texture 1), mipmapped as the GPU's, then its levels
-	// read as floats (`snapshot_light`).
-	snapshot:      Textures,
-	snapshot_tex:  Texture,
-	snapshot_light: [dynamic][4]f32,
+	// `snapshot_texels`, mipmapped as the GPU's (frame_map).
+	snapshot_texels:   [dynamic][4]f16,
+	snapshot_levels:   Image_Levels,
 	// The scene mirrored in its reflector (`mirror_view`), drawn first in
 	// the same samples at its size, with each sample's run (o3d.frag's
 	// `mirror_run_of`) premultiplied by its coverage, and the coverage,
-	// blended as the light (`mirror_runs`): its light resolved into level 0 of `reflection_tex`
-	// (texture 1), its runs into the same levels of texture 2 (red and
-	// green, alpha 1, as the GPU's second layer), both mipmapped as the
-	// GPU's, then their levels read as floats (`reflection_light`,
-	// `reflection_runs`: converted once, read a dozen texels a pixel) by the
-	// draws that show it.
-	reflection:    Textures,
-	reflection_tex: Texture,
-	reflection_light: [dynamic][4]f32,
-	reflection_runs: [dynamic][4]f32,
+	// blended as the light (`mirror_runs`): its light resolved into level 0's
+	// layer 0 of `reflection_texels`, its runs into layer 1 (red and green,
+	// alpha 1), both mipmapped as the GPU's (frame_map), for the draws that
+	// show it.
+	reflection_texels: [dynamic][4]f16,
+	reflection_levels: Image_Levels,
 	mirror_runs:   [dynamic][2]f16,
 	// With depth of field or motion blur: the frame's light per pixel,
 	// resolved by the bands, and the gather's tables (depth_of_field.odin).
@@ -151,11 +145,8 @@ software_destroy :: proc(s: ^Software) {
 	delete(s.light)
 	delete(s.depth)
 	delete(s.own)
-	textures_destroy(&s.snapshot)
-	delete(s.snapshot_light)
-	textures_destroy(&s.reflection)
-	delete(s.reflection_light)
-	delete(s.reflection_runs)
+	delete(s.snapshot_texels)
+	delete(s.reflection_texels)
 	delete(s.mirror_runs)
 	delete(s.frame)
 	focus_tables_destroy(&s.focus)
@@ -268,7 +259,13 @@ Worker :: struct {
 	opened:    [dynamic]Vertex, // and posed as at the shutter's opening (the depth pass's twins)
 	quads:     Quads,
 	rows:      [2][dynamic][4]f32, // STAGE_ROWS of a fullscreen pass (background, far plane, depth image)
+	levels:    [oksl.SAMPLER_COUNT]Image_Levels, // a draw's bound textures' levels above 0, by channel
 }
+
+// The levels above 0 a bound texture's image points at (raster.odin's
+// texture_image), filled per draw.
+@(private)
+Image_Levels :: [MAX_MIPS - 1]oksl.Channel_Level
 
 // A batch of one draw's 2x2 quads for its fragment program: each quad's
 // top-left pixel, helper lanes, facing, its lanes' covered samples and its
@@ -496,29 +493,20 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 		// plane clipped, cleared to nothing (the environment shows there).
 		mirror_order(active, geos, shaders, s.materials[:], mv.view, proj, &s.order, &s.expanded)
 		shader_blocks(active, shaders, mv.view, proj, shadows[:ns], &s.mirror_blocks, mv.eye)
-		clear(&s.reflection.list)
-		clear(&s.reflection.hdr_texels)
-		s.reflection_tex = texture_grow(&s.reflection.hdr_texels, mv.width, mv.height)
-		s.reflection_tex.hdr = true
-		s.reflection_tex.levels = u32(mv.levels)
-		runs_tex := texture_grow(&s.reflection.hdr_texels, mv.width, mv.height)
-		runs_tex.hdr = true
-		runs_tex.levels = u32(mv.levels)
+		reflection := frame_map(&s.reflection_texels, &s.reflection_levels, mv.width, mv.height, mv.levels, 2)
+		n := mv.width * mv.height
 		table_grow_non_zero(&s.mirror_runs, mv.width * mv.height * SAMPLES)
 		mj := job
 		mj.view_proj, mj.width, mj.height, mj.depth_only = proj * mv.view, mv.width, mv.height, false
 		mj.eye, mj.mirrored, mj.clip, mj.blocks = mv.eye, true, mv.plane, &s.mirror_blocks
 		mj.programs, mj.frame_block = s.mirror_program_ids[:len(active.draws)], &s.mirror_frame_block
 		mj.bg_tex, mj.clear = 0, {}
-		mj.capture_into = s.reflection.hdr_texels[s.reflection_tex.mips[0]:][:mv.width * mv.height]
+		mj.capture_into = s.reflection_texels[:n]
 		mj.runs = s.mirror_runs[:mv.width * mv.height * SAMPLES]
-		mj.capture_runs = s.reflection.hdr_texels[runs_tex.mips[0]:][:mv.width * mv.height]
+		mj.capture_runs = s.reflection_texels[n:][:n]
 		run_pass(s, active, geos, &mj, pool, draw_band, 0, len(s.order))
-		texture_finish(&s.reflection, &s.reflection_tex, blit = true)
-		texture_finish(&s.reflection, &runs_tex, blit = true)
-		job.reflection, job.reflection_tex = light_levels(&s.reflection, &s.reflection_tex, &s.reflection_light), s.reflection_tex
-		job.reflection_runs = light_levels(&s.reflection, &runs_tex, &s.reflection_runs)
-		job.reflection_last, job.reflection_focal = f32(mv.levels - 1), mv.focal
+		oksl.channel_build_levels(reflection)
+		job.reflection = reflection
 	}
 	snapshot := draw_order(active, geos, shaders, view, proj, &s.order, &s.expanded)
 	job.view_proj, job.width, job.height, job.depth_only = proj * view, width, height, false
@@ -528,16 +516,13 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 	if snapshot < len(s.order) {
 		// The frame so far, its light resolved and mipmapped, for the
 		// transmissive draws after it.
-		clear(&s.snapshot.list)
-		clear(&s.snapshot.hdr_texels)
-		s.snapshot_tex = texture_grow(&s.snapshot.hdr_texels, width, height)
-		s.snapshot_tex.hdr = true
-		job.capture_into = s.snapshot.hdr_texels[s.snapshot_tex.mips[0]:][:width * height]
+		frame := frame_map(&s.snapshot_texels, &s.snapshot_levels, width, height, oksl.channel_level_count(width, height), 1)
+		job.capture_into = s.snapshot_texels[:width * height]
 		run_pass(s, active, geos, &job, pool, draw_band, 0, snapshot)
 		job.capture_into = nil
 		// Mipmapped as the GPU's snapshot is (three.js's too).
-		texture_finish(&s.snapshot, &s.snapshot_tex, blit = true)
-		job.snapshot, job.snapshot_tex = light_levels(&s.snapshot, &s.snapshot_tex, &s.snapshot_light), s.snapshot_tex
+		oksl.channel_build_levels(frame)
+		job.snapshot = frame
 		job.keep = true
 	}
 	// The frame's light, resolved by the bands, then its post passes as the
@@ -572,18 +557,28 @@ software_render :: proc(s: ^Software, scene: ^Scene, geos: ^Geometries, shaders:
 }
 
 
-// A mipmapped texture's levels (from its first texel, as `tex` lays them
-// out) as floats, into `out`: a bicubic or trilinear read takes 16 or 8
-// texels, so their half floats are converted once.
+// A frame map (the snapshot, or the reflection's light and runs) as the
+// GPU's frame sampler reads it, linearly and clamped: `layers` of `width x
+// height` light, half floats, with `count` levels, laid out in `texels`
+// (level 0's layers, for the caller to fill, then oksl's layout of the
+// levels above, in `levels`, for channel_build_levels to fill as SDL's
+// GenerateMipmaps does).
 @(private = "file")
-light_levels :: proc(t: ^Textures, tex: ^Texture, out: ^[dynamic][4]f32) -> [][4]f32 {
-	last := tex.levels - 1
-	used := int(tex.mips[last] - tex.first_texel) + int(max(tex.width >> last, 1) * max(tex.height >> last, 1))
-	table_grow_non_zero(out, used)
-	for c, i in t.hdr_texels[tex.first_texel:][:used] {
-		out[i] = from_halves(c)
+frame_map :: proc(texels: ^[dynamic][4]f16, levels: ^Image_Levels, width, height, count, layers: int) -> oksl.Channel_Image {
+	n := width * height * layers
+	above := oksl.channel_levels_bytes(.Rgba16f, 4, width, height, count, layers) / size_of([4]f16)
+	table_grow_non_zero(texels, n + above)
+	oksl.channel_levels_layout(levels[:count - 1], texels[n:][:above], .Rgba16f, 4, width, height, layers)
+	return {
+		format = .Rgba16f,
+		pixels = slice.to_bytes(texels[:n]),
+		width  = width,
+		height = height,
+		layers = layers,
+		filter = .Linear,
+		wrap   = {.Clamp, .Clamp},
+		levels = levels[:count - 1],
 	}
-	return out[:used]
 }
 
 // The frame's depth per pixel from the last `software_render` of a scene
@@ -679,24 +674,17 @@ Frame_Job :: struct {
 	// (Software.mirror_runs), resolved into `capture_runs`.
 	runs:          [][2]f16,
 	capture_runs:  [][4]f16,
-	// The frame's snapshot for the transmissive draws (nil: none): its
-	// levels' light, laid out as `snapshot_tex`.
-	snapshot:      [][4]f32,
-	snapshot_tex:  Texture,
+	// The frame's snapshot for the transmissive draws (no pixels: none).
+	snapshot:      oksl.Channel_Image,
 	// The mirror's pass (`mirror_view`): front faces turn, transmissive
 	// draws see nothing behind them, what is behind `clip` is left out (a
 	// zero plane: nothing), and the frame's pixels are not written.
 	mirrored:      bool,
 	clip:          Vec4,
-	// The frame's reflection for the draws that show it (nil: none): its
-	// levels' light and runs, laid out as `reflection_tex`, its last level,
-	// and its scale (Mirror_View.focal) through an orthographic camera or
-	// not.
-	reflection:    [][4]f32,
-	reflection_runs: [][4]f32,
-	reflection_tex: Texture,
-	reflection_last: f32,
-	reflection_focal: f32,
+	// The frame's reflection for the draws that show it (no pixels: none):
+	// its light (layer 0) and runs (layer 1). Whether the camera is
+	// orthographic.
+	reflection:    oksl.Channel_Image,
 	ortho:         bool,
 	// The pass's variant per draw (Software.program_ids or
 	// mirror_program_ids) and its frame block.

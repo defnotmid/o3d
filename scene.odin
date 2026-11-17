@@ -1831,41 +1831,6 @@ transmission_scale :: proc "contextless" (materials: []Shading_Material, models:
 	}
 }
 
-// A mipmapped frame's (laid out as `tex`) light at uv (rows from the top),
-// bilinear at the two levels around `lod`, as the GPU's frame sampler reads
-// it.
-frame_sample :: proc "contextless" (texels: [][4]f32, tex: ^Texture, uv: Vec2, lod: f32) -> Vec4 {
-	l := clamp(lod, 0, f32(max(int(tex.levels), 1) - 1))
-	l0 := int(math.floor(l))
-	c := frame_level(texels, tex, l0, uv)
-	if f := l - f32(l0); f > 0 {
-		c = linalg.lerp(c, frame_level(texels, tex, l0 + 1, uv), f)
-	}
-	return c
-}
-
-@(private = "file")
-frame_level :: #force_inline proc "contextless" (texels: [][4]f32, tex: ^Texture, level: int, uv: Vec2) -> Vec4 {
-	w, h := int(max(tex.width >> u32(level), 1)), int(max(tex.height >> u32(level), 1))
-	return hdr_tap(texels[tex.mips[level] - tex.first_texel:][:w * h], w, h, uv * Vec2{f32(w), f32(h)})
-}
-
-// A level's bilinear read at texel coordinate q (centres at +0.5, from the
-// top left), clamped at the edges, its weights as the GPU's filter rounds
-// them.
-@(private = "file")
-hdr_tap :: #force_inline proc "contextless" (mip: [][4]f32, w, h: int, q: Vec2) -> Vec4 {
-	p := q - 0.5
-	p0 := linalg.floor(p)
-	wt := linalg.array_cast(linalg.clamp(linalg.array_cast(linalg.round((p - p0) * f32(BILINEAR_SCALE)), i32), 0, BILINEAR_SCALE), f32) * (1.0 / BILINEAR_SCALE)
-	x0, y0 := int(p0.x), int(p0.y)
-	x1, y1 := clamp(x0 + 1, 0, w - 1), clamp(y0 + 1, 0, h - 1)
-	x0, y0 = clamp(x0, 0, w - 1), clamp(y0, 0, h - 1)
-	top := linalg.lerp(mip[y0 * w + x0], mip[y0 * w + x1], wt.x)
-	bottom := linalg.lerp(mip[y1 * w + x0], mip[y1 * w + x1], wt.x)
-	return linalg.lerp(top, bottom, wt.y)
-}
-
 // The scene mirrored in its reflector for a frame (`mirror_view`): the
 // view through the mirror (the camera's times the reflection), the eye's
 // image, the plane (`dot(plane.xyz, p) + plane.w`, how far a point is in
