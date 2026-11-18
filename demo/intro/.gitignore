@@ -1,0 +1,3 @@
+# Renders are never committed (the intro's demo.mp4 included).
+*.mp4
+*.webm

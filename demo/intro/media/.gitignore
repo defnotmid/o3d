@@ -1,0 +1,4 @@
+# The glTF models fetch.sh downloads, and the software renderer's parity
+# clip (README.md): neither is committed.
+*.glb
+*.mp4
