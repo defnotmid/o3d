@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: defnotmid/oksl
-          ref: v0.1.0
+          ref: v0.1.2
           path: oksl
       - uses: actions/checkout@v4
         with:
@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p build
           odin test . -collection:deps=.. -vet -strict-style -out:build/o3d_test
-          # oksl's JIT is x86-64 only; on arm64 both runs take the interpreter.
+          # oksl's JIT covers x86-64 (AVX2) and arm64 (NEON, since v0.1.1).
           odin test . -collection:deps=.. -vet -strict-style -define:OKSL_JIT=false -out:build/o3d_test_vm
 
       - name: Check the SDL_GPU backend, gpu_check, bench and demo
